@@ -35,12 +35,4 @@ pnpm build
 pnpm typecheck
 ```
 
-启动网页或桌面开发环境前，按[协作指南](CONTRIBUTING.md)配置独立的工程库、共享配置目录、导出目录和端口，避免默认设置复用已有工程库。测试使用模拟返回和合成素材。
-
-## 一起开发
-
-先读[协作指南](CONTRIBUTING.md)和[开发说明](docs/DEVELOPMENT.md)，通过 Pull Request 提交改动，并说明验证结果。问题反馈请到 [Daocut Issues](https://github.com/stonele01/Daocut/issues)。
-
-## 许可
-
-源码采用 [MIT 许可证](LICENSE)，分发时须保留版权和许可声明。第三方组件说明见 [THIRD_PARTY_NOTICES.md](packages/daocut/THIRD_PARTY_NOTICES.md)，适用的上游商标声明保留在 [TRADEMARK.md](TRADEMARK.md)。
+启动网页或桌面开发环境前，按[协作指南](CONTRIBUTING.md)配置独立的工程库、共享配置目录、导出目录和端口，避免默认设置复用已有工程库。测试使用模拟返回和合成素
