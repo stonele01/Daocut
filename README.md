@@ -36,7 +36,3 @@ pnpm typecheck
 ```
 
 Before starting Studio or the desktop app, configure a separate project library, shared home, exports directory and port as described in [CONTRIBUTING.md](CONTRIBUTING.md). Development defaults can otherwise reuse an existing project library. Use mock responses and synthetic media for tests.
-
-## Collaboration
-
-Read [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md), then submit a pull request describing the change and its validation. Report bugs through [Daocut issues](https://github.com/stonele01/Daocut/issues).
