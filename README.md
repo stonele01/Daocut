@@ -40,7 +40,3 @@ Before starting Studio or the desktop app, configure a separate project library,
 ## Collaboration
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md), then submit a pull request describing the change and its validation. Report bugs through [Daocut issues](https://github.com/stonele01/Daocut/issues).
-
-## License
-
-The source is [MIT licensed](LICENSE). Retain the copyright and permission notices when redistributing it. Third-party components and notices are documented in [THIRD_PARTY_NOTICES.md](packages/daocut/THIRD_PARTY_NOTICES.md); applicable upstream trademark notices remain in [TRADEMARK.md](TRADEMARK.md).
