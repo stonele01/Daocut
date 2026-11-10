@@ -81,5 +81,3 @@ The core package is in `packages/daocut`. Old project/configuration migration id
 Explain the concrete problem, changed behavior and checks run. Preserve independent drafts, parent films, public results and recovery receipts. Unknown model outcomes or costs must not cause an automatic retry. Keep real media, credentials, local session links and production records out of commits.
 
 Changesets can record a proposed version change, but merging a pull request does not publish to npm or release an installer. Both checked-in package profiles have automatic updates disabled. Company builds receive an update address explicitly; see the [Windows build guide](apps/desktop/scripts/BUILD-DAOCUT.md) and [company release guide](docs/DAOCUT-COMPANY-RELEASE.md). Building or deploying an installer is separate from validating a source change.
-
-Preserve the [license](LICENSE), [third-party notices](packages/daocut/THIRD_PARTY_NOTICES.md) and applicable [trademark notices](TRADEMARK.md). Report bugs through [Daocut issues](https://github.com/stonele01/Daocut/issues); follow [SECURITY.md](SECURITY.md) for vulnerability reports.
