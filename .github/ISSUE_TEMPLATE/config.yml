@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions
+    url: https://github.com/stonele01/Daocut/issues
+    about: Find existing Daocut questions and report issues in this repository.
+  - name: Security vulnerabilities
+    url: https://github.com/stonele01/Daocut/blob/main/SECURITY.md
+    about: Read the reporting guidance before sharing vulnerability details.

@@ -1,0 +1,95 @@
+name: Daocut Windows installer
+# Private source stays in GitHub. An administrator copies the artifacts to the company LAN server.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Must match apps/desktop/package.json in the selected ref
+        required: true
+        type: string
+      updates_url:
+        description: Company HTTPS updates base (empty uses the repository setting)
+        required: false
+        default: ''
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: daocut-windows-release
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 50
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      RELEASE_VERSION: ${{ inputs.version }}
+      UPDATES_URL: ${{ inputs.updates_url || vars.DAOCUT_UPDATES_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure runner-local storage
+        shell: pwsh
+        run: |
+          "npm_config_store_dir=$env:RUNNER_TEMP/pnpm-store" >> $env:GITHUB_ENV
+          "npm_config_cache=$env:RUNNER_TEMP/npm-cache" >> $env:GITHUB_ENV
+      - uses: pnpm/action-setup@v4
+        with:
+          dest: ${{ runner.temp }}/pnpm
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.16.0
+      - name: Verify the selected source version
+        run: node -e "const v=require('./apps/desktop/package.json').version;if(v!==process.env.RELEASE_VERSION)throw new Error('Input version does not match checked-out desktop version '+v)"
+      - name: Install the frozen desktop dependency graph
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Check types and release settings
+        run: |
+          pnpm --filter daocut --filter @daocut/desktop typecheck
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test apps/desktop/scripts/daocut-release-config.test.mjs
+      - name: Build Studio and desktop shell
+        run: pnpm build
+      - name: Prepare pinned FFmpeg and Chromium
+        run: node apps/desktop/scripts/prepare-daocut-runtime.mjs
+      - name: Load the public company profile
+        shell: pwsh
+        env:
+          COMPANY_PROFILE_JSON: ${{ secrets.DAOCUT_COMPANY_PROFILE_JSON || vars.DAOCUT_COMPANY_PROFILE_JSON }}
+        run: |
+          if (-not $env:COMPANY_PROFILE_JSON) { throw 'Set the DAOCUT_COMPANY_PROFILE_JSON repository variable to the company public profile before building an employee release.' }
+          $profilePath = Join-Path $env:GITHUB_WORKSPACE 'apps/desktop/.release/company-profile-input.json'
+          [System.IO.File]::WriteAllText($profilePath, $env:COMPANY_PROFILE_JSON, [System.Text.UTF8Encoding]::new($false))
+      - name: Build the installer without publishing
+        shell: pwsh
+        run: |
+          $profilePath = Join-Path $env:GITHUB_WORKSPACE 'apps/desktop/.release/company-profile-input.json'
+          $buildArgs = @('--nsis', '--work=apps/desktop/.release/ci-win-x64', "--company-profile=$profilePath")
+          if ($env:UPDATES_URL) { $buildArgs += "--updates=$env:UPDATES_URL" }
+          node apps/desktop/scripts/build-daocut.mjs @buildArgs
+      - name: Verify TLS with the packaged Electron runtime
+        shell: pwsh
+        run: |
+          npm --prefix apps/company-service ci --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          @'
+          const { spawnSync } = require('node:child_process');
+          const { resolve } = require('node:path');
+          const result = spawnSync(resolve('apps/desktop/.release/ci-win-x64/out/win-unpacked/Daocut.exe'),
+            ['--test', 'apps/company-service/test/client-tls.test.mjs'], {
+              env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+              stdio: 'inherit', windowsHide: true, timeout: 60000,
+            });
+          if (result.error) throw result.error;
+          process.exit(result.status ?? 1);
+          '@ | node
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Daocut-Windows-${{ inputs.version }}
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            apps/desktop/.release/ci-win-x64/out/*.exe
+            apps/desktop/.release/ci-win-x64/out/*.blockmap
+            apps/desktop/.release/ci-win-x64/out/latest.yml

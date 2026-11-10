@@ -1,0 +1,93 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createCompanyService } from '../src/service.mjs';
+import { createCompanyClient } from '../../desktop/src/company-client.mjs';
+import { createCompanyUsageReporter } from '../../desktop/src/company-usage.mjs';
+import { writeModelLog } from '../../desktop/src/chat-store.mjs';
+
+const root = path.resolve(fileURLToPath(new URL('../../../.release/company-desktop-integration/', import.meta.url)));
+await mkdir(root, { recursive: true });
+
+test('desktop client and receipt outbox integrate with real company service, attachments and restart recovery', async (t) => {
+  const folder = await mkdtemp(path.join(root, 'case-'));
+  const dataDir = path.join(folder, 'service');
+  let service = await createCompanyService({ dataDir, host: '127.0.0.1', port: 0, baseURL: 'http://127.0.0.1:4715' });
+  const reporters = [];
+  t.after(async () => {
+    for (const reporter of reporters) reporter.stop();
+    await service.close();
+    assert.ok(path.resolve(folder).startsWith(`${root}${path.sep}`));
+    await rm(folder, { recursive: true, force: true });
+  });
+  await service.listen();
+  const port = service.server.address().port;
+  const origin = `http://127.0.0.1:${port}`;
+  const request = async (route, body, token) => {
+    const response = await fetch(`${origin}/api/company${route}`, { method: body ? 'POST' : 'GET', headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...(token ? { authorization: `Bearer ${token}` } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
+    return { status: response.status, data: await response.json() };
+  };
+  const admin = { username: 'integration.admin', name: '合成管理员', password: 'Synthetic-Admin-42!' };
+  const employee = { username: 'integration.employee', name: '合成员工', password: 'Synthetic-Employee-42!' };
+  await request('/setup', admin);
+  const adminToken = (await request('/login', admin)).data.token;
+  await request('/users', employee, adminToken);
+  const other = { username: 'integration.other', name: '其他员工', password: 'Synthetic-Other-42!' };
+  await request('/users', other, adminToken);
+  const otherToken = (await request('/login', other)).data.token;
+  const clientDir = path.join(folder, 'client');
+  const client = createCompanyClient({ dataDir: clientDir, appVersion: '0.2.13-integration', allowLoopbackHttp: true });
+  client.configure({ name: '隔离公司', serverUrl: origin, caPem: '' });
+  assert.equal((await client.login(employee)).status, 'signed-in');
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==';
+  const feedback = await client.submitFeedback({ category: 'bug', title: '真实客户端回环测试', description: '仅合成数据', diagnostics: { report: '合成诊断报告', details: '合成详细记录' }, attachments: [{ name: 'tiny.png', mimeType: 'image/png', data: png }] });
+  const id = feedback.feedback.id;
+  assert.equal((await client.feedback()).feedback.length, 1);
+  assert.equal((await client.feedbackDetails(id)).feedback.diagnostics.report, '合成诊断报告');
+  const detail = (await request(`/feedback/${id}`, undefined, adminToken)).data.feedback;
+  assert.equal(detail.diagnostics.details, '合成详细记录');
+  assert.equal((await request(`/feedback/${id}`, undefined, otherToken)).status, 404);
+  const imageUrl = `${origin}/api/company/feedback/${id}/attachments/${detail.attachments[0].id}`;
+  assert.equal((await fetch(imageUrl, { headers: { authorization: `Bearer ${otherToken}` } })).status, 404);
+  const image = await fetch(imageUrl, { headers: { authorization: `Bearer ${adminToken}` } });
+  assert.deepEqual(Buffer.from(await image.arrayBuffer()), Buffer.from(png, 'base64'));
+
+  const project = path.join(folder, 'synthetic-project');
+  const logDir = path.join(project, '.film/logs'); await mkdir(logDir, { recursive: true });
+  const createLog = async (id, input) => {
+    await writeFile(path.join(logDir, `${id}.jsonl`), JSON.stringify({ kind: 'prompt', prompt: 'private synthetic prompt should stay local' }) + '\n');
+    writeModelLog(project, id, [{ kind: 'call', startedAt: Date.parse('2026-10-24T03:00:00Z'), answer: { model: 'deepseek-flash', usage: { input, output: 20, cacheRead: 300, cacheWrite: 0, reasoning: 10 } }, pricing: { currency: 'CNY', input: 1, output: 2, cacheRead: 0.1 } }]);
+  };
+  await createLog('old-unregistered', 999999);
+  const reporterOptions = { dataDir: clientDir, client, appVersion: '0.2.13-integration', retryMs: 0, lateMs: 0 };
+  let reporter = createCompanyUsageReporter(reporterOptions); reporters.push(reporter);
+  const one = reporter.startTurn({ project, turnId: 'new-one', model: 'deepseek-flash' });
+  await createLog('new-one', 100);
+  await reporter.finishTurn(one); await reporter.flush(); await reporter.flush();
+  const usageRoute = '/usage?from=2026-10-24&to=2026-10-24';
+  let usage = (await request(usageRoute, undefined, adminToken)).data;
+  assert.equal(usage.totals.requests, 1);
+  assert.equal(usage.totals.total, 420);
+  assert.equal(usage.totals.incompleteRequests, 0);
+  assert.equal(reporter.state().pending, 0);
+  assert.ok(usage.totals.costs.CNY > 0);
+
+  const two = reporter.startTurn({ project, turnId: 'new-offline', model: 'deepseek-flash' });
+  await createLog('new-offline', 200);
+  await service.close();
+  await reporter.finishTurn(two);
+  assert.equal(reporter.state().pending, 1);
+  reporter.stop();
+  service = await createCompanyService({ dataDir, host: '127.0.0.1', port, baseURL: 'http://127.0.0.1:4715' });
+  await service.listen();
+  assert.equal((await client.refresh()).status, 'signed-in', 'session survives company service restart');
+  reporter = createCompanyUsageReporter(reporterOptions); reporters.push(reporter);
+  await reporter.flush(); await reporter.flush();
+  usage = (await request(usageRoute, undefined, adminToken)).data;
+  assert.equal(usage.totals.requests, 2, 'offline pending receipt posted once after restart');
+  assert.equal(usage.totals.total, 940);
+  assert.equal(reporter.state().pending, 0);
+  assert.equal(JSON.stringify(usage).includes('private synthetic prompt'), false);
+});

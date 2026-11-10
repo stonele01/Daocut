@@ -1,0 +1,35 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { resolve, join } from 'node:path';
+import { createStructureWorkspace } from './structure-workspace.mjs';
+import { filmHtml } from '../../src/film-doc.mjs';
+
+test('only a stored public plan opens a private draft; selection and re-open never rewrite its film', async () => {
+  const base = resolve('../../.tmp/structure-workspace'); await mkdir(base, { recursive: true });
+  const root = await mkdtemp(join(base, 'test-')); await mkdir(join(root, '.film')); await mkdir(join(root, 'assets'));
+  await writeFile(join(root, '.film/id'), 'parent');
+  await writeFile(join(root, 'film.html'), filmHtml({ tracks: [{ clips: [] }] }));
+  await writeFile(join(root, 'assets/source.mp4'), 'synthetic-only');
+  const scope = { sourceId: 's', productId: 'p', intervalId: 'once', startMs: 0, endMs: 10000 };
+  await writeFile(join(root, '.film/product-analysis.json'), JSON.stringify({ version: 1, sources: [{ id: 's', assetPath: 'assets/source.mp4', durationMs: 10000 }], products: [{ id: 'p', name: '合成商品', sourceIds: ['s'] }], intervals: [{ id: 'once', ...scope }], candidates: [] }));
+  const plan = { id: 'plan-a', speed: 1, durationMs: 6000, scope, clips: [{ sourceId: 's', startMs: 0, endMs: 6000, text: '模拟钩子卖点逼单', roles: ['hook', 'core', 'purchase'], coreIds: ['core-a'] }] };
+  const publicPlans = { status: async () => ({ status: 'complete', taskKey: 'shared-key', plans: [plan], context: { ...scope, visibility: 'shared' } }) };
+  const workspace = createStructureWorkspace({ plans: publicPlans, register: async path => ({ id: (await readFile(join(path, '.film/id'), 'utf8')).trim(), path }) });
+  const parent = { id: 'parent', path: root };
+  await assert.rejects(workspace.edit(parent, { ...scope, taskKey: 'shared-key', planId: 'invented', plan }), /公共方案/);
+  const first = await workspace.edit(parent, { ...scope, taskKey: 'shared-key', planId: 'plan-a' });
+  assert.notEqual(first.project.id, parent.id);
+  await writeFile(join(first.project.path, 'film.html'), 'personal-edits');
+  const again = await workspace.edit(parent, { ...scope, taskKey: 'shared-key', planId: 'plan-a' });
+  assert.equal(again.project.id, first.project.id);
+  assert.equal(await readFile(join(first.project.path, 'film.html'), 'utf8'), 'personal-edits');
+  assert.equal((await workspace.select(parent, first.project.id)).activeProjectId, first.project.id);
+  assert.equal((await workspace.read(parent)).activeProjectId, first.project.id);
+  await assert.rejects(workspace.select(parent, 'someone-elses-project'), /草稿/);
+  assert.equal((await workspace.select(parent, null)).activeProjectId, parent.id);
+  await writeFile(join(first.project.path, '.film/id'), 'restored-child-id');
+  assert.equal((await workspace.read(parent)).drafts[0].projectId, 'restored-child-id');
+  assert.equal((await workspace.select(parent, 'restored-child-id')).activeProjectId, 'restored-child-id');
+  assert.equal(await readFile(join(root, 'film.html'), 'utf8'), filmHtml({ tracks: [{ clips: [] }] }));
+});

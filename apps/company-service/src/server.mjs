@@ -1,0 +1,12 @@
+import { readFile } from 'node:fs/promises';
+import { createCompanyService } from './service.mjs';
+const keyFile = process.env.DAOCUT_COMPANY_TLS_KEY;
+const certFile = process.env.DAOCUT_COMPANY_TLS_CERT;
+if (Boolean(keyFile) !== Boolean(certFile)) throw new Error('请同时设置 DAOCUT_COMPANY_TLS_KEY 和 DAOCUT_COMPANY_TLS_CERT');
+const tls = keyFile ? { key: await readFile(keyFile), cert: await readFile(certFile), minVersion: 'TLSv1.2' } : undefined;
+const service = await createCompanyService({ tls });
+await service.listen();
+console.log(`Daocut 公司管理台 ${service.baseURL}`);
+console.log(`数据目录 ${service.dataDir}`);
+console.log('首次运行请在服务器电脑浏览器打开本机地址，设置管理员账号和密码。');
+for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, async () => { await service.close(); process.exit(0); });

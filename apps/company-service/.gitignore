@@ -1,0 +1,6 @@
+*.sqlite
+*.sqlite-*
+*.pem
+auth-secret
+server-config.json
+Daocut-*.json

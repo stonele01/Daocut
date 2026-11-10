@@ -1,0 +1,26 @@
+{
+  "version": "1.0.4",
+  "repository": "https://github.com/stonele01/Daocut",
+  "kind": "workflow",
+  "order": 0,
+  "icon": "scissors",
+  "title": {
+    "en": "Live commerce clips",
+    "zh-CN": "切片",
+    "ja": "ライブコマース切り抜き",
+    "ko": "라이브 커머스 클립",
+    "es": "Clips de venta en directo"
+  },
+  "summary": {
+    "en": "Turn livestream footage into complete sales stories on an editable timeline.",
+    "zh-CN": "按稻田剪辑经验，把直播素材剪成购买逻辑完整的切片，直接放进可编辑时间轴。",
+    "ja": "ライブ配信素材を、購入の流れが伝わる編集可能なタイムラインに。",
+    "ko": "라이브 영상을 구매 흐름이 완성된 편집 가능한 타임라인으로 만듭니다.",
+    "es": "Convierte directos en historias de venta completas en una línea de tiempo editable."
+  },
+  "details": {
+    "zh-CN": "适合：一段或多段同商品直播素材的原话切片。\n完整读取素材并复用已有 ASR，后续只补查变化和疑点、复用已确认结果；尽可能产出全部成立且正文有实质差异的路线，不限制条数。默认每条最终 30–40 秒、1.3 倍速，去掉多余吸气声并保留自然句间停顿；人声尽量响亮均衡，以不爆音失真为限。当前任务另有要求时优先遵守。\n剪好后直接呈现在可编辑时间轴，完成必要预览检查。",
+    "en": "For one or more livestream sources about the same product. Read the complete context and reuse matching transcripts and verified findings; recheck changes and unresolved questions. Produce all supported, meaningfully distinct stories without a fixed count. Default to 30–40 seconds of final playback at 1.3x speed, removing excess breath noise while retaining natural pauses and raising consistent speech levels without clipping or distortion. Follow any explicit task-specific overrides. Finish on an editable timeline with preview checks."
+  },
+  "cover": "cover.png"
+}

@@ -1,0 +1,21 @@
+{
+  "name": "@daocut/company-service",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.15.0"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node --test test/*.test.mjs",
+    "typecheck": "node --check src/server.mjs && node --check src/service.mjs && node --check public/app.js",
+    "setup:lan": "node src/setup-lan.mjs",
+    "start:lan": "node src/start-lan.mjs"
+  },
+  "dependencies": {
+    "better-auth": "1.7.12",
+    "better-sqlite3": "13.0.3",
+    "selfsigned": "5.5.0"
+  }
+}

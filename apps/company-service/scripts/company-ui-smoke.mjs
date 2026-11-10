@@ -1,0 +1,96 @@
+import assert from 'node:assert/strict';
+import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import path from 'node:path';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+import { createCompanyService } from '../src/service.mjs';
+
+const root = fileURLToPath(new URL('../../../', import.meta.url));
+const taskRoot = path.join(root, '.release/company-ui-smoke');
+await mkdir(taskRoot, { recursive: true });
+const dataDir = await mkdtemp(path.join(taskRoot, 'data-'));
+const require = createRequire(path.join(root, 'packages/daocut/package.json'));
+const { chromium } = require('playwright-core');
+const service = await createCompanyService({ dataDir, host: '127.0.0.1', port: 0, baseURL: 'http://127.0.0.1:4715' });
+let browser;
+try {
+  await service.listen();
+  const origin = `http://127.0.0.1:${service.server.address().port}`;
+  const post = async (route, body, token) => {
+    const response = await fetch(`${origin}/api/company${route}`, { method: 'POST', headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body) });
+    const result = await response.json(); assert.ok(response.ok, JSON.stringify(result)); return result;
+  };
+  const admin = { username: 'ui.admin', password: 'Synthetic-UI-Admin-42!', name: '演示管理员' };
+  await post('/setup', admin);
+  const { token } = await post('/login', admin);
+  await post('/users', { username: 'ui.employee', password: 'Synthetic-UI-Employee-42!', name: '演示员工' }, token);
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==';
+  await post('/feedback', { category: 'bug', title: '导出失败 · 合成示例', description: '点击导出后出现错误', diagnostics: { report: '<script>window.badDiagnostic=true</script>\nDaocut 诊断合成数据', details: 'Synthetic detail only' }, attachments: [{ name: '合成截图.png', mimeType: 'image/png', data: png }] }, token);
+  await post('/usage', { events: [{ id: 'synthetic-1', at: new Date().toISOString(), model: 'deepseek-flash', input: 1200, output: 300, cacheRead: 4000, cacheWrite: 0, reasoning: 100, total: 5500, reported: true, incomplete: false }, { id: 'synthetic-missing', at: new Date().toISOString(), model: 'deepseek-flash', input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, total: 0, reported: false, incomplete: true }] }, token);
+  browser = await chromium.launch({ executablePath: process.env.DAOCUT_TEST_BROWSER || 'D:/Daocut/App/resources/runtime/ms-playwright/chromium_headless_shell-1228/chrome-headless-shell-win64/chrome-headless-shell.exe', headless: true });
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1050 } });
+  const screenshot = async (name) => {
+    await page.evaluate(async () => { await Promise.all(document.getAnimations().map((animation) => animation.finished.catch(() => {}))); });
+    await page.screenshot({ path: path.join(taskRoot, name), fullPage: true, animations: 'disabled' });
+  };
+  const errors = []; page.on('pageerror', (error) => errors.push(error.message));
+  await page.goto(`${origin}/admin`);
+  await page.locator('#username').fill(admin.username); await page.locator('#password').fill(admin.password);
+  await page.getByRole('button', { name: '登录', exact: true }).click();
+  await page.locator('tr').filter({ hasText: 'ui.employee' }).locator('[data-action="quota"]').click();
+  await page.locator('#quota-daily').fill('6000'); await page.locator('#quota-monthly').fill('120000');
+  await page.locator('[data-form="quota"] button[type="submit"]').click();
+  await page.locator('.modal-layer').waitFor({ state: 'detached' });
+  await page.locator('[data-tab="usage"]').click();
+  await page.waitForFunction(() => document.querySelector('.stat strong')?.textContent === '5,500');
+  assert.match(await page.locator('.stats').textContent(), /部分统计/);
+  assert.equal(await page.locator('.usage-cost').count(), 0);
+  const employeeQuota = page.locator('.quota-table tr').filter({ hasText: 'ui.employee' });
+  assert.match(await employeeQuota.textContent(), /6,000/); assert.match(await employeeQuota.textContent(), /120,000/);
+  await screenshot('usage-desktop.png');
+  await page.locator('#usage-user').selectOption({ label: '演示员工 · ui.employee' });
+  await page.getByRole('button', { name: '查询', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('.stat strong')?.textContent === '0');
+  assert.match(await page.locator('.workspace').textContent(), /尚未同步/);
+  await page.route('**/api/company/usage?**', (route) => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { message: '合成连接失败' } }) }));
+  await page.getByRole('button', { name: '查询', exact: true }).click();
+  await page.getByRole('alert').filter({ hasText: '合成连接失败' }).waitFor();
+  await page.unroute('**/api/company/usage?**');
+  await page.locator('[data-tab="feedback"]').click();
+  await page.locator('[data-action="feedback-detail"]').click();
+  await page.locator('.diagnostic-modal').waitFor();
+  assert.match(await page.locator('.diagnostic-text').first().textContent(), /<script>/);
+  assert.equal(await page.evaluate(() => window.badDiagnostic), undefined);
+  await page.waitForFunction(() => [...document.querySelectorAll('.feedback-images img')].every((image) => image.complete && image.naturalWidth > 0));
+  await screenshot('feedback-desktop.png');
+  await page.locator('[data-action="close-modal"]').click();
+  await page.locator('[data-action="triage"]').click();
+  await page.locator('#status').selectOption('resolved'); await page.locator('#adminNote').fill('合成验证已解决');
+  await page.getByRole('button', { name: '确认', exact: true }).click();
+  await page.getByText('合成验证已解决', { exact: false }).waitFor();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.locator('[data-tab="usage"]').click();
+  await page.waitForFunction(() => document.querySelector('.stat strong')?.textContent === '0');
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'mobile page does not overflow viewport');
+  await screenshot('usage-mobile.png');
+  await page.getByRole('button', { name: '退出', exact: true }).click();
+  await page.locator('#username').fill('ui.employee'); await page.locator('#password').fill('Synthetic-UI-Employee-42!');
+  await page.getByRole('button', { name: '登录', exact: true }).click();
+  await page.locator('[data-tab="usage"]').click();
+  await page.waitForFunction(() => document.querySelector('.stat strong')?.textContent === '0');
+  assert.equal(await page.locator('#usage-user').count(), 0, 'employees cannot choose another user');
+  assert.equal(await page.locator('[data-action="quota"]').count(), 0, 'employees cannot edit quota');
+  assert.match(await page.locator('.quota-card').first().textContent(), /6,000/); assert.match(await page.locator('.quota-card').last().textContent(), /120,000/);
+  assert.equal(await page.locator('#usage-model option').count(), 1, 'previous admin model options cleared on account switch');
+  assert.deepEqual(errors, []);
+  console.log(JSON.stringify({ ok: true, screenshots: ['usage-desktop.png', 'feedback-desktop.png', 'usage-mobile.png'].map((name) => path.join(taskRoot, name)), checked: ['usage totals and partial marker', 'employee filter and empty sync', 'load error', 'diagnostic escaping', 'image loading', 'admin triage', 'mobile layout', 'real service admin quota save', 'employee own quota display'] }, null, 2));
+  if (process.env.DAOCUT_KEEP_PREVIEW === '1') {
+    await browser.close(); browser = null;
+    console.log(JSON.stringify({ preview: `${origin}/admin`, syntheticUsername: admin.username, syntheticPassword: admin.password }));
+    await new Promise((resolve) => { process.once('SIGINT', resolve); process.once('SIGTERM', resolve); });
+  }
+} finally {
+  await browser?.close(); await service.close();
+  if (!path.resolve(dataDir).startsWith(`${path.resolve(taskRoot)}${path.sep}`)) throw new Error('Unsafe cleanup path');
+  await rm(dataDir, { recursive: true, force: true });
+}

@@ -1,0 +1,51 @@
+/* Shell overlays: company sign-in 100000, cosmetic cold-start intro 100010.
+   The intro never takes focus, makes content inert, or delays app initialization. */
+.launch-intro {
+  position: fixed;
+  inset: 0;
+  z-index: 100010;
+  display: grid;
+  place-items: center;
+  background: radial-gradient(ellipse at 50% 46%, #192433 0%, #11151c 54%);
+  color: #edf1f7;
+  pointer-events: none;
+  user-select: none;
+  contain: layout paint;
+}
+.launch-intro__identity {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  position: relative;
+  top: -2vh;
+  padding-bottom: 1.75rem;
+}
+.launch-intro__mark {
+  display: block;
+  width: 3rem;
+  height: 3.5rem;
+  object-fit: contain;
+  opacity: 0;
+}
+.launch-intro__word {
+  display: block;
+  margin-top: -0.075em;
+  font-family: var(--font-sans, 'Segoe UI', sans-serif);
+  font-size: clamp(2.75rem, 4.5vw, 3.5rem);
+  line-height: 1;
+  font-weight: 550;
+  letter-spacing: -0.055em;
+  opacity: 0;
+}
+.launch-intro__rule {
+  position: absolute;
+  inset-inline: 0;
+  bottom: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, #527eb5 35%, #527eb5 65%, transparent);
+  transform-origin: center;
+  opacity: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .launch-intro { display: none; }
+}

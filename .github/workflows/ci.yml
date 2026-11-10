@@ -1,0 +1,108 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  windows:
+    name: Windows desktop checks
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Configure runner-local storage
+        shell: pwsh
+        run: |
+          "npm_config_store_dir=$env:RUNNER_TEMP/pnpm-store" >> $env:GITHUB_ENV
+          "npm_config_cache=$env:RUNNER_TEMP/npm-cache" >> $env:GITHUB_ENV
+          "COREPACK_HOME=$env:RUNNER_TEMP/corepack" >> $env:GITHUB_ENV
+          "DAOCUT_HOME=$env:RUNNER_TEMP/daocut-test" >> $env:GITHUB_ENV
+          "DAOCUT_SHARED_HOME=$env:RUNNER_TEMP/studio-shared-test" >> $env:GITHUB_ENV
+      - uses: pnpm/action-setup@v4
+        with:
+          # package.json pins pnpm; keep its installation and package store on the runner's work volume.
+          dest: ${{ runner.temp }}/pnpm
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.16.0
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - name: Install the locked desktop workspace
+        # No prepare/build/download hooks: these checks do not launch Electron or render media.
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Check Studio and desktop types
+        run: pnpm --filter daocut --filter @daocut/desktop typecheck
+      - name: Check company access, local work, windows and updates
+        working-directory: apps/desktop
+        run: >-
+          node --test --test-concurrency=1
+          src/company-client.test.mjs src/company-model-save.test.mjs
+          src/local-agents-ipc.test.mjs src/skills-ipc.test.mjs src/flavor.test.mjs
+          src/page-presentation.test.mjs src/window-lifecycle.test.mjs
+          src/update-channel.test.mjs src/update-controller.test.mjs
+          src/update-launch.test.mjs src/update-menu.test.mjs src/update-schedule.test.mjs
+          scripts/daocut-release-config.test.mjs scripts/locked-versions.test.mjs
+      - name: Check Studio authorization without media or model calls
+        run: node --test packages/daocut/studio/server/company-authorize.test.mjs
+      - name: Check LAN publisher files and manifests
+        # The combined publisher/service route test needs both independent installs.
+        # The service job below covers the real HTTP/range/TLS routes; see README.md for the combined local test.
+        run: node --test --test-skip-pattern="published win/x64 feed" apps/desktop/scripts/publish-lan-update.test.mjs
+
+  company-service:
+    name: Company service checks
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      DAOCUT_COMPANY_UPDATES: ''
+    defaults:
+      run:
+        working-directory: apps/company-service
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Configure runner-local storage
+        shell: pwsh
+        run: |
+          "npm_config_cache=$env:RUNNER_TEMP/company-npm-cache" >> $env:GITHUB_ENV
+          "DAOCUT_COMPANY_TEST_ROOT=$env:RUNNER_TEMP/company-service-tests" >> $env:GITHUB_ENV
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.16.0
+          cache: npm
+          cache-dependency-path: apps/company-service/package-lock.json
+      - name: Install the independent locked service
+        # Its native better-sqlite3 addon needs npm's install scripts; no pnpm workspace install in this job.
+        run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm test
+
+  secrets:
+    name: Source secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITLEAKS_VERSION: 8.30.1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install the existing Gitleaks CLI
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar -xz -C "$RUNNER_TEMP" gitleaks
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: Check history with redacted findings
+        run: gitleaks git --config .gitleaks.toml --redact --no-banner .
