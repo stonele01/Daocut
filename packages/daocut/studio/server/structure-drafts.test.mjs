@@ -8,7 +8,7 @@ import { mediaContentHash, prepareMediaReferences } from '../../src/shared-media
 import { readProjectFilm, editProjectFilm } from './film.mjs';
 import { readable, inside } from './files.mjs';
 import { sourceSubtitles, writeSourceSubtitles } from './subtitle-edits.mjs';
-import { readSubtitleStyle, writeSubtitleStyle } from './captions.mjs';
+import { filmCaptions, readSubtitleStyle, writeSubtitleStyle } from './captions.mjs';
 import { FILM_SUBTITLE_DEFAULT } from './film-subtitle.mjs';
 import { patchProjectSettings, readProjectSettings } from './project-settings.mjs';
 import { writeMarkers, readMarkers } from './markers.mjs';
@@ -112,6 +112,51 @@ test('a newer public plan version creates a separate draft and leaves the previo
   assert.notEqual(a.root, b.root); assert.notEqual(await read(a.root, '.film/id'), await read(b.root, '.film/id'));
   assert.equal(await read(a.root, 'film.html'), before);
   assert.equal((await f.make('plan-a')).root, a.root);
+});
+
+test('v2 subranges create 1.3x private films with source-time subtitles and preserve old and edited drafts', async () => {
+  const f = await fixture(), legacy = await f.make('plan-a');
+  const protectedFiles = ['film.html', 'assets/live.mp4', 'assets/live.vtt', '.film/product-analysis.json', '.film/settings.json', '.film/subtitles.json'];
+  const parentBefore = await Promise.all(protectedFiles.map(path => read(f.root, path)));
+  const legacyBefore = await Promise.all(protectedFiles.map(path => read(legacy.root, path).catch(error => error.code)));
+  const plan = { ...f.plan('plan-a'), version: 'ai-structure-plans-v2', speed: 1.3, durationMs: 11000 };
+  const ranges = [[2400, 5000], [11000, 18800], [26000, 29900]];
+  plan.clips = plan.clips.map((clip, index) => ({ ...clip, startMs: ranges[index][0], endMs: ranges[index][1], candidateId: `selected-${index}`, parentCandidateId: `mother-${index}`, cueRange: [index * 2, index * 2 + 1] }));
+  const draft = await ensureStructureDraft(f.root, { parentProjectId: 'parent-project-1', plan });
+  assert.notEqual(draft.root, legacy.root);
+  const film = await readProjectFilm(draft.root), clips = film.value.tracks[0].clips;
+  assert.deepEqual(clips.map(clip => clip.time), [[2.4, 5], [11, 18.8], [26, 29.9]]);
+  assert.deepEqual(clips.map(clip => clip.speed), [1.3, 1.3, 1.3]);
+  assert.deepEqual(clips.map(clip => clip.at ?? 0), [0, 2, 8]);
+  assert.equal(draft.meta.durationMs, 11000);
+  assert.deepEqual(draft.meta.plan.clips.map(clip => clip.parentCandidateId), ['mother-0', 'mother-1', 'mother-2']);
+  assert.equal(await read(draft.root, 'assets/live.vtt'), await read(f.root, 'assets/live.vtt'), 'source subtitle timestamps must not be rewritten for speed');
+  const captions = await filmCaptions(draft.root, { duration: async () => 60 });
+  assert.deepEqual(clips.map(clip => {
+    const cues = captions.cues.filter(cue => cue.clip === clip.id);
+    return [Math.min(...cues.map(cue => cue.startMs)), Math.max(...cues.map(cue => cue.startMs + cue.durMs))];
+  }), [[0, 2000], [2000, 8000], [8000, 11000]], 'caption splitting retains the speed-scaled bounds of each selected source range');
+  const other = await ensureStructureDraft(f.root, { parentProjectId: 'parent-project-1', plan: { ...plan, id: 'plan-b' } });
+  const otherBefore = await read(other.root, 'film.html');
+  await editProjectFilm(draft.root, film.rev, [{ op: 'set', clip: clips[0].id, field: 'time', value: [2.4, 3.7] }, { op: 'set', clip: clips[0].id, field: 'speed', value: 1.5 }, { op: 'move', clip: clips[1].id, at: 4, track: 0 }]);
+  await writeSubtitleStyle(draft.root, { on: false });
+  await patchProjectSettings(draft.root, { fps: 25 });
+  const saved = await read(draft.root, 'film.html');
+  assert.equal((await ensureStructureDraft(f.root, { parentProjectId: 'parent-project-1', plan })).root, draft.root);
+  const code = `import { readProjectFilm } from './studio/server/film.mjs'; import { readProjectSettings } from './studio/server/project-settings.mjs'; import { readSubtitleStyle } from './studio/server/captions.mjs'; console.log(JSON.stringify({film:await readProjectFilm(process.argv[1]),settings:await readProjectSettings(process.argv[1]),style:await readSubtitleStyle(process.argv[1])}));`;
+  const reopened = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', code, draft.root], { cwd: resolve(import.meta.dirname, '../..'), encoding: 'utf8', windowsHide: true }));
+  assert.deepEqual(reopened.film.value, (await readProjectFilm(draft.root)).value);
+  assert.equal(reopened.film.value.tracks[0].clips.find(clip => clip.id === clips[0].id).speed, 1.5);
+  assert.equal(reopened.style.on, false); assert.equal(reopened.settings.fps, 25);
+  assert.equal(await read(draft.root, 'film.html'), saved); assert.equal(await read(other.root, 'film.html'), otherBefore);
+  assert.deepEqual(await Promise.all(protectedFiles.map(path => read(f.root, path))), parentBefore);
+  assert.deepEqual(await Promise.all(protectedFiles.map(path => read(legacy.root, path).catch(error => error.code))), legacyBefore);
+});
+
+test('1.3x draft rejects source-length duration instead of creating a gapped film', async () => {
+  const f = await fixture(), plan = { ...f.plan('bad-fast-duration'), version: 'ai-structure-plans-v2', speed: 1.3 };
+  await assert.rejects(ensureStructureDraft(f.root, { parentProjectId: 'parent-project-1', plan }), /时长/);
+  assert.equal((await listStructureDrafts(f.root)).length, 0);
 });
 
 test('draft creation does not impose a fixed clip-count limit on a valid current-lecture plan', async () => {

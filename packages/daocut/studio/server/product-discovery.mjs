@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
+import { DISCOVER_PRODUCTS_PROMPT } from './approved-prompts.mjs';
 
 export const DISCOVERY_VERSION = 'product-discovery-v1';
-export const DISCOVERY_PROMPT = `你只检查直播转写，没有检查原音或画面。识别完整商品讲解，不将简短提及、闲聊、过渡、混讲当作完整讲解。相同商品返场保留独立范围，不包住中间其他商品。不同规格或套装、证据不足的别名不能强行合并。时间由程序按原片 cue 恢复，只输出输入中的全局 cue 索引。跨窗口可以引用上下文，不能臆造窗口外索引。已知商品只供核对：复用 key 必须同名同规格；不同叫法合并必须给 matchKey、matchEvidence 和 matchReason，规格不明则 identityUncertain:true。所有 evidence 是输入中的 cue 索引。输出 JSON {products:[{key,name,variant:"",aliases:[{name,evidence:[0]}],evidence:[0],identityUncertain:false,matchKey?,matchEvidence?:[0],matchReason?:""}],ranges:[{key:"商品key或null",firstCue:0,lastCue:1,kind:"lecture|mixed|mention|uncertain|transition",reason:"依据",evidence:[0]}],issues:["问题"]}。lecture 才可关联商品，其他内容 key 必须 null。每个范围至少有一句证据。名称不明确或身份存疑可保留待确认商品，但必须说明。不得声称看到了画面或确认了画面内容。`;
+export const PREVIOUS_DISCOVERY_PROMPT = `你只检查直播转写，没有检查原音或画面。识别完整商品讲解，不将简短提及、闲聊、过渡、混讲当作完整讲解。相同商品返场保留独立范围，不包住中间其他商品。不同规格或套装、证据不足的别名不能强行合并。时间由程序按原片 cue 恢复，只输出输入中的全局 cue 索引。跨窗口可以引用上下文，不能臆造窗口外索引。已知商品只供核对：复用 key 必须同名同规格；不同叫法合并必须给 matchKey、matchEvidence 和 matchReason，规格不明则 identityUncertain:true。所有 evidence 是输入中的 cue 索引。输出 JSON {products:[{key,name,variant:"",aliases:[{name,evidence:[0]}],evidence:[0],identityUncertain:false,matchKey?,matchEvidence?:[0],matchReason?:""}],ranges:[{key:"商品key或null",firstCue:0,lastCue:1,kind:"lecture|mixed|mention|uncertain|transition",reason:"依据",evidence:[0]}],issues:["问题"]}。lecture 才可关联商品，其他内容 key 必须 null。每个范围至少有一句证据。名称不明确或身份存疑可保留待确认商品，但必须说明。不得声称看到了画面或确认了画面内容。`;
+export const DISCOVERY_PROMPT = DISCOVER_PRODUCTS_PROMPT;
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const id = (kind, value) => `${kind}-${hash(value).slice(0, 24)}`;
 const text = value => typeof value === 'string' && value.trim().length > 0;

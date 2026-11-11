@@ -22,6 +22,7 @@ async function fixture(t) {
     if (op === 'status') return { task: structuredClone(task ?? null) };
     if (op === 'claim' || op === 'retry') {
       if (task && op === 'claim') return { task: structuredClone(task), acquired: false };
+      if (op === 'retry') assert.equal(body.inputHash, task.inputHash, 'match the company coordinator same-input requirement');
       task = { taskKey: body.taskKey, inputHash: body.inputHash, status: 'claimed', attemptId: `attempt-${++serial}` }; tasks.set(body.taskKey, task); return { task: structuredClone(task), acquired: true };
     }
     assert.equal(body.attemptId, task.attemptId);
@@ -56,6 +57,36 @@ async function fixture(t) {
   const run = async (person, action, extra = {}, ack = {}) => { const workflow = workflows[person], root = roots[person], plan = await workflow.plan(root, { sourceId: 'assets/live.mp4', action, ...extra }); await workflow.execute(root, { confirmed: true, plan, ...ack }); await workflow.wait(root, 'assets/live.mp4'); return plan; };
   return { roots, workflows, make, run, tasks, cues, service, counts: () => ({ asr, text }), setGate: value => { gate = value; }, fail: value => { fail = value; }, asrError: value => { asrError = value; }, review: person => reviewed.set(roots[person], { cues, words: [], localReconciled: true }) };
 }
+test('output budget upgrade can explicitly recover a shared failure and colleagues reuse the completed result', async t => {
+  for (const action of ['discovery', 'analysis']) await t.test(action, async t => {
+    const f = await fixture(t);
+    Object.assign(f.service.text, { endpoint: 'https://api.deepseek.com/responses', maxOutputTokens: 16384, reasoningEffort: 'low' });
+    await f.run(0, 'transcription'); let scope = {};
+    if (action === 'analysis') {
+      await f.run(0, 'discovery');
+      const { analysis } = await readProductAnalysis(f.roots[0]);
+      scope = { productId: analysis.intervals[0].productId, intervalId: analysis.intervals[0].id };
+    }
+    f.fail(true); await f.run(0, action, scope); const before = f.counts();
+    Object.assign(f.service.text, { maxOutputTokens: 32768, outputFormat: 'json_object' });
+    f.workflows[0] = f.make();
+    const plan = await f.workflows[0].plan(f.roots[0], { action, sourceId: 'assets/live.mp4', ...scope, retry: true });
+    assert.equal(plan.shared.mode, 'retry-required'); assert.deepEqual(f.counts(), before);
+    await assert.rejects(f.workflows[0].execute(f.roots[0], { confirmed: true, plan }));
+    assert.deepEqual(f.counts(), before);
+    f.fail(false); await f.run(0, action, { ...scope, retry: true }, { retryAcknowledged: true });
+    assert.equal(f.counts().text, before.text + 1);
+    await f.run(1, 'transcription'); assert.equal((await f.run(1, 'discovery')).shared.mode, 'reuse');
+    if (action === 'analysis') {
+      const { analysis } = await readProductAnalysis(f.roots[1]);
+      const otherScope = { productId: analysis.intervals[0].productId, intervalId: analysis.intervals[0].id };
+      assert.equal((await f.run(1, 'analysis', otherScope)).shared.mode, 'reuse');
+    }
+    assert.equal(f.counts().text, before.text + 1);
+    for (const root of f.roots) assert.equal(await readFile(join(root, 'film.html'), 'utf8'), 'original film');
+  });
+});
+
 test('ordinary three-stage workflow reuses shared first results across projects and preserves A-B-A and private edits', async t => {
   const f = await fixture(t);
   await f.run(0, 'transcription'); await f.run(0, 'discovery');

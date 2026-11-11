@@ -23,7 +23,7 @@ export function studioAnalysisError(error) {
   return { ok: false, error: sharedMessage || (publicModelError ? error.message : '文字服务配置不可用'), code: error.code || 'MODEL_CLIENT_UNAVAILABLE', ...(Number.isInteger(error.httpStatus) ? { httpStatus: error.httpStatus } : {}), ...(error.receipt ? { receipt: error.receipt } : {}) };
 }
 
-export function createStudioAnalysisBridge({ send, subscribe, timeoutMs = 190000, visualTimeoutMs = WAIT_MINUTES * 60000 + 10000 }) {
+export function createStudioAnalysisBridge({ send, subscribe, timeoutMs = 310000, visualTimeoutMs = WAIT_MINUTES * 60000 + 10000 }) {
   let sequence = 0;
   const pending = new Map();
   subscribe(message => {

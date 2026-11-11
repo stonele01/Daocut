@@ -1,11 +1,13 @@
 # Development handoff
 
+Current implementation: **0.2.29**. Read [the current handoff](HANDOFF-0.2.29.md) for the three prompts, legacy-result upgrade entry, validation evidence and remaining acceptance work.
+
 ## Current behavior
 
 - Select one product lecture occurrence. Text analysis and structure composition are separate operations. Do not silently combine returning lectures.
 - Reuse saved public analysis. Completed results are not automatically re-analyzed; uncertain results/costs are not automatically resubmitted.
-- Complete speech units retain necessary contiguous context. Non-purchase units can open a video; one or two selling-point units and a purchase close are required. 30–50 seconds is guidance, with original speed. Current body ordering is unchanged.
-- Enumerate valid plans under the current rules, report incomplete enumeration honestly, and group/display the results. Preview leaves the timeline untouched; editing opens an independent personal draft.
+- AI composition can choose complete continuous cue ranges within longer analyzed units, retaining necessary context. Non-purchase units can open a video; one or two selling-point units and a purchase close are required. New v2 plans use 1.3x playback and a 30–40 second finished duration. Existing v1 plans retain their speed and contents; body ordering rules are unchanged.
+- AI selects the source ranges and order; code validates and deduplicates the returned plans. Do not claim mathematical exhaustion from a model completion flag. Preview leaves the timeline untouched; editing opens an independent personal draft. An explicit new-rules entry preserves old results and reuses a colleague's existing new result before offering a paid request.
 - Each draft preserves its own trimming, order, subtitles and settings. Existing parent films and public baselines are not overwritten by personal edits.
 - Selected plans export using the existing Jianying draft exporter. Personal drafts take priority and each export freezes its own input.
 - Single-product analysis reuses local look sampling and the existing desktop image-capable chat model. Save the raw reply, receipt, product-match/display observations and evidence times for later composition reuse. A sampled still image does not establish continuous action or audio meaning.
@@ -23,7 +25,8 @@ For development and tests, inject mock model/transcription clients and use synth
 - packages/daocut/studio/server/live-analysis.mjs and product-workflow.mjs: analysis, confirmation, recovery and reuse.
 - product-media-review.mjs and product-visual-review.mjs: local sample evidence, model judgment validation and durable records.
 - apps/desktop/src/product-vision-client.mjs and desktop-analysis-service.mjs: existing SDK/model/receipt integration.
-- structure-composition.mjs and structure-plans.mjs: rules, enumeration and shared plan read.
+- approved-prompts.mjs and studio/server/prompts/*.txt: complete reviewed prompts; docs/prompts-review-20261111/*.txt is the test baseline.
+- ai-structure.mjs, ai-structure-ranges.mjs and ai-structure-plans.mjs: AI requests, complete subranges, exact version selection, confirmation and recovery. structure-composition.mjs and structure-plans.mjs retain shared input and legacy validation support.
 - structure-drafts.mjs and structure-workspace.mjs: independent personal drafts.
 - structure-batch-exports.mjs: selected Jianying exports.
 - studio/ui/src/components/ProductVisualReview.tsx, ProductPanel.tsx and StructureWorkspace.tsx: review details, selected lecture and plan/draft UI.

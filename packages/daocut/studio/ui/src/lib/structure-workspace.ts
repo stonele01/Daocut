@@ -3,15 +3,18 @@ import type { ProductVisualReview } from './product-visual-review';
 
 export interface StructureScope { sourceId: string; productId: string; intervalId: string; startMs?: number; endMs?: number }
 export interface StructurePlan {
-  id: string; version?: string | number; scope: StructureScope; durationMs: number; speed: 1; coreIds: string[];
+  id: string; version?: string | number; scope: StructureScope; durationMs: number; speed: 1 | 1.3; coreIds: string[];
   coreLabels?: Record<string, string>; referenceDuration?: string;
-  clips: { sourceId: string; assetPath?: string; startMs: number; endMs: number; text: string; roles: string[]; coreIds: string[] }[];
+  clips: { sourceId: string; assetPath?: string; startMs: number; endMs: number; text: string; roles: string[]; coreIds: string[]; speed?: 1 | 1.3 }[];
 }
 export interface StructurePlansState {
-  status: 'idle' | 'running' | 'complete' | 'publish-pending' | 'busy' | 'unavailable';
+  status: 'idle' | 'running' | 'complete' | 'publish-pending' | 'busy' | 'unavailable' | 'failed';
+  version?: string; currentRulesVersion?: string; savedVersions?: { version: string; taskKey: string }[];
   taskKey?: string; plans: StructurePlan[]; complete?: boolean; materialComplete?: boolean; allValidCombinationsEnumerated?: boolean;
   issues?: { code: string; message: string; candidateId?: string; text?: string; startMs?: number; endMs?: number }[]; stats?: Record<string, number>;
   context?: StructureScope & { visibility: string }; requestCount?: number;
+  generationMethod?: 'ai'; canContinue?: boolean; recoverable?: boolean;
+  confirmation?: { enabled: boolean; id?: string; rulesVersion?: string; message?: string; service?: { model?: string; provider?: string; endpoint?: string }; requestCount?: number; candidateCount?: number; transcriptSegments?: number; continuation?: boolean; visibility?: string };
   mediaReview?: ProductMediaReview;
   mediaReviewOrigin?: 'shared' | 'local';
   visualReview?: ProductVisualReview;
@@ -30,11 +33,19 @@ export function groupStructurePlans<T extends { id: string; coreIds: string[] }>
 export function structureGroupLabel(plan: Pick<StructurePlan, 'coreIds' | 'coreLabels'>): string {
   return [...plan.coreIds].sort().map(id => plan.coreLabels?.[id]?.trim() || id).join('＋');
 }
-export function previewPosition(plan: { clips: { startMs: number; endMs: number }[] }, timeMs: number) {
+type PreviewClip = Pick<StructurePlan['clips'][number], 'startMs' | 'endMs' | 'speed'>;
+type PreviewPlan = { speed?: StructurePlan['speed']; clips: PreviewClip[] };
+export const structureClipSpeed = (plan: Pick<PreviewPlan, 'speed'>, clip: Pick<PreviewClip, 'speed'>) => clip.speed ?? plan.speed ?? 1;
+export const structureSpeedLabel = (plan: Pick<PreviewPlan, 'speed'>) => (plan.speed ?? 1) === 1 ? '原速' : `${plan.speed} 倍速`;
+export const previewClipDuration = (plan: Pick<PreviewPlan, 'speed'>, clip: PreviewClip) => (clip.endMs - clip.startMs) / structureClipSpeed(plan, clip);
+export const previewClipOffset = (plan: PreviewPlan, clipIndex: number) => plan.clips.slice(0, clipIndex).reduce((sum, clip) => sum + previewClipDuration(plan, clip), 0);
+
+/** Sequence time is after playback speed; source boundaries always remain original milliseconds. */
+export function previewPosition(plan: PreviewPlan, timeMs: number) {
   let offsetMs = 0;
   for (let index = 0; index < plan.clips.length; index += 1) {
-    const clip = plan.clips[index]!, duration = clip.endMs - clip.startMs;
-    if (timeMs < offsetMs + duration || index === plan.clips.length - 1) return { index, sourceMs: clip.startMs + Math.max(0, Math.min(duration, timeMs - offsetMs)), offsetMs };
+    const clip = plan.clips[index]!, duration = previewClipDuration(plan, clip);
+    if (timeMs < offsetMs + duration || index === plan.clips.length - 1) return { index, sourceMs: clip.startMs + Math.max(0, Math.min(duration, timeMs - offsetMs)) * structureClipSpeed(plan, clip), offsetMs };
     offsetMs += duration;
   }
   return { index: 0, sourceMs: 0, offsetMs: 0 };

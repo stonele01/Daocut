@@ -54,12 +54,15 @@ test('text execution bridge returns only parsed output and a safe receipt; stale
 
 test('incomplete paid responses retain their safe usage receipt for the persisted task ledger', async t => {
   const f = fixture(t); await f.roster.saveOwnModel(config);
-  const service = createDesktopTextService({ roster: () => f.roster, fetch: async () => new Response(JSON.stringify({ id: 'synthetic-incomplete', status: 'incomplete', usage: { input_tokens: 14, output_tokens: 3, private: 'do-not-copy' } })) });
+  const service = createDesktopTextService({ roster: () => f.roster, fetch: async () => new Response(JSON.stringify({ id: 'synthetic-incomplete', status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, usage: { input_tokens: 14, output_tokens: 3, private: 'do-not-copy' }, output: [{ content: [{ type: 'output_text', text: '{"candidates":[' }] }] })) });
   const expectedConfig = await service({ operation: 'public-config' });
   await assert.rejects(service({ operation: 'execute', expectedConfig, system: 's', input: 't' }), error => {
     assert.equal(error.code, 'MODEL_INCOMPLETE');
     assert.equal(error.receipt.requestId, 'synthetic-incomplete');
     assert.deepEqual(error.receipt.usage, { input_tokens: 14, output_tokens: 3 });
+    assert.equal(error.receipt.rawText, '{"candidates":[');
+    assert.equal(error.receipt.incompleteReason, 'max_output_tokens');
+    assert.ok(!JSON.stringify(error.receipt).includes('do-not-copy'));
     return true;
   });
 });

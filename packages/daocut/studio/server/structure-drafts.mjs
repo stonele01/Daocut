@@ -111,7 +111,7 @@ async function copySmallFile(parent, child, rel, required = false) {
 }
 
 function checkedPlan(plan, analysis) {
-  if (!plan || typeof plan.id !== 'string' || !plan.id || plan.id.length > 300 || !Array.isArray(plan.clips) || !plan.clips.length || plan.speed !== 1) fail('结构方案缺少有效片段或不是原速方案');
+  if (!plan || typeof plan.id !== 'string' || !plan.id || plan.id.length > 300 || !Array.isArray(plan.clips) || !plan.clips.length || ![1, 1.3].includes(plan.speed)) fail('结构方案缺少有效片段或播放速度无效');
   const sourceIds = [...new Set(plan.clips.map(clip => clip.sourceId))];
   if (sourceIds.length !== 1) fail('结构草稿只能使用当前讲解段的原片');
   const source = analysis.sources?.find(item => item.id === sourceIds[0]);
@@ -126,9 +126,9 @@ function checkedPlan(plan, analysis) {
       || !Array.isArray(clip.roles) || !Array.isArray(clip.coreIds)) fail('结构方案片段身份或原话无效');
     return { ...clip, assetPath: source.assetPath };
   });
-  const durationMs = clips.reduce((sum, clip) => sum + clip.endMs - clip.startMs, 0);
+  const durationMs = clips.reduce((sum, clip) => sum + clip.endMs - clip.startMs, 0) / plan.speed;
   if (!Number.isFinite(plan.durationMs) || Math.abs(plan.durationMs - durationMs) > 1) fail('结构方案时长与原片边界不一致');
-  return { source, scope: { sourceId: scope.sourceId, productId: scope.productId, intervalId: scope.id, startMs: scope.startMs, endMs: scope.endMs }, clips, durationMs };
+  return { source, scope: { sourceId: scope.sourceId, productId: scope.productId, intervalId: scope.id, startMs: scope.startMs, endMs: scope.endMs }, clips, speed: plan.speed, durationMs };
 }
 
 /** Caller registers the returned root with openProject; this module never changes the global project list. */
@@ -172,7 +172,7 @@ async function create(parentRoot, parentProjectId, plan) {
   for (const rel of [transcriptPath(source.assetPath), ...(await translationsOf(parent, source.assetPath)).map(language => transcriptPath(source.assetPath, language))]) await copySmallFile(parent, stage, rel);
   let at = 0;
   const film = { stage: structuredClone(parentFilm.value.stage), tracks: [{ clips: checked.clips.map((clip, index) => {
-    const value = { id: `structure-${index + 1}`, src: clip.assetPath, at: at / 1000, time: [clip.startMs / 1000, clip.endMs / 1000], attrs: { 'data-structure-source-id': clip.sourceId, 'data-structure-original-text': clip.text, 'data-structure-roles': clip.roles.join('|'), 'data-structure-core-ids': clip.coreIds.join('|') } };
+    const value = { id: `structure-${index + 1}`, src: clip.assetPath, at: at / (1000 * checked.speed), time: [clip.startMs / 1000, clip.endMs / 1000], speed: checked.speed, attrs: { 'data-structure-source-id': clip.sourceId, 'data-structure-original-text': clip.text, 'data-structure-roles': clip.roles.join('|'), 'data-structure-core-ids': clip.coreIds.join('|') } };
     at += clip.endMs - clip.startMs; return value;
   }) }] };
   await writeFile(join(stage, 'film.html'), filmHtml(film));

@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import { filmHtml } from '../../src/film-doc.mjs';
 import { readProjectFilm } from './film.mjs';
+import { filmCaptions } from './captions.mjs';
 import { ensureStructureDraft, listStructureDrafts } from './structure-drafts.mjs';
 import { captureStructureExport, materializeStructureExport } from './structure-export-snapshot.mjs';
 
@@ -114,6 +115,40 @@ test('another version private draft cannot replace the selected public plan', as
   const f = await fixture(t); await ensureStructureDraft(f.root, { parentProjectId: f.project.id, plan: { ...f.plan, version: 'older' } });
   const captured = await captureStructureExport(f.project, { plan: f.plan, itemRoot: f.item('a') });
   assert.equal(captured.origin, 'public'); assert.equal((await listStructureDrafts(f.root)).length, 1);
+});
+
+test('v2 public subranges freeze at 1.3x without taking an older private draft or altering source subtitles', async t => {
+  const f = await fixture(t), legacy = await ensureStructureDraft(f.root, { parentProjectId: f.project.id, plan: f.plan });
+  const before = await read(f.root, 'film.html'), oldFilm = await read(legacy.root, 'film.html');
+  const plan = { ...f.plan, version: 'ai-structure-plans-v2', speed: 1.3, durationMs: 3000,
+    clips: f.plan.clips.map(clip => ({ ...clip, endMs: clip.startMs + 1300 })) };
+  await fs.writeFile(join(f.root, 'assets/live.vtt'), 'WEBVTT\n\n00:00:01.000 --> 00:00:02.300\n子段钩子\n\n00:00:07.000 --> 00:00:08.300\n子段卖点\n\n00:00:12.000 --> 00:00:13.300\n子段逼单\n');
+  const captured = await captureStructureExport(f.project, { plan, itemRoot: f.item('fast-public') });
+  assert.equal(captured.origin, 'public'); assert.equal(captured.planVersion, 'ai-structure-plans-v2');
+  const clips = (await readProjectFilm(captured.root)).value.tracks[0].clips;
+  assert.deepEqual(clips.map(clip => clip.speed), [1.3, 1.3, 1.3]);
+  assert.deepEqual(clips.map(clip => clip.at ?? 0), [0, 1, 2]);
+  assert.deepEqual(clips.map(clip => clip.time), [[1, 2.3], [7, 8.3], [12, 13.3]]);
+  assert.equal(await read(captured.root, 'assets/live.vtt'), await read(f.root, 'assets/live.vtt'));
+  assert.deepEqual((await filmCaptions(captured.root, { duration: async () => 20 })).cues.map(cue => [cue.startMs, cue.durMs]), [[0, 1000], [1000, 1000], [2000, 1000]]);
+  plan.speed = 1; plan.clips[0].startMs = 1800;
+  assert.deepEqual((await readProjectFilm(captured.root)).value.tracks[0].clips, clips, 'later public changes cannot retime the frozen export');
+  assert.equal(await read(f.root, 'film.html'), before); assert.equal(await read(legacy.root, 'film.html'), oldFilm);
+});
+
+test('v2 private speed and trims are captured verbatim rather than reset from the public plan', async t => {
+  const f = await fixture(t), plan = { ...f.plan, version: 'ai-structure-plans-v2', speed: 1.3, durationMs: 6000 / 1.3 };
+  const draft = await ensureStructureDraft(f.root, { parentProjectId: f.project.id, plan });
+  const edited = filmHtml({ stage: { w: 720, h: 1280 }, tracks: [{ clips: [
+    { id: 'private-second', src: 'assets/live.mp4', at: 0, time: [7.5, 8.8], speed: 1.3 },
+    { id: 'private-first', src: 'assets/live.mp4', at: 1, time: [1.5, 2.5], speed: 2 },
+  ] }] });
+  await fs.writeFile(join(draft.root, 'film.html'), edited);
+  const captured = await captureStructureExport(f.project, { plan, itemRoot: f.item('fast-private') });
+  assert.equal(captured.origin, 'private'); assert.equal(await read(captured.root, 'film.html'), edited);
+  await fs.writeFile(join(draft.root, 'film.html'), filmHtml({ stage: { w: 720, h: 1280 }, tracks: [] }));
+  await materializeStructureExport(captured, { mediaRoot: f.mediaRoot });
+  assert.equal(await read(captured.root, 'film.html'), edited);
 });
 
 test('media changed during copy never publishes its inconsistent bytes', async t => {

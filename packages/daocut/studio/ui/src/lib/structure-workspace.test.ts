@@ -11,6 +11,28 @@ test('preview clock follows a discontiguous source sequence without changing a p
   assert.equal(JSON.stringify(plan), original);
 });
 
+test('1.3x subclip preview maps edited clock to exact original boundaries and keeps old plans at 1x', () => {
+  const plan = { speed: 1.3 as const, clips: [
+    { startMs: 1200, endMs: 3800, speed: 1.3 as const },
+    { startMs: 6400, endMs: 10300, speed: 1.3 as const },
+    { startMs: 16000, endMs: 17300, speed: 1.3 as const },
+  ] };
+  const before = JSON.stringify(plan);
+  assert.deepEqual(previewPosition(plan, 1000), { index: 0, sourceMs: 2500, offsetMs: 0 });
+  assert.deepEqual(previewPosition(plan, 2000), { index: 1, sourceMs: 6400, offsetMs: 2000 });
+  assert.deepEqual(previewPosition(plan, 4000), { index: 1, sourceMs: 9000, offsetMs: 2000 });
+  assert.deepEqual(previewPosition(plan, 5000), { index: 2, sourceMs: 16000, offsetMs: 5000 });
+  assert.deepEqual(previewPosition(plan, 6000), { index: 2, sourceMs: 17300, offsetMs: 5000 });
+  assert.deepEqual(previewPosition(plan, 6500), { index: 2, sourceMs: 17300, offsetMs: 5000 });
+  assert.equal(JSON.stringify(plan), before);
+  assert.deepEqual(previewPosition({ ...plan, speed: 1 as const, clips: plan.clips.map(({ speed, ...clip }) => clip) }, 3000), { index: 1, sourceMs: 6800, offsetMs: 2600 });
+});
+
+test('1.3x plan speed also applies when older serialized clips omit their speed', () => {
+  const plan = { speed: 1.3 as const, clips: [{ startMs: 4000, endMs: 6600 }, { startMs: 8000, endMs: 9300 }] };
+  assert.deepEqual(previewPosition(plan, 2500), { index: 1, sourceMs: 8650, offsetMs: 2000 });
+});
+
 test('grouping preserves different hooks, wording and ordering; never slices the result count', () => {
   const plans = Array.from({ length: 151 }, (_, n) => ({ id: `p${n}`, coreIds: n % 2 ? ['a', 'b'] : ['b', 'a'] }));
   const grouped = groupStructurePlans(plans);

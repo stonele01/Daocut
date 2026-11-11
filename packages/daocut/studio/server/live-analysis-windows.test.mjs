@@ -1,13 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import { spawn } from 'node:child_process';
 import { createLiveAnalysis } from './live-analysis.mjs';
 import { readProductAnalysis, writeProductAnalysis } from './product-analysis.mjs';
-import { TEXT_STRUCTURE_PROMPT, textStructureWindows } from './text-structure.mjs';
+import { createDeepSeekTextClient, TEXT_STRUCTURE_PROMPT, textStructureWindows } from './text-structure.mjs';
+import { createHash } from 'node:crypto';
+import * as textStructureModule from './text-structure.mjs';
 
 const details = { subtypes: [], reason: '模拟原话证据', evidence: ['ASR'], context: '', repetition: '', review: [] };
 const probe = async () => ({ duration: 100 });
@@ -30,7 +31,8 @@ async function finish(route, root) {
   assert.fail('mock windows did not finish');
 }
 async function setup(t) {
-  const root = await mkdtemp(join(tmpdir(), 'daocut-structure-windows-'));
+  const base = resolve(import.meta.dirname, '../../../../.tmp/live-analysis-windows'); await mkdir(base, { recursive: true });
+  const root = await mkdtemp(join(base, 'case-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(join(root, 'assets'));
   await writeFile(join(root, 'assets/a.mp4'), 'synthetic');
@@ -102,6 +104,32 @@ test('changed window policy invalidates completion without resending', async t =
   assert.equal(state.analysis.stale, true); assert.equal(calls, before);
 });
 
+test('output budget upgrade preserves completed windows and retries only after an explicit action', async t => {
+  const c = await setup(t), calls = [];
+  let fail = true;
+  let identity = { provider: 'deepseek', endpoint: 'https://api.deepseek.com/responses', model: 'deepseek-flash', maxOutputTokens: 16384, reasoningEffort: 'low' };
+  const modelClient = async ({ input, expectedIdentity }) => {
+    calls.push(JSON.parse(input).cues[0].text);
+    if (fail && calls.length === 2) throw Object.assign(Error('synthetic cap'), { code: 'MODEL_INCOMPLETE' });
+    if (!fail) assert.equal(expectedIdentity.maxOutputTokens, 32768, 'new requests use the actual new policy');
+    return modelOutput(input);
+  };
+  const options = { ...c.options, modelIdentity: () => identity, modelClient };
+  let route = createLiveAnalysis(options);
+  await request(route, c.root, 'POST'); const failed = await finish(route, c.root);
+  assert.equal(failed.analysis.status, 'failed'); assert.equal(failed.analysis.progress.completedWindows, 1);
+  fail = false; identity = { ...identity, maxOutputTokens: 32768, outputFormat: 'json_object' };
+  route = createLiveAnalysis(options);
+  const state = await route.view(c.root, 's', 'a1', 'a', { lectureOnly: true, startMs: 10000, endMs: 18000 });
+  assert.equal(calls.length, 2); assert.equal(state.analysis.status, 'failed');
+  assert.equal(state.analysis.cacheIdentity, state.analysisPlan.inputIdentity);
+  await request(route, c.root, 'POST', { retryFailed: true, lectureOnly: true, startMs: 10000, endMs: 18000 });
+  const done = await finish(route, c.root);
+  assert.equal(done.analysis.status, 'complete'); assert.equal(done.analysis.progress.resumedWindows, 1);
+  assert.equal(calls.filter(value => value === cues[0].text).length, 1);
+  assert.equal(await readFile(join(c.root, 'film.html'), 'utf8'), 'untouched film fixture');
+});
+
 test('a candidate spanning a window boundary keeps full-source cue indices and absolute times', async t => {
   const c = await setup(t);
   const route = createLiveAnalysis({ ...c.options, modelClient: async ({ input }) => ({ candidates: JSON.parse(input).cues.length > 1 ? [{ firstCue: 0, lastCue: 1, tags: ['卖点'], details }] : [], issues: [] }) });
@@ -167,4 +195,156 @@ test('small sample preserves the exact single request input contract', () => {
   const windows = textStructureWindows({ ...args, cues: sample, rangeStartMs: 0, rangeEndMs: 50000, maxInputBytes: undefined, contextCues: undefined });
   assert.equal(windows.length, 1);
   assert.deepEqual(windows[0].cues, sample);
+});
+
+test('completed provider text survives interruption and explicit resume saves it without another model call', async t => {
+  const c = await setup(t);
+  let calls = 0;
+  const client = createDeepSeekTextClient({ getConfig: async () => ({ baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', apiKey: 'synthetic' }), fetch: async (_url, options) => {
+    calls++;
+    const input = JSON.parse(options.body).input[1].content;
+    return { ok: true, status: 200, json: async () => ({ id: 'synthetic-saved', status: 'completed', output: [{ content: [{ type: 'output_text', text: JSON.stringify(modelOutput(input)) }] }] }) };
+  } });
+  const options = { ...c.options, structureWindowPolicy: { maxInputBytes: 100000, contextCues: 0 } };
+  const interrupted = createLiveAnalysis({ ...options, modelClient: async request => {
+    await client(request);
+    throw Object.assign(Error('simulate interruption after receipt save'), { code: 'MODEL_NETWORK' });
+  } });
+  await request(interrupted, c.root, 'POST');
+  assert.equal((await finish(interrupted, c.root)).analysis.status, 'failed');
+  assert.equal(calls, 1);
+  const reopened = createLiveAnalysis({ ...options, modelClient: () => assert.fail('saved complete response must not be resubmitted') });
+  await request(reopened, c.root);
+  await request(reopened, c.root, 'POST');
+  const done = await finish(reopened, c.root);
+  assert.equal(done.analysis.status, 'complete');
+  assert.equal(done.analysis.progress.requestAttempts, 1);
+  assert.equal((await readProductAnalysis(c.root)).analysis.candidates.length, cues.length + 1);
+  assert.equal(await readFile(join(c.root, 'film.html'), 'utf8'), 'untouched film fixture');
+});
+
+test('explicit retry can replace an unusable completed reply while preserving it; reopen alone cannot resend', async t => {
+  for (const invalid of ['{', '   \n ', 'null', JSON.stringify({ schema: 'complete-speech-v1', candidates: [{ firstCue: 999, lastCue: 999, tags: ['卖点'] }], issues: [] })]) await t.test(invalid === '{' ? 'invalid JSON' : !invalid.trim() ? 'official JSON-mode whitespace-only response' : invalid === 'null' ? 'JSON null' : 'invalid cue reference', async t => {
+    const c = await setup(t);
+    let calls = 0;
+    const client = createDeepSeekTextClient({ getConfig: async () => ({ baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', apiKey: 'synthetic' }), fetch: async (_url, options) => {
+      calls++;
+      const input = JSON.parse(options.body).input[1].content;
+      return { ok: true, status: 200, json: async () => ({ id: `synthetic-${calls}`, status: 'completed', output: [{ content: [{ type: 'output_text', text: calls === 1 ? invalid : JSON.stringify(modelOutput(input)) }] }] }) };
+    } });
+    const options = { ...c.options, structureWindowPolicy: { maxInputBytes: 100000, contextCues: 0 }, modelClient: client };
+    const first = createLiveAnalysis(options);
+    await request(first, c.root, 'POST');
+    assert.equal((await finish(first, c.root)).analysis.status, 'failed');
+    const reopened = createLiveAnalysis(options);
+    await request(reopened, c.root);
+    assert.equal(calls, 1);
+    const scope = { startMs: 10000, endMs: 18000, lectureOnly: true };
+    await assert.rejects(request(reopened, c.root, 'POST', scope), { status: 409 });
+    assert.equal(calls, 1, 'a retry without explicit acknowledgement remains blocked');
+    await request(reopened, c.root, 'POST', { ...scope, retryFailed: true });
+    const done = await finish(reopened, c.root);
+    assert.equal(done.analysis.status, 'complete');
+    assert.equal(calls, 2, 'only an explicit retry replaces a result that cannot be recovered');
+    const stateFile = join(c.root, '.film/live-analysis', `${createHash('sha256').update('s').digest('hex')}.json`);
+    const saved = JSON.parse(await readFile(stateFile, 'utf8'));
+    const window = Object.values(saved.attempts)[0].windows[0];
+    assert.equal(window.previousReceipts[0].rawText, invalid);
+    assert.equal(await readFile(join(c.root, 'film.html'), 'utf8'), 'untouched film fixture');
+  });
+});
+
+test('approved full prompt resumes old windows with their previous compatible prompt after an explicit retry', async t => {
+  const c = await setup(t), legacy = textStructureModule.LEGACY_TEXT_STRUCTURE_PROMPT ?? TEXT_STRUCTURE_PROMPT;
+  let fail = true; const calls = [];
+  const modelClient = async ({ input, system }) => {
+    calls.push({ first: JSON.parse(input).cues[0].text, system });
+    if (fail && calls.length === 2) throw Object.assign(Error('synthetic output exhaustion'), { code: 'MODEL_INCOMPLETE' });
+    return modelOutput(input);
+  };
+  const options = { ...c.options, modelClient, structureWindowPolicy: { maxInputBytes: Buffer.byteLength(legacy) + 1700, contextCues: 1 } };
+  const old = createLiveAnalysis({ ...options, structurePrompt: legacy });
+  await request(old, c.root, 'POST'); assert.equal((await finish(old, c.root)).analysis.progress.completedWindows, 1);
+  const journal = join(c.root, '.film/live-analysis', `${createHash('sha256').update('s').digest('hex')}.json`);
+  const oldState = JSON.parse(await readFile(journal, 'utf8'));
+  for (const attempt of Object.values(oldState.attempts)) delete attempt.prompt;
+  await writeFile(journal, JSON.stringify(oldState)); // actual pre-upgrade journals did not save the prompt text
+  fail = false; const reopened = createLiveAnalysis(options);
+  await request(reopened, c.root); assert.equal(calls.length, 2);
+  await request(reopened, c.root, 'POST', { retryFailed: true, lectureOnly: true, startMs: 10000, endMs: 18000 });
+  const done = await finish(reopened, c.root);
+  assert.equal(done.analysis.status, 'complete'); assert.equal(done.analysis.progress.resumedWindows, 1);
+  assert.equal(calls.filter(value => value.first === cues[0].text).length, 1);
+  assert.ok(calls.slice(2).every(value => value.system === legacy), 'resuming a paid attempt preserves the exact prompt recorded for that attempt');
+  assert.equal(await readFile(join(c.root, 'film.html'), 'utf8'), 'untouched film fixture');
+});
+
+test('full prompt migration recovers a completed previous-prompt receipt without any additional request', async t => {
+  const c = await setup(t), previous = textStructureModule.PREVIOUS_TEXT_STRUCTURE_PROMPT;
+  assert.equal(typeof previous, 'string'); assert.notEqual(previous, TEXT_STRUCTURE_PROMPT);
+  let calls = 0;
+  const client = createDeepSeekTextClient({ getConfig: async () => ({ baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', apiKey: 'synthetic' }), fetch: async (_url, options) => {
+    calls++;
+    const body = JSON.parse(options.body); assert.equal(body.input[0].content, previous);
+    return { ok: true, status: 200, json: async () => ({ id: 'saved-before-prompt-upgrade', status: 'completed', output: [{ content: [{ type: 'output_text', text: JSON.stringify(modelOutput(body.input[1].content)) }] }] }) };
+  } });
+  const options = { ...c.options, structureWindowPolicy: { maxInputBytes: 100000, contextCues: 0 } };
+  const old = createLiveAnalysis({ ...options, structurePrompt: previous, modelClient: async request => {
+    await client(request); throw Object.assign(Error('interrupt after receipt'), { code: 'MODEL_NETWORK' });
+  } });
+  await request(old, c.root, 'POST'); const failed = await finish(old, c.root);
+  assert.equal(failed.analysis.status, 'failed'); assert.equal(calls, 1);
+  const stateFile = join(c.root, '.film/live-analysis', `${createHash('sha256').update('s').digest('hex')}.json`);
+  const oldState = JSON.parse(await readFile(stateFile, 'utf8'));
+  for (const attempt of Object.values(oldState.attempts)) delete attempt.prompt;
+  await writeFile(stateFile, JSON.stringify(oldState));
+  const before = await readFile(stateFile, 'utf8');
+  const reopened = createLiveAnalysis({ ...options, modelClient: () => assert.fail('the stored paid response must be recovered with its original prompt') });
+  const selected = { lectureOnly: true, startMs: 10000, endMs: 18000 };
+  const state = await reopened.view(c.root, 's', 'a1', 'a', selected);
+  assert.equal(state.analysis.status, 'failed'); assert.equal(state.analysisPlan.inputIdentity, failed.analysis.cacheIdentity);
+  assert.equal(await readFile(stateFile, 'utf8'), before, 'read-only inspection must not rewrite receipts');
+  await assert.rejects(request(reopened, c.root, 'POST', selected), { status: 409 });
+  await request(reopened, c.root, 'POST', { ...selected, retryFailed: true, expectedInputIdentity: state.analysisPlan.inputIdentity });
+  const done = await finish(reopened, c.root);
+  assert.equal(done.analysis.status, 'complete'); assert.equal(done.analysis.stale, false);
+  assert.equal(done.analysis.cacheIdentity, failed.analysis.cacheIdentity);
+  assert.equal(done.analysis.attemptId, failed.analysis.attemptId);
+  assert.equal(done.analysis.progress.requestAttempts, 1); assert.equal(calls, 1);
+  const saved = JSON.parse(await readFile(stateFile, 'utf8'));
+  assert.equal(saved.attempts[done.analysis.attemptId].windows[0].recoveredFromResponse, true);
+  assert.equal(await readFile(join(c.root, 'film.html'), 'utf8'), 'untouched film fixture');
+});
+
+test('output-limit diagnosis survives reopen, retains partial text and reads old receipts without resubmitting', async t => {
+  const c = await setup(t);
+  let calls = 0;
+  const client = createDeepSeekTextClient({ getConfig: async () => ({ baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', apiKey: 'synthetic' }), fetch: async () => {
+    calls++;
+    return { ok: true, status: 200, json: async () => ({ id: 'synthetic-limit', status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, usage: { output_tokens: 16384 }, output: [{ content: [{ type: 'output_text', text: '{"candidates":[' }] }] }) };
+  } });
+  const route = createLiveAnalysis({ ...c.options, modelClient: client });
+  await request(route, c.root, 'POST');
+  const failed = await finish(route, c.root);
+  assert.match(failed.analysis.error, /达到输出上限.*思考.*标签/);
+  const stateFile = join(c.root, '.film/live-analysis', `${createHash('sha256').update('s').digest('hex')}.json`);
+  const state = JSON.parse(await readFile(stateFile, 'utf8'));
+  const receipt = Object.values(state.attempts)[0].windows[0].receipt;
+  assert.equal(receipt.rawText, '{"candidates":[');
+  for (const field of ['rawText', 'rawTextSha256', 'inputSha256', 'responseVersion', 'maxOutputTokens', 'incompleteReason']) delete receipt[field];
+  state.analyses.a1.error = '模型响应未完成或达到输出上限';
+  await writeFile(stateFile, JSON.stringify(state));
+  const before = await readFile(stateFile, 'utf8');
+  const reopened = createLiveAnalysis({ ...c.options, modelClient: client });
+  assert.match((await request(reopened, c.root)).analysis.error, /达到输出上限.*思考.*标签/);
+  assert.equal(await readFile(stateFile, 'utf8'), before);
+  assert.equal(calls, 1);
+  assert.equal((await readProductAnalysis(c.root)).analysis.candidates.length, 0);
+  await request(reopened, c.root, 'POST');
+  assert.equal((await finish(reopened, c.root)).analysis.status, 'failed');
+  const retried = JSON.parse(await readFile(stateFile, 'utf8'));
+  const window = Object.values(retried.attempts)[0].windows[0];
+  assert.deepEqual(window.previousReceipts, [receipt], 'an explicitly approved retry retains the prior paid receipt');
+  assert.equal(window.receipt.rawText, '{"candidates":[');
+  assert.equal(calls, 2, 'only the explicit retry submits one additional request');
 });

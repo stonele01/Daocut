@@ -1,4 +1,5 @@
 import React from 'react';
+import { createPortal } from 'react-dom';
 import { api, type ProductWorkflowPlan, type ProductWorkflowRequest } from '@/api';
 import { sourceTime } from '@/lib/product-analysis';
 
@@ -20,6 +21,13 @@ export function ProductWorkflowConfirmation({ projectId, request, onDone, onClos
   const currentKey = React.useRef(executionKey); currentKey.current = executionKey;
   const mounted = React.useRef(true);
   const submitted = React.useRef(false);
+  const dialog = React.useRef<HTMLDivElement>(null);
+  const cancel = React.useRef<HTMLButtonElement>(null);
+  React.useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    cancel.current?.focus();
+    return () => { previous?.focus?.(); };
+  }, []);
   React.useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   React.useEffect(() => {
     let active = true;
@@ -55,38 +63,53 @@ export function ProductWorkflowConfirmation({ projectId, request, onDone, onClos
   const displayedService = sharedReuse ? plan.shared?.result?.service : plan?.service;
   const visualRequests = plan?.visual?.requestCount ?? 0;
   const textRequests = plan?.requestCount == null ? null : Math.max(0, plan.requestCount - visualRequests);
-  return <div role="dialog" aria-label={`确认${label}`} className="mt-2 space-y-2 rounded border border-[var(--accent)]/40 p-2 text-[11px] animate-in fade-in duration-150">
-    {preparingProducts && request.action !== 'analysis' && <p>{request.action === 'transcription' ? '拆商品 · 第 1 步：转写直播。完成后点“继续拆商品”，再单独确认下一步。' : '拆商品 · 第 2 步：识别商品。完成后选择商品段分析话术。'}</p>}
+  return createPortal(<div className="fixed inset-0 z-[10100] flex items-center justify-center bg-black/45 p-4 backdrop-blur-[2px] animate-in fade-in duration-150">
+    <div ref={dialog} role="dialog" aria-modal="true" aria-label={`确认${label}`} className="flex max-h-[min(80vh,36rem)] w-full max-w-[420px] flex-col overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--dock-pane)] text-[12px] text-[var(--text)] shadow-xl animate-in fade-in zoom-in-95 duration-150" onKeyDown={event => {
+      if (event.key === 'Escape' && !busy) { event.stopPropagation(); onClose(); }
+      if (event.key !== 'Tab') return;
+      const nodes = Array.from(dialog.current?.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),summary') ?? []);
+      if (event.shiftKey && document.activeElement === nodes[0]) { event.preventDefault(); nodes.at(-1)?.focus(); }
+      else if (!event.shiftKey && document.activeElement === nodes.at(-1)) { event.preventDefault(); nodes[0]?.focus(); }
+    }}>
+    <div className="min-h-0 space-y-3 overflow-y-auto p-4">
+    <strong className="block text-[15px]">{preparingProducts && request.action !== 'analysis' ? request.action === 'transcription' ? '转写直播' : '识别商品' : `确认${label}`}</strong>
     {!plan && !error && <p>正在读取请求计划…</p>}
     {plan && <>
       {plan.newVersion && <p>{plan.cached ? '已有新版结果，本次不重复请求；当前工程继续使用原版本，请在版本列表中手动采用。' : '本次将生成新的共享版本，需要新请求；当前工程继续使用原版本，完成后由你决定是否采用。'}</p>}
-      <p>{reviewBlocked ? '分段音频已经处理完成，接缝需原分析者在本机核对。本次不能再次转写，也不代表共享结果已完成。' : publishOnly ? '分析结果已在本机保存，本次只补存共享文件，不请求模型。' : sharedBusy ? '其他人已领取此任务，本次不会重复发送。' : plan.shared?.mode === 'reuse' ? '使用已保存的共享版本，本次不请求模型。人工修改只留本机。' : plan.cached ? '已有有效结果，本次不请求模型。' : request.action === 'transcription' ? '仅发送原片音轨进行转写；完成后等待单独确认文字拆品。' : visualRequests > 0 ? '发送本次讲解的转写原话、原片时间和识别指令；另将本讲解抽帧与对应原话发送给看图模型，不发送原音。' : '仅发送转写文字、原片时间和识别指令，不发送音频或画面。'}</p>
+      <p>{reviewBlocked ? '分段已完成，待核对字幕接缝，无需重新转写。' : publishOnly ? '仅补存共享结果，不请求模型。' : sharedBusy ? '同事正在处理，等待共享结果。' : sharedReuse ? '复用共享结果，不请求模型。' : plan.cached ? '复用已保存结果，不请求模型。' : request.action === 'transcription' ? '发送本段音频转成文字，完成后由你选择下一步。' : visualRequests > 0 ? '分析所选讲解的文字，并发送抽帧进行看图核查。' : '仅发送转写文字、时间和识别指令。'}</p>
       {plan.shared?.reason && <p>{plan.shared.reason}</p>}
-      {plan.shared?.mode === 'publish' && <p>取得共享任务后才开始分析；首个完成的 AI 结果供同事复用。</p>}
-      {plan.shared?.result && <p className="break-all text-[var(--text-muted)]">共享版本标识：{plan.shared.result.sha256.slice(0, 12)}{plan.shared.result.service?.model ? ` · 原分析模型 ${plan.shared.result.service.model}` : ''}</p>}
       <p className="break-all">素材：{plan.source.assetPath}</p>
       <p>范围：{sourceTime(from)} – {sourceTime(to)}</p>
       <p>服务：{displayedService?.name || displayedService?.provider || (sharedReuse ? '旧结果未记录' : '未配置')} · {displayedService?.model || (sharedReuse ? '旧结果未记录' : '未配置')}</p>
-      <p className="break-all">{sharedReuse ? '原发送至' : '发送至'}：{displayedService?.endpoint || (sharedReuse ? '旧结果未记录' : '未配置')}</p>
-      <p>预计新增请求：{plan.requestCount ?? '尚无法确定'} 次 · 复用已完成 {plan.reusedRequests} 段</p>
+      <p>新增请求 {plan.requestCount ?? '待确定'} 次{plan.reusedRequests > 0 ? ` · 复用 ${plan.reusedRequests} 段` : ''}</p>
       {request.action === 'analysis' && plan.visual && <>
         <p>其中：文字分析 {textRequests ?? '尚无法确定'} 次 ＋ AI 看图 {visualRequests} 次</p>
-        {visualRequests > 0 && <><p>看图服务：{plan.visual.name || plan.visual.provider || '未配置'} · {plan.visual.model || '未配置'} · 最多 {plan.visual.maxImages} 张拼图</p><p className="break-all">画面发送至：{plan.visual.endpoint || '未配置'}</p><p>AI 看图请求可能计费，费用以服务账单为准。仅核查抽帧，不代表已核实连续动作或原音。</p></>}
+        {visualRequests > 0 && <p>看图：{plan.visual.name || plan.visual.provider || '未配置'} · {plan.visual.model || '未配置'}</p>}
         {!plan.visual.enabled && !plan.cached && !sharedReuse && <p>AI 看图未配置：本次只做文字分析，画面仍待核查。{plan.visual.error}</p>}
       </>}
-      {plan.transcriptSegments != null && <p>转写文字：{plan.transcriptSegments} 条</p>}
-      {!!plan.audioSegments?.length && <details><summary className="cursor-pointer">音频发送范围 · {plan.audioSegments.length} 段</summary>{plan.audioSegments.map((range, index) => <p key={index}>{sourceTime(range.startMs)} – {sourceTime(range.endMs)}</p>)}</details>}
-      <p>{plan.cost.basis}</p>
-      {!plan.cached && !publishOnly && !sharedBusy && plan.cost.uncertain && <p>费用暂不能准确估算，实际以服务账单为准。</p>}
+      {!plan.cached && !publishOnly && !sharedBusy && plan.cost.uncertain && <p className="text-[var(--text-muted)]">本次请求可能计费，费用以服务账单为准。</p>}
       {plan.rerun && !plan.cached && !publishOnly && <p>本次重新分析会产生新请求；人工修正和取用修改保留。</p>}
       {plan.retryRequired && !reviewBlocked && <label className="flex items-start gap-2"><input type="checkbox" aria-label="已核查服务记录，确认显式重试" checked={reviewed} onChange={event => setReviewed(event.target.checked)} />已核查服务记录，确认重试未完成部分，可能再次计费</label>}
       {(plan.error || (!plan.enabled && !plan.cached && !publishOnly && !sharedBusy && !reviewBlocked)) && <p role="alert" className="text-red-400">{plan.error || plan.service.error || '请先在设置中配置此服务。已有结果仍保留。'}</p>}
+      <details aria-label="请求详情" className="text-[var(--text-muted)]">
+        <summary className="cursor-pointer transition-colors hover:text-[var(--accent)]">请求与费用详情</summary>
+        <div className="mt-2 space-y-2 animate-in fade-in slide-in-from-top-1 duration-150">
+          <p className="break-all">{sharedReuse ? '原发送至' : '发送至'}：{displayedService?.endpoint || (sharedReuse ? '旧结果未记录' : '未配置')}</p>
+          {plan.transcriptSegments != null && <p>转写文字：{plan.transcriptSegments} 条</p>}
+          {!!plan.audioSegments?.length && <div>音频范围 · {plan.audioSegments.length} 段{plan.audioSegments.map((range, index) => <p key={index}>{sourceTime(range.startMs)} – {sourceTime(range.endMs)}</p>)}</div>}
+          {visualRequests > 0 && plan.visual && <><p className="break-all">画面发送至：{plan.visual.endpoint || '未配置'}</p><p>最多 {plan.visual.maxImages} 张抽帧拼图；不代表已核实连续动作或原音。</p></>}
+          <p>{plan.cost.basis}</p>
+          {plan.shared?.mode === 'publish' && <p>首次分析结果供同事复用。</p>}
+          {plan.shared?.result && <p>共享版本：{plan.shared.result.sha256.slice(0, 12)}</p>}
+        </div>
+      </details>
     </>}
     {error && <p role="alert" className="text-red-400">{error}</p>}
-    <div className="flex gap-1">
-      <button type="button" className={button} disabled={disabled} onClick={() => void execute()}>{reviewBlocked ? '等待接缝核对' : sharedBusy ? '等待共享结果' : publishOnly ? '仅重试保存共享结果' : plan?.shared?.mode === 'reuse' ? '使用共享版本' : plan?.cached ? '使用已保存结果' : `确认${label}`}</button>
-      <button type="button" className={button} disabled={busy} onClick={onClose}>{error ? '返回任务状态' : '取消'}</button>
+    </div>
+    <div className="flex shrink-0 flex-wrap gap-2 border-t border-[var(--border)] bg-[var(--dock-pane)] p-4">
+      <button type="button" className={`${button} min-h-9 flex-1 bg-[var(--accent)]/20 text-[var(--text)]`} disabled={disabled} onClick={() => void execute()}>{reviewBlocked ? '等待接缝核对' : sharedBusy ? '等待共享结果' : publishOnly ? '仅重试保存共享结果' : plan?.shared?.mode === 'reuse' ? '使用共享版本' : plan?.cached ? '使用已保存结果' : `确认${label}`}</button>
+      <button ref={cancel} type="button" className={`${button} min-h-9 px-4`} disabled={busy} onClick={onClose}>{error ? '返回任务状态' : '取消'}</button>
       {(error || sharedBusy) && !busy && <button type="button" className={button} onClick={() => setTick(value => value + 1)}>重新读取计划</button>}
     </div>
-  </div>;
+  </div></div>, document.body);
 }

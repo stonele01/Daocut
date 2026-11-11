@@ -827,6 +827,7 @@ export function ProjectView({ projectId, onProject, onLeave, structure }: {
     setInspectorOpen(true);
   }, []);
   const pickMedia = React.useCallback((file: WorkspaceResource | null) => {
+    structure?.onClosePreview();
     setPickedMedia(file);
     setSelectedCandidateId(null);
     setSourceSeek(null);
@@ -838,7 +839,12 @@ export function ProjectView({ projectId, onProject, onLeave, structure }: {
     setPickedSaved(false);
     if (file) { setInspectorContent(file); if (!studioHost?.panel) setInspectorOpen(true); }
     else setInspectorContent((c) => (typeof c === 'object' ? 'selection' : c));
-  }, [listing, sourceFile]);
+  }, [listing, sourceFile, structure?.onClosePreview]);
+  const activateFilmTimeline = () => {
+    setBarAt('timeline');
+    structure?.onClosePreview();
+    if (pickedMedia) pickMedia(null);
+  };
   const onTimelineSelected = React.useCallback((ids: readonly string[]) => {
     setSelectedKeys(blocksRef.current.filter((b) => ids.includes(b.id)).map((b) => b.clipId ?? b.id));
     setPickedTransition(null);
@@ -2839,6 +2845,8 @@ export function ProjectView({ projectId, onProject, onLeave, structure }: {
     if (keyTarget?.closest?.('[data-timeline-scope="source"]')
       || document.activeElement?.closest?.('[data-timeline-scope="source"]')) return;
     if (referKeysRef.current(event)) return;
+    // A public plan has its own player. Shortcuts must not edit/play the film hidden behind it.
+    if (structure?.preview) return;
     const el = event.target as HTMLElement | null;
     const cmd = keyAction(event);
     if (cmd === 'undo' || cmd === 'redo') {
@@ -3304,7 +3312,7 @@ export function ProjectView({ projectId, onProject, onLeave, structure }: {
                     if (!picked || !block) return;
                     void onImport([picked], 'assets', () => {}).then(([landed]) => relinkBlock(block, landed ?? `assets/${picked.name}`), (err: Error) => toast.show(err.message));
                   }} />
-                {structure?.preview && <StructurePlanPreview key={structure.preview.id} plan={structure.preview} folder={structure.previewFolder} onClose={structure.onClosePreview} />}
+                {structure?.preview && <StructurePlanPreview key={structure.preview.id} plan={structure.preview} folder={structure.previewFolder} seekRequest={structure.previewRequest} onClose={structure.onClosePreview} />}
                 {pickedMedia && !structure?.preview ? (
                   <div className="absolute inset-x-0 bottom-0 top-8 z-20">
                     {/* a bundle of Saved plays its page as its clip had it; any other bundle shows its picture */}
@@ -3573,7 +3581,7 @@ export function ProjectView({ projectId, onProject, onLeave, structure }: {
               <div className={`${PANE} shrink-0 bg-[var(--dock-pane)]`} style={{ height: timelineShownHeight }}>
                 <div className="absolute inset-x-0 top-0 h-7 px-3 pt-1.5 text-[11px] font-medium text-[var(--text-muted)]">成片时间轴</div>
                 <div className="absolute inset-x-0 bottom-0 top-7 flex min-h-0 min-w-0 flex-col" data-timeline-scope="main" style={{ right: METERS_W }}
-                  onPointerDownCapture={() => { setBarAt('timeline'); if (pickedMedia) pickMedia(null); }}>
+                  onPointerDownCapture={activateFilmTimeline} onFocusCapture={activateFilmTimeline} onDropCapture={activateFilmTimeline}>
                   <Timeline
                     blockMenuExtra={timelineMenuExtra}
                     chat={timelineChat}

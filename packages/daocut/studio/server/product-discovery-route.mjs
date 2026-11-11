@@ -6,7 +6,8 @@ import { probe } from './derived.mjs';
 import { HttpError, json, readJson } from './http.mjs';
 import { readProductAnalysis, recordProductEdit, updateProductAnalysis, validateProductAnalysis } from './product-analysis.mjs';
 import { productSourcePath, readProductTranscript } from './product-transcription.mjs';
-import { DISCOVERY_PROMPT, DISCOVERY_VERSION, discoverProducts, discoveryWindows, validateDiscoveryCues } from './product-discovery.mjs';
+import { DISCOVERY_PROMPT, PREVIOUS_DISCOVERY_PROMPT, DISCOVERY_VERSION, discoverProducts, discoveryWindows, validateDiscoveryCues } from './product-discovery.mjs';
+import { textResultCacheIdentity } from './text-structure.mjs';
 
 const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).filter(key => value[key] !== undefined).sort().map(key => [key, canonical(value[key])])) : value;
 const hash = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
@@ -14,6 +15,9 @@ const pathFor = (root, sourceId) => join(root, '.film', 'product-discovery', `${
 const effectiveHash = analysis => hash({ sources: analysis.sources, products: analysis.products, intervals: analysis.intervals, scopes: analysis.scopes ?? [], unassigned: analysis.unassigned ?? [] });
 const currentFor = (analysis, sourceId) => ({ products: analysis.products.filter(p => p.sourceIds.includes(sourceId)), intervals: analysis.intervals.filter(i => i.sourceId === sourceId) });
 const hasLocalResults = (analysis, sourceId) => analysis.intervals.some(i => i.sourceId === sourceId) || (analysis.manualEdits ?? []).some(edit => edit.action === 'manual-save' && edit.sourceIds.includes(sourceId));
+// Reuse completed, known older judgments without pretending that a new paid
+// request uses the same rules. Incomplete windows never cross prompt versions.
+const savedInputMatches = (run, input) => Boolean(run && run.inputHash === input.inputHash && (run.sharedRef || (input.contractHash && (run.contractHash === input.contractHash || (run.status === 'complete' && run.contractHash === input.previousContractHash)))));
 
 export function discoveryDifference(analysis, proposal) {
   const before = currentFor(analysis, proposal.sourceId);
@@ -57,7 +61,7 @@ export function createProductDiscovery({ modelClient, modelIdentity, readTranscr
       return;
     }
     const input = await inputFor(root, sourceId);
-    if (input.inputHash !== run.inputHash || (!run.sharedRef && (!input.contractHash || input.contractHash !== run.contractHash))) throw new HttpError(409, '来源、转写、模型或分析规则已变化，旧建议不能应用');
+    if (!savedInputMatches(run, input)) throw new HttpError(409, '来源、转写、模型或分析规则已变化，旧建议不能应用');
   }
   async function inputFor(root, sourceId) {
     const { analysis } = await readProductAnalysis(root);
@@ -71,8 +75,9 @@ export function createProductDiscovery({ modelClient, modelIdentity, readTranscr
     const fingerprint = hash({ sourceId, assetPath: source.assetPath, resolvedPath, size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs, ino: info.ino, durationMs });
     const modelConfiguration = await publicConfiguration();
     const publicModelHash = modelConfiguration ? hash(modelConfiguration) : null;
-    const contractHash = publicModelHash ? hash({ publicModelHash, promptHash: hash(DISCOVERY_PROMPT), algorithmVersion: DISCOVERY_VERSION, windowPolicy: { maxBytes, contextCues, knownProductBytes: 8000 } }) : null;
-    return { analysis, source, durationMs, cues, fingerprint, modelConfiguration, publicModelHash, contractHash, inputHash: hash({ fingerprint, durationMs, cues }) };
+    const contract = prompt => publicModelHash ? hash({ publicModelHash: hash(textResultCacheIdentity(modelConfiguration)), promptHash: hash(prompt), algorithmVersion: DISCOVERY_VERSION, windowPolicy: { maxBytes, contextCues, knownProductBytes: 8000 } }) : null;
+    const contractHash = contract(DISCOVERY_PROMPT), previousContractHash = contract(PREVIOUS_DISCOVERY_PROMPT);
+    return { analysis, source, durationMs, cues, fingerprint, modelConfiguration, publicModelHash, contractHash, previousContractHash, inputHash: hash({ fingerprint, durationMs, cues }) };
   }
   async function view(root, sourceId) {
     const { analysis } = await readProductAnalysis(root);
@@ -80,17 +85,17 @@ export function createProductDiscovery({ modelClient, modelIdentity, readTranscr
     const state = await load(root, sourceId), run = state.runs.at(-1);
     const active = running.has(`${root}\0${sourceId}`);
     const interrupted = run?.status === 'running' && !active;
-    let inputsMatch = false;
-    if (run) try { if (run.historicalRef) inputsMatch = await historicalFingerprint(root, sourceId) === run.fingerprint; else { const current = await inputFor(root, sourceId); inputsMatch = Boolean((run.sharedRef || (current.contractHash && current.contractHash === run.contractHash)) && current.inputHash === run.inputHash); } } catch { /* Existing results remain inspectable while the source is unavailable. */ }
+    let inputsMatch = false, previousIncomplete = false;
+    if (run) try { if (run.historicalRef) inputsMatch = await historicalFingerprint(root, sourceId) === run.fingerprint; else { const current = await inputFor(root, sourceId); inputsMatch = savedInputMatches(run, current); previousIncomplete = run.status !== 'complete' && Boolean(current.previousContractHash && run.contractHash === current.previousContractHash && run.contractHash !== current.contractHash); } } catch { /* Existing results remain inspectable while the source is unavailable. */ }
     const stale = Boolean(run && (!inputsMatch || (run.baseHash !== effectiveHash(analysis) && !state.applications?.some(a => a.runId === run.id && a.afterHash === effectiveHash(analysis)))));
-    return { sourceId, status: interrupted ? 'failed' : run?.status ?? 'idle', modelIdentity: run?.modelIdentity ?? null, enabled: typeof modelClient === 'function', runId: run?.id, error: interrupted ? '任务已中断；已完成窗口保留，核查后可显式重试，重试可能计费' : run?.error, stale, canRetry: Boolean(run && (run.status === 'failed' || interrupted)), proposal: run?.status === 'complete' ? run.proposal : undefined, difference: run?.proposal ? discoveryDifference(analysis, run.proposal) : undefined, runs: state.runs.map(({ id, status, createdAt, modelIdentity, windows, completed, error }) => ({ id, status, createdAt, modelIdentity, windows, completedWindows: completed?.length ?? 0, error })) };
+    return { sourceId, status: interrupted ? 'failed' : run?.status ?? 'idle', modelIdentity: run?.modelIdentity ?? null, enabled: typeof modelClient === 'function', runId: run?.id, error: previousIncomplete ? '旧提示词下的拆品任务未完成；已完成窗口和原请求记录保留，不能混用新规则继续，请核查后明确发起新的拆品' : interrupted ? '任务已中断；已完成窗口保留，核查后可显式重试，重试可能计费' : run?.error, stale, canRetry: Boolean(run && !previousIncomplete && (run.status === 'failed' || interrupted)), proposal: run?.status === 'complete' ? run.proposal : undefined, difference: run?.proposal ? discoveryDifference(analysis, run.proposal) : undefined, runs: state.runs.map(({ id, status, createdAt, modelIdentity, windows, completed, error }) => ({ id, status, createdAt, modelIdentity, windows, completedWindows: completed?.length ?? 0, error })) };
   }
   async function startInner(root, body) {
     const input = await inputFor(root, body.sourceId);
     if (body.expectedInputIdentity && body.expectedInputIdentity !== hash({ inputHash: input.inputHash, contractHash: input.contractHash, baseHash: effectiveHash(input.analysis) })) throw new HttpError(409, '来源、转写或拆品配置在确认后变化，请重新核对请求');
     const state = await load(root, body.sourceId);
     let run = state.runs.at(-1);
-    if (run?.status === 'complete' && run.inputHash === input.inputHash && input.contractHash && run.contractHash === input.contractHash && !body.rerun) return view(root, body.sourceId);
+    if (run?.status === 'complete' && savedInputMatches(run, input) && !body.rerun) return view(root, body.sourceId);
     if (typeof modelClient !== 'function') throw new HttpError(403, '商品识别服务未启用；不会发送转写');
     if (!input.contractHash) throw new HttpError(409, '缺少可核验的模型公开配置身份，未发送转写');
     if (run?.status === 'complete' && !body.rerun) throw new HttpError(409, '来源、转写、模型或分析规则已变化，请明确重新分析');
@@ -99,7 +104,7 @@ export function createProductDiscovery({ modelClient, modelIdentity, readTranscr
     const resume = incomplete && body.retry && run.inputHash === input.inputHash && run.baseHash === effectiveHash(input.analysis) && run.contractHash === input.contractHash;
     if (body.retry && !resume) throw new HttpError(409, '来源、商品范围或分析设置已变化，不能继续旧任务；请明确重新分析');
     if (!resume) {
-      run = { id: randomUUID(), createdAt: new Date().toISOString(), status: 'running', sourceId: body.sourceId, inputHash: input.inputHash, fingerprint: input.fingerprint, baseHash: effectiveHash(input.analysis), modelIdentity: input.publicModelHash, contractHash: input.contractHash, maxBytes, contextCues, windows: discoveryWindows(validateDiscoveryCues(input.cues, input.durationMs), { maxBytes, contextCues }).length, completed: [] };
+      run = { id: randomUUID(), createdAt: new Date().toISOString(), status: 'running', sourceId: body.sourceId, inputHash: input.inputHash, fingerprint: input.fingerprint, baseHash: effectiveHash(input.analysis), modelIdentity: input.publicModelHash, contractHash: input.contractHash, promptHash: hash(DISCOVERY_PROMPT), maxBytes, contextCues, windows: discoveryWindows(validateDiscoveryCues(input.cues, input.durationMs), { maxBytes, contextCues }).length, completed: [] };
       if (typeof body.draftKey === 'string' && /^[a-f0-9]{64}$/.test(body.draftKey)) run.draftKey = body.draftKey;
       state.runs.push(run);
     }
@@ -209,7 +214,18 @@ export function createProductDiscovery({ modelClient, modelIdentity, readTranscr
       state.runs.push({ id, sourceId, status: 'complete', createdAt: new Date().toISOString(), fingerprint: frozenFingerprint, baseHash: effectiveHash(analysis), historicalRef: sharedRef, proposal, windows: 0, completed: [], error: '历史 AI 拆品建议；原分析输入可能含当时本机字幕核对，未声称匹配当前字幕，请核对后采用' });
       await save(root, state); return { runId: id, proposal };
     },
-    sharedContract: async () => ({ model: await publicConfiguration(), prompt: hash(DISCOVERY_PROMPT), version: DISCOVERY_VERSION, maxBytes, contextCues }),
+    existingSharedContract: async (root, sourceId) => {
+      const state = await load(root, sourceId), run = state.runs.at(-1);
+      // Imported public/history records are already tied to their published
+      // artifact. They are never exported as a fresh local AI judgment.
+      if (!run || run.sharedRef || run.historicalRef) return null;
+      const input = await inputFor(root, sourceId);
+      const prompt = input.contractHash && run.contractHash === input.contractHash ? DISCOVERY_PROMPT
+        : input.previousContractHash && run.contractHash === input.previousContractHash ? PREVIOUS_DISCOVERY_PROMPT : null;
+      if (!prompt || input.inputHash !== run.inputHash) throw new HttpError(409, '原拆品请求的提示词契约、来源或转写无法确认；已有结果保留，请核查后再补存，不会重新请求模型');
+      return { model: textResultCacheIdentity(input.modelConfiguration), prompt: hash(prompt), version: DISCOVERY_VERSION, maxBytes, contextCues };
+    },
+    sharedContract: async () => ({ model: textResultCacheIdentity(await publicConfiguration()), prompt: hash(DISCOVERY_PROMPT), version: DISCOVERY_VERSION, maxBytes, contextCues }),
     exportShared: async (root, sourceId, draftKey) => {
       const state = await load(root, sourceId), run = draftKey ? state.runs.findLast(run => run.draftKey === draftKey) : state.runs.at(-1);
       if (run?.status !== 'complete' || !run.proposal || run.sharedRef) throw new HttpError(409, '没有可共享的原始 AI 拆品结果');
@@ -232,7 +248,7 @@ export function createProductDiscovery({ modelClient, modelIdentity, readTranscr
     },
     plan: async (root, sourceId, { retry = false, rerun = false } = {}) => {
       const input = await inputFor(root, sourceId), state = await load(root, sourceId), run = state.runs.at(-1);
-      const matches = !!run && (run.sharedRef || (!!input.contractHash && run.contractHash === input.contractHash)) && run.inputHash === input.inputHash;
+      const matches = savedInputMatches(run, input);
       const cached = matches && run?.status === 'complete' && !rerun;
       const totalRequests = discoveryWindows(validateDiscoveryCues(input.cues, input.durationMs), { maxBytes, contextCues }).length;
       const reusedRequests = cached ? totalRequests : retry && matches && run?.baseHash === effectiveHash(input.analysis) ? run.completed.length : 0;

@@ -8,7 +8,7 @@ import { productSourcePath, readProductTranscript } from './product-transcriptio
 import { productTranscriptRange } from './product-transcript-range.mjs';
 import { mediaReviewCandidatesHash, validateProductMediaReview } from './product-media-review.mjs';
 import { validateProductVisualReview, visualReviewCandidatesHash } from './product-visual-review.mjs';
-import { analyzeTextStructure, combineTextStructureWindows, textStructureWindowPolicy, textStructureWindows, TEXT_STRUCTURE_PROMPT, TEXT_STRUCTURE_VERSION, COMPLETE_SPEECH_SCHEMA } from './text-structure.mjs';
+import { analyzeTextStructure, combineTextStructureWindows, recoverDeepSeekTextResponse, textResponseIncompleteMessage, textResultCacheIdentity, textStructureCachePrompt, textStructureWindowPolicy, textStructureWindows, TEXT_STRUCTURE_PROMPT, PREVIOUS_TEXT_STRUCTURE_PROMPT, LEGACY_TEXT_STRUCTURE_PROMPT, TEXT_STRUCTURE_VERSION, COMPLETE_SPEECH_SCHEMA } from './text-structure.mjs';
 
 const idle = () => ({ transcription: { status: 'idle', segments: [] }, analysis: { status: 'idle' } });
 const file = (root, id) => join(root, '.film', 'live-analysis', `${createHash('sha256').update(id).digest('hex')}.json`);
@@ -152,7 +152,7 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
   }
   async function modelIdentityHash() {
     const value = await publicModelIdentity();
-    return value ? hash(canonical(value)) : null;
+    return value ? hash(canonical(textResultCacheIdentity(value))) : null;
   }
   async function sourceInputIdentity(root, source, transcript, identityHash) {
     if (!transcript || !identityHash) return null;
@@ -161,12 +161,27 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
     const moved = (await load(root, source.id)).movedSource;
     // Only a successful move of this exact source can reuse its old cache identity. Other input fields stay current.
     const reference = moved && JSON.stringify(moved.current) === JSON.stringify(current) ? moved.original : current;
-    return { version: 2, sourceId: source.id, ...reference, durationMs: source.durationMs, transcript: transcriptHash(transcript), prompt: hash(structurePrompt), algorithm: structureVersion, windows: windowPolicy, model: identityHash };
+    return { version: 2, sourceId: source.id, ...reference, durationMs: source.durationMs, transcript: transcriptHash(transcript), prompt: hash(textStructureCachePrompt(structurePrompt)), algorithm: structureVersion, windows: windowPolicy, model: identityHash };
   }
-  async function inputIdentity(root, source, range, transcript, identityHash, sourceInput) {
+  async function inputIdentity(root, source, range, transcript, identityHash, sourceInput, prompt = structurePrompt) {
     if (!range) return null;
     const common = sourceInput ?? await sourceInputIdentity(root, source, transcript, identityHash);
-    return common ? hash({ ...common, productId: range.productId, intervalId: range.id, startMs: range.startMs, endMs: range.endMs }) : null;
+    return common ? hash({ ...common, prompt: hash(textStructureCachePrompt(prompt)), productId: range.productId, intervalId: range.id, startMs: range.startMs, endMs: range.endMs }) : null;
+  }
+  // The approved fuller rules have a new identity. A verified previous result
+  // remains reusable under its original identity, never rewritten as a new run.
+  async function inputVersions(root, source, range, transcript, identityHash, sourceInput) {
+    const common = sourceInput ?? await sourceInputIdentity(root, source, transcript, identityHash);
+    const prompts = structurePrompt === TEXT_STRUCTURE_PROMPT ? [structurePrompt, PREVIOUS_TEXT_STRUCTURE_PROMPT] : [structurePrompt];
+    return Promise.all(prompts.map(async prompt => ({ prompt, cacheIdentity: await inputIdentity(root, source, range, transcript, identityHash, common, prompt) })));
+  }
+  function resumeVersion(attempt, versions) {
+    if (!attempt || attempt.status === 'complete') return null;
+    const version = versions.find(item => item.cacheIdentity && item.cacheIdentity === attempt.cacheIdentity);
+    if (!version) return null;
+    const known = structurePrompt === TEXT_STRUCTURE_PROMPT ? [structurePrompt, PREVIOUS_TEXT_STRUCTURE_PROMPT, LEGACY_TEXT_STRUCTURE_PROMPT] : [structurePrompt];
+    const prompt = known.includes(attempt.prompt) && textStructureCachePrompt(attempt.prompt) === textStructureCachePrompt(version.prompt) ? attempt.prompt : version.prompt;
+    return { ...version, prompt };
   }
   async function view(root, id, requestedIntervalId, requestedProductId, expected) {
     const { source, analysis: storedAnalysis } = await sourceFor(root, id);
@@ -183,14 +198,14 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
       fingerprint = await sourceFingerprint(root, source);
       transcript = await readTranscript(root, source);
       identityValue = await publicModelIdentity();
-      identityHash = identityValue ? hash(canonical(identityValue)) : null;
+      identityHash = identityValue ? hash(canonical(textResultCacheIdentity(identityValue))) : null;
       sourceInput = await sourceInputIdentity(root, source, transcript, identityHash);
       readable = true;
       if (transcription.status === 'complete' && (!transcript || state.transcription.sourceFingerprint !== fingerprint || state.transcription.transcriptHash !== transcriptHash(transcript))) Object.assign(transcription, { status: 'idle', error: '素材或字幕已变化，请重新检查转写' });
       if (transcript) {
         // The chat task only needs status; do not send the full source transcript to it.
         transcription.segments = scope ? [] : segmentsOf(transcript);
-        if (transcription.status === 'idle' || (transcript.localReconciled && !active)) {
+        if (transcription.status === 'idle' || ((transcript.localReconciled || transcript.recoveredFromResponse) && !active)) {
           transcription.status = 'complete';
           delete transcription.code; delete transcription.error; delete transcription.localReviewRequired; delete transcription.retryBlocked;
         }
@@ -204,9 +219,9 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
     for (const rangeId of ids) {
       const range = ranges.find(item => item.id === rangeId);
       const saved = state.analyses[rangeId] ?? { status: 'idle', intervalId: rangeId, productId: range?.productId };
-      let identity = null;
-      try { if (readable && range && sourceInput) identity = await inputIdentity(root, source, range, transcript, identityHash, sourceInput); } catch { /* unreadable sources only invalidate; never retry */ }
-      const cached = identity && state.results[identity];
+      let versions = [];
+      try { if (readable && range && sourceInput) versions = await inputVersions(root, source, range, transcript, identityHash, sourceInput); } catch { /* unreadable sources only invalidate; never retry */ }
+      const cached = versions.map(version => state.results[version.cacheIdentity]).find(Boolean);
       // An explicit running/failed rerun remains visible. Otherwise the exact
       // previously completed input version can be reused independently per range.
       // Product affiliation is personal. A merge may move an intact historical
@@ -214,8 +229,12 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
       const historicalEditable = saved.status === 'complete' && /^[a-f0-9]{64}$/.test(saved.historicalRef?.sha256 ?? '') && saved.currentRunId === `historical-${saved.historicalRef.sha256}` && range?.kind === 'historical-analysis' && saved.sourceFingerprint === fingerprint && saved.rangeStartMs === range.startMs && saved.rangeEndMs === range.endMs;
       const item = { ...(cached && !['running', 'failed'].includes(saved.status) ? cached : saved), ...(historicalEditable ? { productId: range.productId } : {}), stale: true, legacyEditable: legacyEditable(saved, range, source, fingerprint), historicalEditable };
       if (item.status === 'running' && (!active || state.analysis.intervalId !== rangeId)) Object.assign(item, { status: 'failed', error: '任务中断，提交状态不确定，请先核查后再操作' });
+      if (item.status === 'failed') {
+        const failedWindow = state.attempts[item.attemptId]?.windows?.find(window => window.status === 'failed');
+        if (failedWindow?.error === 'MODEL_INCOMPLETE') item.error = textResponseIncompleteMessage(failedWindow.receipt);
+      }
       if (item.status === 'complete') {
-        item.stale = !identity || item.cacheIdentity !== identity || !item.currentRunId || item.productId !== range?.productId;
+        item.stale = !versions.some(version => version.cacheIdentity && item.cacheIdentity === version.cacheIdentity) || !item.currentRunId || item.productId !== range?.productId;
         if (item.sharedRef && range && readable && item.sharedSignature === hash({ fingerprint, transcript: transcriptHash(transcript), intervalId: range.id, productId: range.productId, startMs: range.startMs, endMs: range.endMs })) item.stale = false;
         if (item.stale) Object.assign(item, { status: 'idle', error: !identityHash ? '模型配置身份未确认，已有结果仅供核对；不会自动重新分析' : '素材、字幕、范围或分析配置已变化，已有结果仅供核对；不会自动重新分析' });
         if (item.legacyEditable) item.error = '历史分析结果可继续剪辑；未按当前配置重新分析，不作为最新分析缓存';
@@ -232,11 +251,13 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
     let analysisPlan;
     if (scope && analysis.status !== 'running') {
       const model = typeof identityValue === 'string' ? identityValue : [identityValue?.provider, identityValue?.model, identityValue?.endpoint].filter(value => typeof value === 'string' && value).join(' · ') || null;
-      analysisPlan = { enabled: typeof modelClient === 'function' && !!identityHash, model, requestCount: null, transcriptSegments: null, inputIdentity: sourceInput ? await inputIdentity(root, source, { ...scope, id: scope.intervalId }, transcript, identityHash, sourceInput) : null };
+      const versions = sourceInput ? await inputVersions(root, source, { ...scope, id: scope.intervalId }, transcript, identityHash, sourceInput) : [];
+      const version = analysis.status === 'failed' ? resumeVersion(state.attempts[analysis.attemptId], versions) ?? versions[0] : versions[0];
+      analysisPlan = { enabled: typeof modelClient === 'function' && !!identityHash, model, requestCount: null, transcriptSegments: null, inputIdentity: version?.cacheIdentity ?? null };
       if (visualReview) analysisPlan.visual = await visualDescription();
       try {
         const { segments: cues } = productTranscriptRange(transcript, scope, source.durationMs);
-        const windows = textStructureWindows({ sourceId: id, productId: scope.productId, intervalId: scope.intervalId, cues, rangeStartMs: scope.startMs, rangeEndMs: scope.endMs, prompt: structurePrompt, ...windowPolicy });
+        const windows = textStructureWindows({ sourceId: id, productId: scope.productId, intervalId: scope.intervalId, cues, rangeStartMs: scope.startMs, rangeEndMs: scope.endMs, prompt: version?.prompt ?? structurePrompt, ...windowPolicy });
         Object.assign(analysisPlan, { requestCount: windows.length, transcriptSegments: cues.length });
       } catch (error) {
         analysisPlan.error = error instanceof HttpError ? error.message : '本段转写无法按当前文字窗口预算分析，未发起请求。';
@@ -299,15 +320,17 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
           const fingerprint = await sourceFingerprint(root, source);
           const transcriptDigest = transcriptHash(transcript);
           const expectedIdentity = structuredClone(await publicModelIdentity());
-          const cacheIdentity = await inputIdentity(root, source, selected, transcript, expectedIdentity ? hash(canonical(expectedIdentity)) : null);
-          if (!cacheIdentity || (expected?.inputIdentity && expected.inputIdentity !== cacheIdentity)) throw Object.assign(new Error(), { code: 'MODEL_INPUT_CHANGED' });
+          const versions = await inputVersions(root, source, selected, transcript, expectedIdentity ? hash(canonical(textResultCacheIdentity(expectedIdentity))) : null);
+          const previousAttempt = previousAnalysis?.attemptId && state.attempts[previousAnalysis.attemptId];
+          const resumedVersion = !rerun && resumeVersion(previousAttempt, versions);
+          const execution = resumedVersion || versions[0], cacheIdentity = execution?.cacheIdentity;
+          if (!cacheIdentity || (expected?.inputIdentity && !versions.some(version => version.cacheIdentity === expected.inputIdentity))) throw Object.assign(new Error(), { code: 'MODEL_INPUT_CHANGED' });
           const productId = selected.productId;
           const intervalId = selected.id;
-          const baseArgs = { sourceId: id, productId, intervalId, cues, rangeStartMs: selected.startMs, rangeEndMs: selected.endMs, prompt: structurePrompt, version: structureVersion };
+          const baseArgs = { sourceId: id, productId, intervalId, cues, rangeStartMs: selected.startMs, rangeEndMs: selected.endMs, prompt: execution.prompt, version: structureVersion };
           const windows = textStructureWindows({ ...baseArgs, ...windowPolicy });
-          const previousAttempt = previousAnalysis?.attemptId && state.attempts[previousAnalysis.attemptId];
-          const attempt = !rerun && previousAttempt?.cacheIdentity === cacheIdentity && previousAttempt.status !== 'complete' ? previousAttempt : {
-            id: randomUUID(), cacheIdentity, createdAt: new Date().toISOString(), elapsedMs: 0,
+          const attempt = resumedVersion ? previousAttempt : {
+            id: randomUUID(), cacheIdentity, prompt: execution.prompt, createdAt: new Date().toISOString(), elapsedMs: 0,
             windows: windows.map(({ index, firstCue, lastCue, bytes }) => ({ index, firstCue, lastCue, bytes, status: 'idle', requests: 0 })),
           };
           if (!Array.isArray(attempt.windows) || attempt.windows.length !== windows.length || attempt.windows.some((window, index) => window.index !== index || window.firstCue !== windows[index].firstCue || window.lastCue !== windows[index].lastCue)) throw Object.assign(new Error(), { code: 'MODEL_CONSTRAINT' });
@@ -323,7 +346,7 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
           const assertInputCurrent = async () => {
             const { source: currentSource, analysis } = await sourceFor(root, id);
             const currentRange = rangesOf(analysis).find(range => range.id === intervalId && range.sourceId === id && range.productId === productId);
-            if (await inputIdentity(root, currentSource, currentRange, await readTranscript(root, currentSource), await modelIdentityHash()) !== cacheIdentity) throw Object.assign(new Error(), { code: 'MODEL_INPUT_CHANGED' });
+            if (await inputIdentity(root, currentSource, currentRange, await readTranscript(root, currentSource), await modelIdentityHash(), undefined, execution.prompt) !== cacheIdentity) throw Object.assign(new Error(), { code: 'MODEL_INPUT_CHANGED' });
           };
           await saveProgress();
           const outputs = [];
@@ -332,6 +355,15 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
             const entry = attempt.windows[window.index];
             const windowCueIndices = cueIndices.slice(window.firstCue, window.lastCue + 1);
             const args = { ...baseArgs, cues: window.cues };
+            if (resumedVersion && !attempt.prompt && structurePrompt === TEXT_STRUCTURE_PROMPT) {
+              // Pre-upgrade journals stored transmitted bytes, but not the
+              // prompt text. Identify only an exact known wording/byte match;
+              // a paid window must not silently become a new-prompt request.
+              const input = JSON.stringify({ sourceId: id, productId, intervalId, rangeStartMs: selected.startMs, rangeEndMs: selected.endMs, cues: window.cues });
+              const originalPrompt = [execution.prompt, PREVIOUS_TEXT_STRUCTURE_PROMPT, LEGACY_TEXT_STRUCTURE_PROMPT].find(prompt => textStructureCachePrompt(prompt) === textStructureCachePrompt(execution.prompt) && Buffer.byteLength(prompt + input, 'utf8') === entry.bytes);
+              if (!originalPrompt) throw Object.assign(new Error(), { code: 'MODEL_INPUT_CHANGED' });
+              args.prompt = originalPrompt;
+            }
             const withSourceIndices = output => {
               for (const candidate of output.candidates) candidate.cueRange = candidate.cueRange.map(index => windowCueIndices[index]);
               return output;
@@ -347,12 +379,27 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
               outputs.push(output);
               continue;
             }
-            entry.status = 'running'; entry.requests++; delete entry.error;
+            // Transport completion does not guarantee valid JSON or cue references.
+            // Only an explicitly approved retry replaces a previously rejected reply.
+            const replaceInvalidReply = expected?.retryFailed === true && ['MODEL_INVALID_JSON', 'MODEL_CONSTRAINT'].includes(entry.error);
+            entry.bytes = Buffer.byteLength(args.prompt, 'utf8') + window.bytes - Buffer.byteLength(baseArgs.prompt, 'utf8');
+            entry.status = 'running'; delete entry.error;
             entry.startedAt = new Date().toISOString();
             await saveProgress();
             const startedAt = Date.now();
             try {
-              const output = withSourceIndices(await analyzeTextStructure({ ...args, client: request => modelClient({ ...request, expectedIdentity, onReceipt: async receipt => { entry.receipt = receipt; await saveProgress(); } }) }));
+              const output = withSourceIndices(await analyzeTextStructure({ ...args, client: async request => {
+                const recovered = replaceInvalidReply ? undefined : recoverDeepSeekTextResponse(entry.receipt, request);
+                if (recovered !== undefined) { entry.recoveredFromResponse = true; return recovered; }
+                if (entry.receipt) {
+                  entry.previousReceipts ??= [];
+                  entry.previousReceipts.push(entry.receipt);
+                  delete entry.receipt;
+                }
+                entry.requests++;
+                await saveProgress();
+                return modelClient({ ...request, expectedIdentity, onReceipt: async receipt => { entry.receipt = receipt; await saveProgress(); } });
+              } }));
               await assertInputCurrent();
               entry.output = output; entry.status = 'complete'; entry.completedAt = new Date().toISOString();
               outputs.push(output);
@@ -371,14 +418,14 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
           await assertInputCurrent();
           const checkedVisual = expected?.visualIdentity ? await inspectVisual(root, source, mediaScope, output.candidates, checkedMedia, expected.visualIdentity) : undefined;
           const latest = await readTranscript(root, source);
-          if (!latest || await inputIdentity(root, source, selected, latest, await modelIdentityHash()) !== cacheIdentity) throw Object.assign(new Error(), { code: 'MODEL_INPUT_CHANGED' });
+          if (!latest || await inputIdentity(root, source, selected, latest, await modelIdentityHash(), undefined, execution.prompt) !== cacheIdentity) throw Object.assign(new Error(), { code: 'MODEL_INPUT_CHANGED' });
           const runId = attempt.id;
           if (!draftKey) await updateProductAnalysis(root, async data => {
             if (!data.sources.some(s => s.id === id) || !data.products.some(p => p.id === productId && p.sourceIds.includes(id))) throw new Error('来源或商品已变更');
             const latestRange = [...data.intervals, ...(data.scopes ?? [])].find(i => i.id === intervalId);
             if (!latestRange || latestRange.sourceId !== id || latestRange.productId !== productId || latestRange.startMs !== selected.startMs || latestRange.endMs !== selected.endMs) throw new Error('检查范围已变更');
             const latestSource = data.sources.find(s => s.id === id);
-            if (await inputIdentity(root, latestSource, latestRange, await readTranscript(root, latestSource), await modelIdentityHash()) !== cacheIdentity) throw Object.assign(new Error(), { code: 'MODEL_INPUT_CHANGED' });
+            if (await inputIdentity(root, latestSource, latestRange, await readTranscript(root, latestSource), await modelIdentityHash(), undefined, execution.prompt) !== cacheIdentity) throw Object.assign(new Error(), { code: 'MODEL_INPUT_CHANGED' });
             for (const candidate of output.candidates) {
               candidate.runId = runId;
               // A crash after the candidate commit but before state completion
@@ -399,7 +446,8 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
         const reason = error?.reason === 'configuration' ? '转写配置不可用' : error?.reason === 'audio' ? '音频提取失败或音频不符合要求' : '素材读取失败或发生变化';
         const status = Number.isInteger(error?.httpStatus) && error.httpStatus >= 400 && error.httpStatus <= 599 ? ` ${error.httpStatus}` : '';
         const modelErrors = { MODEL_TIMEOUT: '模型请求超时', MODEL_NETWORK: '模型网络请求失败', MODEL_HTTP: `模型服务返回 HTTP 错误${status}`, MODEL_INCOMPLETE: '模型响应未完成或达到输出上限', MODEL_INVALID_JSON: '模型输出 JSON 无效', MODEL_CONSTRAINT: '模型结果违反格式或来源约束', MODEL_INPUT_CHANGED: '本地授权输入已变化或不可读取', MODEL_INPUT_TOO_LARGE: '单条字幕或提示词超出文字窗口预算，请检查字幕边界' };
-        const analysisError = Object.hasOwn(modelErrors, error?.code) ? modelErrors[error.code] : error instanceof HttpError || known.includes(error?.message) ? error.message : '任务失败，请检查配置与素材';
+        const failedReceipt = type === 'analysis' ? state.attempts[state.analysis.attemptId]?.windows?.find(window => window.status === 'failed')?.receipt : undefined;
+        const analysisError = error?.code === 'MODEL_INCOMPLETE' ? textResponseIncompleteMessage(failedReceipt) : Object.hasOwn(modelErrors, error?.code) ? modelErrors[error.code] : error instanceof HttpError || known.includes(error?.message) ? error.message : '任务失败，请检查配置与素材';
         state[type] = { ...(type === 'analysis' ? state.analysis : {}), status: 'failed', confirmationId, error: type === 'transcription' ? (boundaryReview ? '分段转写已保存，交界处待核对；无需重新付费转写，未自动重传音频' : safe ? `${reason}，音频未上传；处理后可手动重试` : '转写失败或提交状态不确定，不能自动重试，请先核查服务状态') : analysisError, ...(type === 'transcription' ? { segments: [], retryBlocked: !safe && !boundaryReview, ...(boundaryReview ? { code: 'ASR_BOUNDARY_REVIEW', localReviewRequired: true } : {}) } : { intervalId: selected.id, productId: selected.productId }) };
       }
       if (type === 'analysis' && !draftKey) state.analyses[selected.id] = state.analysis;
@@ -559,7 +607,18 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
     reviewMedia,
     visualPlan,
     reviewVisual,
-    sharedContract: async () => ({ model: await publicModelIdentity(), prompt: hash(structurePrompt), version: structureVersion, windowPolicy }),
+    sharedContract: async () => ({ model: textResultCacheIdentity(await publicModelIdentity()), prompt: hash(textStructureCachePrompt(structurePrompt)), version: structureVersion, windowPolicy }),
+    existingSharedContract: async (root, sourceId, scope) => {
+      const state = await load(root, sourceId), saved = state.analyses[scope?.intervalId];
+      if (!saved || saved.sharedRef || saved.historicalRef || saved.status === 'idle') return null;
+      const { source, analysis } = await sourceFor(root, sourceId);
+      const range = analysis.intervals.find(item => item.id === scope?.intervalId && item.productId === scope?.productId && item.sourceId === sourceId);
+      const model = await publicModelIdentity();
+      const versions = await inputVersions(root, source, range, await readTranscript(root, source), model ? hash(canonical(textResultCacheIdentity(model))) : null);
+      const version = versions.find(item => item.cacheIdentity && item.cacheIdentity === saved.cacheIdentity);
+      if (!version) throw new HttpError(409, '已有话术分析的原始请求身份无法确认，未改用新版提示词补存或重新请求');
+      return { model: textResultCacheIdentity(model), prompt: hash(textStructureCachePrompt(version.prompt)), version: structureVersion, windowPolicy };
+    },
     importHistorical: async (root, sourceId, payload, sharedRef, { productId, productName, sourceSha, expectedSourceFingerprint, expectedAnalysis } = {}) => {
       if (payload?.version !== 1 || payload.kind !== 'historical-ai-structure' || !Array.isArray(payload.candidates) || !/^[a-f0-9]{64}$/.test(sharedRef?.sha256 ?? '')) throw new HttpError(409, '历史话术格式不兼容');
       if ((typeof productId === 'string' && !!productId) === (typeof productName === 'string' && !!productName.trim())) throw new HttpError(400, '请明确关联一个本机商品，或输入新本机商品名');

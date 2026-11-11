@@ -27,6 +27,24 @@ test('compact card text distinguishes selling points and retains source quotes w
   assert.equal(JSON.stringify(plan), before);
 });
 
+test('1.3x cards show accelerated subclip durations and the 30–40 second rule without changing quotes', () => {
+  const accelerated = { ...plan, version: 'ai-structure-plans-v2', speed: 1.3 as const, durationMs: 39000,
+    clips: plan.clips.map((clip, index) => ({ ...clip, endMs: index === 3 ? clip.endMs - 3300 : clip.endMs, speed: 1.3 as const })) };
+  const before = JSON.stringify(accelerated), card = structurePlanCard(accelerated);
+  assert.equal(card.speedLabel, '1.3 倍速');
+  assert.equal(card.durationLabel, '39 秒');
+  assert.equal(card.durationHint, '30～40秒内');
+  assert.equal(card.durationInRange, true);
+  assert.deepEqual(card.blocks.map(block => block.durationMs), accelerated.clips.map(clip => (clip.endMs - clip.startMs) / 1.3));
+  assert.equal(card.fullCoreQuotes, structurePlanCard(plan).fullCoreQuotes);
+  assert.equal(JSON.stringify(accelerated), before);
+  assert.equal(structurePlanCard({ ...accelerated, durationMs: 41000 }).durationHint, '超过40秒 · 需核对');
+  assert.equal(structurePlanCard({ ...accelerated, durationMs: 29000 }).durationHint, '不足30秒 · 需核对');
+  assert.equal(structurePlanCard({ ...accelerated, durationMs: 41000 }).durationInRange, false);
+  assert.equal(structurePlanCard(plan).speedLabel, '原速');
+  assert.equal(structurePlanCard({ ...plan, durationMs: 42000 }).durationHint, '参考时长内');
+});
+
 test('structure blocks preserve every real clip and original order, including context and optional roles', () => {
   const mixed = { ...plan, clips: [{ ...plan.clips[0]!, roles: ['context', 'hook'] }, ...plan.clips.slice(1), { ...plan.clips[0]!, roles: ['trust'] }] };
   const card = structurePlanCard(mixed);

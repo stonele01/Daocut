@@ -5,6 +5,7 @@ import doubao from './providers/doubao.mjs';
 import { serviceUrl } from './providers/common.mjs';
 import { createProductMediaReview } from './product-media-review.mjs';
 import { createProductVisualReview } from './product-visual-review.mjs';
+import { DEEPSEEK_TEXT_POLICY } from './text-structure.mjs';
 export { createDeepSeekTextClient } from './text-structure.mjs';
 
 const ENDPOINT = 'https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash';
@@ -23,7 +24,7 @@ export function createDesktopAnalysisServices({ textBridge, providersFile = defa
     return { info: { ...transcriptionInfo, enabled: !!enabled, ...(!enabled ? { error: '请在设置的服务中选择豆包转写并配置密钥' } : {}) }, key };
   }
   const publicText = async () => await textBridge({ operation: 'public-config' });
-  const identity = config => config ? { provider: 'deepseek', endpoint: `${config.baseUrl.replace(/\/$/, '')}/responses`, model: config.model, maxOutputTokens: 16384, reasoningEffort: 'low', configurationId: config.id } : null;
+  const identity = config => config ? { provider: 'deepseek', endpoint: `${config.baseUrl.replace(/\/$/, '')}/responses`, model: config.model, ...DEEPSEEK_TEXT_POLICY, configurationId: config.id } : null;
   const modelClient = async ({ system, input, onReceipt, expectedIdentity }) => {
     const expectedConfig = await publicText();
     if (!expectedConfig) throw Object.assign(new Error('请在模型设置中选择一个直播文字分析模型'), { code: 'MODEL_CLIENT_UNAVAILABLE' });

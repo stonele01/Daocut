@@ -17,7 +17,7 @@ test('only a stored public plan opens a private draft; selection and re-open nev
   const publicPlans = { status: async () => ({ status: 'complete', taskKey: 'shared-key', plans: [plan], context: { ...scope, visibility: 'shared' } }) };
   const workspace = createStructureWorkspace({ plans: publicPlans, register: async path => ({ id: (await readFile(join(path, '.film/id'), 'utf8')).trim(), path }) });
   const parent = { id: 'parent', path: root };
-  await assert.rejects(workspace.edit(parent, { ...scope, taskKey: 'shared-key', planId: 'invented', plan }), /公共方案/);
+  await assert.rejects(workspace.edit(parent, { ...scope, taskKey: 'shared-key', planId: 'invented', plan }), /已保存的方案/);
   const first = await workspace.edit(parent, { ...scope, taskKey: 'shared-key', planId: 'plan-a' });
   assert.notEqual(first.project.id, parent.id);
   await writeFile(join(first.project.path, 'film.html'), 'personal-edits');

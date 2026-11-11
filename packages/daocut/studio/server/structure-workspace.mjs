@@ -30,8 +30,8 @@ export function createStructureWorkspace({ plans, batches, register = openProjec
   async function edit(project, request) {
     await assertOwner(project);
     const state = await plans.status(project.path, request);
-    const plan = state.status === 'complete' && state.taskKey === request.taskKey && state.context?.visibility === 'shared' && state.plans?.find(plan => plan.id === request.planId);
-    if (!plan) throw new HttpError(409, '找不到此讲解段已保存的公共方案，请重新读取方案列表');
+    const plan = state.status === 'complete' && state.taskKey === request.taskKey && ['shared', 'local'].includes(state.context?.visibility) && state.plans?.find(plan => plan.id === request.planId);
+    if (!plan) throw new HttpError(409, '找不到此讲解段已保存的方案，请重新读取方案列表');
     const draft = await ensureStructureDraft(project.path, { parentProjectId: project.id, plan });
     return { project: await register(draft.root), meta: draft.meta };
   }
@@ -54,6 +54,7 @@ export function createStructureWorkspace({ plans, batches, register = openProjec
     else if (req.method === 'POST' && rest === 'structure-drafts') body = await edit(project, await readJson(req));
     else if (req.method === 'GET' && rest === 'structure-plans') { await assertOwner(project); body = await plans.status(project.path, query); }
     else if (req.method === 'POST' && rest === 'structure-plans/generate') { await assertOwner(project); await authorize(); body = await plans.generate(project.path, await readJson(req)); }
+    else if (req.method === 'POST' && rest === 'structure-plans/recover') { await assertOwner(project); body = await plans.recover(project.path, await readJson(req)); }
     else if (req.method === 'POST' && rest === 'structure-plans/publish') { await assertOwner(project); await authorize(); body = await plans.publish(project.path, await readJson(req)); }
     else return false;
     json(res, 200, body); return true;

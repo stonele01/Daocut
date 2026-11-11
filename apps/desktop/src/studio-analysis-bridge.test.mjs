@@ -2,6 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createStudioAnalysisBridge, studioAnalysisError } from './studio-analysis-bridge.mjs';
 
+test('text bridge waits beyond the larger text transport budget without extending config reads', async t => {
+  const waits = [], schedule = globalThis.setTimeout; let receive;
+  t.mock.method(globalThis, 'setTimeout', (callback, delay, ...args) => { waits.push(delay); return schedule(callback, delay, ...args); });
+  const bridge = createStudioAnalysisBridge({ subscribe: fn => { receive = fn; }, send: message => queueMicrotask(() => receive({ type: 'analysis-response', id: message.id, ok: true, value: {} })) });
+  await bridge({ operation: 'execute' }); await bridge({ operation: 'public-config' });
+  assert.deepEqual(waits, [310000, 15000]);
+});
+
 test('utility replies keep concurrent requests separate and preserve safe failure receipts', async () => {
   let receive; const sent = [];
   const bridge = createStudioAnalysisBridge({ send: message => sent.push(message), subscribe: fn => { receive = fn; } });

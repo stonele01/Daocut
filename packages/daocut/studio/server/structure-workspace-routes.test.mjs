@@ -41,7 +41,15 @@ async function fixture(t, { semantics = true } = {}) {
     return { task: structuredClone(task) };
   };
   const sharedOptions = { coordinate, settings: () => ({ enabled: true, resultRoots: [{ libraryId: 'synthetic-route-library', root: join(dir, 'mock-shared-results') }] }), readManifest: async () => ({ items: { 'assets/live.mp4': { libraryId: 'synthetic-route-library', relativePath: 'live.mp4' } } }), resolveSource: async (root, asset) => join(root, asset), publishFile: async (path, bytes) => { if (failPublication) throw Error('synthetic destination unavailable'); await writeFile(path, bytes); } };
-  const start = () => startStudio({ port: 0, openBrowser() {}, sharedAnalysis: sharedOptions, liveAnalysis: { transcribe() { throw Error('No transcription'); }, modelClient() { throw Error('No model'); } } });
+  const modelRequests = [];
+  const start = () => startStudio({ port: 0, openBrowser() {}, sharedAnalysis: sharedOptions, liveAnalysis: {
+    transcribe() { throw Error('No transcription'); }, modelIdentity: { provider: 'mock', model: 'simulated-structure', endpoint: 'https://mock.invalid' },
+    modelClient(request) {
+      modelRequests.push(request); assert.match(request.system, /第三步/);
+      const tags = ['钩子', '痛点', '卖点', '行动指令'];
+      return { schema: 'ai-structure-plans-v2', plans: [[0, 2, 3], [0, 1, 2, 3]].map(row => row.map(unit => ({ unit, firstCue: unit, lastCue: unit, tags: [tags[unit]] }))), complete: true, issues: [] };
+    },
+  } });
   studio = await start();
   const api = async (path, method = 'GET', body, expected = 200) => {
     const response = await fetch(`${studio.origin}${path}`, { method, headers: { 'x-studio-key': studio.key, ...(body ? { 'content-type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
@@ -53,8 +61,8 @@ async function fixture(t, { semantics = true } = {}) {
   const cues = [
     { startMs: 0, endMs: 8000, text: '第一段完整钩子' },
     { startMs: 8000, endMs: 13000, text: '第一段完整痛点' },
-    { startMs: 13000, endMs: 28000, text: '第一段完整核心卖点' },
-    { startMs: 28000, endMs: 40000, text: '第一段完整购买指令' },
+    { startMs: 13000, endMs: 32000, text: '第一段完整核心卖点' },
+    { startMs: 32000, endMs: 44000, text: '第一段完整购买指令' },
     { startMs: 60000, endMs: 70000, text: '返场专属钩子' },
     { startMs: 70000, endMs: 85000, text: '返场专属卖点' },
     { startMs: 85000, endMs: 95000, text: '返场专属购买指令' },
@@ -76,7 +84,15 @@ async function fixture(t, { semantics = true } = {}) {
   }
   const request = { sourceId: source.id, productId: 'product', intervalId: 'lecture-first' }, endpoint = `/api/projects/${project.id}`;
   const planPath = request => `${endpoint}/structure-plans?${new URLSearchParams(request)}`;
-  return { api, root, project, source, request, endpoint, planPath, claims: () => claims, failPublication: value => { failPublication = value; }, restart: async () => { await studio.close(); studio = await start(); } };
+  const generate = async () => {
+    const before = await api(planPath(request));
+    let state = await api(`${endpoint}/structure-plans/generate`, 'POST', { ...request, confirmed: true, confirmationId: before.confirmation?.id });
+    // Publication is an asynchronous phase too. Only stop there when this fixture
+    // intentionally simulates a failed destination; a real success must be complete.
+    for (let count = 0; (state.status === 'running' || state.status === 'publish-pending' && !failPublication) && count < 100; count++) { await new Promise(done => setTimeout(done, 10)); state = await api(planPath(request)); }
+    return state;
+  };
+  return { api, root, project, source, request, endpoint, planPath, generate, modelRequests, claims: () => claims, failPublication: value => { failPublication = value; }, restart: async () => { await studio.close(); studio = await start(); } };
 }
 
 test('default Studio routes show missing semantic details without a model call or a generation claim', async t => {
@@ -87,22 +103,28 @@ test('default Studio routes show missing semantic details without a model call o
   assert.equal(after.status, 'unavailable'); assert.equal(f.claims(), count);
 });
 
-test('default Studio routes exhaust one lecture, reuse its public plans, and create only the selected independent draft', async t => {
+test('default Studio routes use the third AI prompt for one lecture, reuse public plans, and preserve independent drafts', async t => {
   const f = await fixture(t), filmBefore = await readFile(join(f.root, 'film.html'), 'utf8');
   assert.equal((await f.api(f.planPath(f.request))).status, 'idle');
-  const count = f.claims(); let state;
-  do { state = await f.api(`${f.endpoint}/structure-plans/generate`, 'POST', f.request); } while (state.status === 'running');
-  assert.equal(state.status, 'complete'); assert.equal(state.allValidCombinationsEnumerated, true); assert.ok(state.plans.length > 1);
-  assert.equal(state.plans.length, state.stats.emitted); assert.equal(f.claims(), count + 1);
+  const count = f.claims();
+  await f.api(`${f.endpoint}/structure-plans/generate`, 'POST', f.request, 409); assert.equal(f.modelRequests.length, 0);
+  const state = await f.generate();
+  assert.equal(state.status, 'complete'); assert.equal(state.allValidCombinationsEnumerated, false); assert.equal(state.plans.length, 2);
+  assert.equal(state.generationMethod, 'ai'); assert.equal(f.claims(), count + 1); assert.equal(f.modelRequests.length, 1);
+  assert.deepEqual(state.plans.map(plan => plan.sourceDurationMs), [39000, 44000]);
+  assert.ok(state.plans.every(plan => plan.speed === 1.3 && plan.durationMs >= 30000 && plan.durationMs <= 40000));
+  const aiInput = JSON.parse(f.modelRequests[0].input); assert.equal(aiInput.units.length, 4); assert.equal(aiInput.transcript.length, 4);
+  assert.ok(!f.modelRequests[0].input.includes('返场'));
   assert.ok(state.plans.every(plan => plan.scope.intervalId === f.request.intervalId && plan.clips.every(c => c.endMs <= 60000 && !c.text.includes('返场'))));
   assert.deepEqual((await f.api(f.planPath(f.request))).plans, state.plans); assert.equal(f.claims(), count + 1);
+  assert.equal(f.modelRequests.length, 1);
   const request = { ...f.request, taskKey: state.taskKey, planId: 'does-not-exist' };
   await f.api(`${f.endpoint}/structure-drafts`, 'POST', request, 409);
   assert.equal((await f.api(`${f.endpoint}/structure-workspace`)).drafts.length, 0);
   const chosen = { ...request, planId: state.plans[0].id };
   const draft = await f.api(`${f.endpoint}/structure-drafts`, 'POST', chosen);
   assert.equal(draft.meta.planId, chosen.planId); assert.notEqual(draft.project.id, f.project.id);
-  const draftFilm = await readFile(join(draft.project.path, 'film.html'), 'utf8'); assert.match(draftFilm, /data-structure-original-text/);
+  const draftFilm = await readFile(join(draft.project.path, 'film.html'), 'utf8'); assert.match(draftFilm, /data-structure-original-text/); assert.match(draftFilm, /\bspeed="1\.3"/);
   await writeFile(join(draft.project.path, 'film.html'), `${draftFilm}\n<!-- private first-draft edit -->`);
   const reopened = await f.api(`${f.endpoint}/structure-drafts`, 'POST', chosen); assert.equal(reopened.project.id, draft.project.id);
   assert.match(await readFile(join(draft.project.path, 'film.html'), 'utf8'), /private first-draft edit/);
@@ -122,8 +144,7 @@ test('default Studio routes exhaust one lecture, reuse its public plans, and cre
 
 test('a result awaiting public publication cannot be opened through the draft API', async t => {
   const f = await fixture(t); f.failPublication(true);
-  let state;
-  do { state = await f.api(`${f.endpoint}/structure-plans/generate`, 'POST', f.request); } while (state.status === 'running');
+  const state = await f.generate();
   assert.equal(state.status, 'publish-pending'); assert.ok(state.plans.length);
   await f.api(`${f.endpoint}/structure-drafts`, 'POST', { ...f.request, taskKey: state.taskKey, planId: state.plans[0].id }, 409);
   assert.equal((await f.api(`${f.endpoint}/structure-workspace`)).drafts.length, 0);
@@ -131,8 +152,7 @@ test('a result awaiting public publication cannot be opened through the draft AP
 
 for (const action of ['list', 'rename', 'delete', 'locate-child', 'locate-parent-target', 'analyze-child', 'execute-child']) {
   test(`independent structure children cannot escape their workspace through ${action}`, async t => {
-    const f = await fixture(t); let state;
-    do { state = await f.api(`${f.endpoint}/structure-plans/generate`, 'POST', f.request); } while (state.status === 'running');
+    const f = await fixture(t), state = await f.generate();
     let child;
     if (action === 'locate-parent-target') {
       const unregistered = await ensureStructureDraft(f.root, { parentProjectId: f.project.id, plan: state.plans[0] });

@@ -4,7 +4,7 @@ import { sourceTime, type ProductAnalysis, type ProductInterval } from '@/lib/pr
 import { structureColor } from '@/lib/structure-colors';
 import { displayStructureTag, displayStructureTags, hasStructureTag, productStructureTags } from '@/lib/product-structure-tags';
 import type { WorkspaceResource } from '@/lib/workspace-resources';
-import { applyProductEdit, productRangeSummary } from '@/lib/product-manual';
+import { applyProductEdit, applyWholeProductLecture, productRangeSummary } from '@/lib/product-manual';
 import { ProductRanges } from './ProductRanges';
 import { ProductDiscovery } from './ProductDiscovery';
 import { VirtualList } from './VirtualList';
@@ -183,6 +183,11 @@ function ProductPanelContent({ files, currentSourcePath, analysis, selectedProdu
   const [candidateScope, setCandidateScope] = React.useState<'range' | 'product'>('product');
   const [draggedCandidate, setDraggedCandidate] = React.useState<string>();
   const product = analysis.products.find((p) => p.id === selectedProductId);
+  const wholeSource = analysis.sources.find(s => s.id === selected.sourceId && product?.sourceIds.includes(s.id))
+    ?? (product?.sourceIds.length === 1 ? analysis.sources.find(s => s.id === product.sourceIds[0]) : undefined);
+  const canUseWhole = !!wholeSource?.durationMs && !!product && !onReturnToProject
+    && analysis.products.filter(p => p.sourceIds.includes(wholeSource.id)).length === 1
+    && ![...analysis.intervals, ...(analysis.scopes ?? []), ...(analysis.unassigned ?? [])].some(r => r.sourceId === wholeSource.id);
   const ranges = [...analysis.intervals, ...(analysis.scopes ?? [])].filter(r => r.productId === selectedProductId).sort((a, b) => a.sourceId.localeCompare(b.sourceId) || a.startMs - b.startMs);
   const selectRange = (range: ProductInterval) => {
     setSelection({ sourceId: range.sourceId, intervalId: range.id });
@@ -203,6 +208,17 @@ function ProductPanelContent({ files, currentSourcePath, analysis, selectedProdu
     try {
       await onSave(applyProductEdit(analysis, { type: 'rename', productId: product.id, name: nextName }));
       setRenaming(false); setNotice('已保存');
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    finally { setBusy(false); }
+  };
+  const useWholeLecture = async () => {
+    if (!product || !wholeSource || !canUseWhole || busy) return;
+    setBusy(true); setError(''); setNotice('');
+    try {
+      const next = applyWholeProductLecture(analysis, product.id, wholeSource.id);
+      await onSave(next);
+      const range = next.intervals.at(-1)!;
+      selectRange(range); setNotice('已选好整段，转写就绪后点击“分析”');
     } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
     finally { setBusy(false); }
   };
@@ -237,9 +253,10 @@ function ProductPanelContent({ files, currentSourcePath, analysis, selectedProdu
           </> : <>
             <button type="button" aria-pressed={cardSelected} className="flex w-full min-w-0 flex-1 flex-col justify-center gap-2.5 text-left transition active:scale-[.99]" onClick={() => onSelectProduct(p.id)}>
               <span className="w-full break-words text-[14px] font-medium leading-5" title={`${p.name} · ${p.sourceIds.length} 个视频 · ${status(p)}`}>{p.name}</span>
-              <span className="flex w-full flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[11px] leading-4 text-[var(--text-muted)]"><span>{summary.count} 段讲解</span><span className="tabular-nums">共 {sourceTime(summary.totalMs)}</span></span>
+              <span className="flex w-full flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[11px] leading-4 text-[var(--text-muted)]"><span>{summary.count ? `${summary.count} 段讲解` : '请选择讲解范围'}</span>{summary.count > 0 && <span className="tabular-nums">共 {sourceTime(summary.totalMs)}</span>}</span>
               {!!candidateCounts.get(p.id) && <span className="text-[11px] text-[var(--accent)]">{candidateCounts.get(p.id)} 条话术</span>}
             </button>
+            {cardSelected && canUseWhole && <div className="space-y-1 text-[11px] text-[var(--text-muted)]"><p>只讲这一个商品：无需拆商品</p><button type="button" className={`${btn} w-full border-[var(--border)] text-[var(--text)]`} disabled={busy} onClick={() => void useWholeLecture()}>整段作为一次讲解 · {sourceTime(wholeSource!.durationMs!)}</button></div>}
             {cardSelected && <div className="flex flex-wrap items-center gap-2 border-t border-[var(--accent)]/15 pt-2.5">{onReturnToProject ? <button type="button" className={btn} onClick={onReturnToProject}>返回工程分析</button> : action}{onCompose && <button type="button" className={`${btn} min-h-9 rounded-md px-3 text-[12px]`} disabled={!analysis.intervals.some(range => range.id === selected.intervalId && range.sourceId === selected.sourceId && range.productId === p.id)} onClick={() => { const range = analysis.intervals.find(range => range.id === selected.intervalId && range.sourceId === selected.sourceId && range.productId === p.id); if (range) onCompose({ sourceId: range.sourceId, productId: p.id, intervalId: range.id, startMs: range.startMs, endMs: range.endMs }); }}>拼结构</button>}<button type="button" className={`${btn} min-h-9 shrink-0 rounded-md px-3 text-[12px]`} disabled={busy || !!onReturnToProject} aria-label={`编辑商品名称：${p.name}`} onClick={() => { setProductName(p.name); setError(''); setRenaming(true); }}>编辑</button></div>}
           </>}
         </div>;

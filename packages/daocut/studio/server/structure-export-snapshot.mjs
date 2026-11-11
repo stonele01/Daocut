@@ -23,7 +23,7 @@ const optional = async path => fs.lstat(path).catch(error => { if (error.code ==
 const fileHash = async path => { const h = createHash('sha256'); for await (const part of createReadStream(path)) h.update(part); return h.digest('hex'); };
 
 function publicFilm(plan, analysis, parentFilm) {
-  if (!plan?.id || !Array.isArray(plan.clips) || !plan.clips.length || plan.speed !== 1) fail('公共方案缺少完整片段或不是原速方案');
+  if (!plan?.id || !Array.isArray(plan.clips) || !plan.clips.length || ![1, 1.3].includes(plan.speed)) fail('公共方案缺少完整片段或播放速度无效');
   const sourceIds = new Set(plan.clips.map(clip => clip.sourceId));
   const source = sourceIds.size === 1 && analysis.sources?.find(item => sourceIds.has(item.id));
   if (!source || !safeAsset(source.assetPath) || !(source.durationMs > 0)) fail('公共方案原片或时长无效');
@@ -32,10 +32,10 @@ function publicFilm(plan, analysis, parentFilm) {
   let at = 0;
   const clips = plan.clips.map((clip, index) => {
     if (!Number.isSafeInteger(clip.startMs) || !Number.isSafeInteger(clip.endMs) || clip.startMs < scope.startMs || clip.endMs > scope.endMs || clip.endMs > source.durationMs || clip.endMs <= clip.startMs || typeof clip.text !== 'string' || !clip.text.trim() || !Array.isArray(clip.roles) || !Array.isArray(clip.coreIds) || (clip.assetPath !== undefined && clip.assetPath !== source.assetPath)) fail('公共方案片段边界、原话或原片身份无效');
-    const value = { id: `structure-${index + 1}`, src: source.assetPath, at: at / 1000, time: [clip.startMs / 1000, clip.endMs / 1000], attrs: { 'data-structure-source-id': clip.sourceId, 'data-structure-original-text': clip.text, 'data-structure-roles': clip.roles.join('|'), 'data-structure-core-ids': clip.coreIds.join('|') } };
+    const value = { id: `structure-${index + 1}`, src: source.assetPath, at: at / (1000 * plan.speed), time: [clip.startMs / 1000, clip.endMs / 1000], speed: plan.speed, attrs: { 'data-structure-source-id': clip.sourceId, 'data-structure-original-text': clip.text, 'data-structure-roles': clip.roles.join('|'), 'data-structure-core-ids': clip.coreIds.join('|') } };
     at += clip.endMs - clip.startMs; return value;
   });
-  if (Math.abs(at - plan.durationMs) > 1 || !Number.isFinite(plan.durationMs)) fail('公共方案时长与片段不一致');
+  if (Math.abs(at / plan.speed - plan.durationMs) > 1 || !Number.isFinite(plan.durationMs)) fail('公共方案时长与片段不一致');
   return filmHtml({ stage: structuredClone(parentFilm.stage), tracks: [{ clips }] });
 }
 

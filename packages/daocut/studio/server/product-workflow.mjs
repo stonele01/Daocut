@@ -102,7 +102,13 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
     const localOnly = rerun ? '明确重新分析仅生成本机新版本，共享首版不变' : transcript?.localReconciled ? '人工确认或修改的转写仅用于本机分析，不上传共享底稿' : adjustedRange || (action === 'discovery' && manual.length) ? '人工修改只保存在本机，新分析不会覆盖共享首版' : undefined;
     const selectedTranscript = action === 'analysis' ? productTranscriptRange(transcript, scope, source.durationMs) : null;
     const data = action === 'transcription' ? null : selectedTranscript ? { cues: selectedTranscript.segments, cueIndices: selectedTranscript.cueIndices } : transcript?.cues;
-    const contract = action === 'transcription' ? { service: serviceIdentity(cleanService((await analysisServices()).transcription)), audioPolicy, audio: 'mp3-16k-mono-32k' } : action === 'analysis' ? await liveAnalysis.sharedContract() : await discovery.sharedContract();
+    // Reuse/recovery publishes the original paid judgment under its original
+    // rules. Only an explicitly new run uses the current prompt contract.
+    const existingContract = !rerun && !newVersion
+      ? action === 'analysis' ? await liveAnalysis.existingSharedContract?.(root, source.id, scope)
+        : action === 'discovery' ? await discovery.existingSharedContract?.(root, source.id) : null
+      : null;
+    const contract = existingContract ?? (action === 'transcription' ? { service: serviceIdentity(cleanService((await analysisServices()).transcription)), audioPolicy, audio: 'mp3-16k-mono-32k' } : action === 'analysis' ? await liveAnalysis.sharedContract() : await discovery.sharedContract());
     return sharedAnalysis.prepare(root, source, { action, scope, data, contract, localOnly, newVersion });
   }
   async function applyFirstDiscovery(root, sourceId, before) {

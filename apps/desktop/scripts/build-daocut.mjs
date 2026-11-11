@@ -258,6 +258,7 @@ async function prepareElectronDist(version) {
 }
 /** Replace files through a temporary sibling so pnpm hard links never write through to its store. */
 function copyFresh(from, to) {
+  if (dirname(from) === join(protocol, 'studio/server') && ['real-nas-integration.mjs', 'source-axis-fixture-temp.mjs'].includes(from.split(/[\\/]/).at(-1))) return;
   let entries;
   try { entries = readdirSync(from, { withFileTypes: true }); }
   catch (error) {

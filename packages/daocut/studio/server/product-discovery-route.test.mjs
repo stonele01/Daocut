@@ -3,7 +3,10 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile, utimes } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { Readable } from 'node:stream';
+import { createHash } from 'node:crypto';
 import { createProductDiscovery } from './product-discovery-route.mjs';
+import * as discoveryRules from './product-discovery.mjs';
+import { DISCOVER_PRODUCTS_PROMPT } from './approved-prompts.mjs';
 import { productAnalysisRoute, readProductAnalysis, recordProductEdit, updateProductAnalysis, writeProductAnalysis } from './product-analysis.mjs';
 
 const base = resolve(import.meta.dirname, '../../../../.tmp/product-discovery-route');
@@ -30,6 +33,101 @@ const get = (r, root) => request(r, root, 'GET', 'product-discovery');
 const start = (r, root, extra = {}) => request(r, root, 'POST', 'product-discovery/discover', { sourceId: 's', confirmed: true, ...extra });
 async function finish(r, root) { for (let n = 0; n < 200; n++) { const value = await get(r, root); if (value.status !== 'running') return value; await new Promise(resolve => setTimeout(resolve, 5)); } throw Error('mock did not finish'); }
 const apply = (r, root, runId, expected, extra = {}) => request(r, root, 'POST', 'product-discovery/apply', { sourceId: 's', confirmed: true, runId, expected, ...extra });
+
+const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).filter(key => value[key] !== undefined).sort().map(key => [key, canonical(value[key])])) : value;
+const hash = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
+const discoveryContract = (prompt, { model = 'isolated-mock', maxBytes = 24000, contextCues = 3 } = {}) => hash({ publicModelHash: hash(model), promptHash: hash(prompt), algorithmVersion: discoveryRules.DISCOVERY_VERSION, windowPolicy: { maxBytes, contextCues, knownProductBytes: 8000 } });
+async function savedRun(root) { const dir = join(root, '.film/product-discovery'), file = join(dir, (await readdir(dir))[0]); return { file, state: JSON.parse(await readFile(file, 'utf8')) }; }
+async function previousPromptRecord(root, policy = {}) {
+  // Represent an existing paid record in the pre-upgrade on-disk schema. The
+  // synthetic model output is deliberately unchanged; no legacy model is called.
+  const { file, state } = await savedRun(root);
+  state.runs.at(-1).contractHash = discoveryContract(discoveryRules.PREVIOUS_DISCOVERY_PROMPT ?? discoveryRules.DISCOVERY_PROMPT, policy);
+  delete state.runs.at(-1).promptHash;
+  await writeFile(file, JSON.stringify(state));
+  return { file, state };
+}
+
+test('approved discovery prompt is actually sent and receives a distinct current request contract', async t => {
+  const root = await setup(t), systems = [];
+  const r = route({ modelClient: async input => { systems.push(input.system); return response(input); } });
+  await start(r, root); assert.equal((await finish(r, root)).status, 'complete');
+  assert.deepEqual(systems, [DISCOVER_PRODUCTS_PROMPT]);
+  const { state } = await savedRun(root), run = state.runs[0];
+  assert.equal(run.contractHash, discoveryContract(DISCOVER_PRODUCTS_PROMPT));
+  assert.notEqual(run.contractHash, discoveryContract(discoveryRules.PREVIOUS_DISCOVERY_PROMPT));
+  assert.equal(run.promptHash, hash(DISCOVER_PRODUCTS_PROMPT));
+  assert.equal((await r.sharedContract()).prompt, hash(DISCOVER_PRODUCTS_PROMPT));
+});
+
+test('completed previous-prompt discovery is reused and applied without rewriting its original contract', async t => {
+  const root = await setup(t); let calls = 0;
+  const options = { modelClient: async input => { calls++; return response(input); } };
+  const first = route(options); await start(first, root); const complete = await finish(first, root);
+  const legacy = await previousPromptRecord(root), before = await readFile(legacy.file, 'utf8');
+  const reopened = route(options), view = await get(reopened, root);
+  assert.equal(view.stale, false); assert.equal(view.runId, complete.runId);
+  assert.equal((await reopened.plan(root, 's')).cached, true);
+  await start(reopened, root); assert.equal(calls, 1);
+  assert.equal(await readFile(legacy.file, 'utf8'), before, 'read/reuse must preserve the original paid record verbatim');
+  const applied = await apply(reopened, root, complete.runId, initial);
+  assert.equal(applied.analysis.products[0].name, '模拟甲');
+  assert.equal((await get(reopened, root)).stale, false);
+  assert.deepEqual((await savedRun(root)).state.runs, legacy.state.runs, 'applying adds application history without changing original prompt identity');
+  assert.equal(await readFile(join(root, 'film.html'), 'utf8'), 'unchanged-film');
+});
+
+test('previous-prompt incomplete windows remain blocked until an explicitly new run and never mix rules', async t => {
+  const root = await setup(t), systems = []; let calls = 0;
+  const policy = { maxBytes: 500, contextCues: 1 };
+  const first = route({ ...policy, modelClient: async input => { calls++; if (calls === 2) throw Error('uncertain'); return response(input); } });
+  await start(first, root); const failed = await finish(first, root);
+  assert.equal(failed.status, 'failed'); assert.equal(failed.runs[0].completedWindows, 1);
+  const legacy = await previousPromptRecord(root, policy), before = await readFile(legacy.file, 'utf8');
+  const reopened = route({ ...policy, modelClient: async input => { calls++; systems.push(input.system); return response(input); } });
+  const view = await get(reopened, root), plan = await reopened.plan(root, 's', { retry: true });
+  assert.equal(view.status, 'failed'); assert.equal(view.canRetry, false);
+  assert.match(view.error, /旧提示词|规则.*变化/);
+  assert.equal(plan.cached, false); assert.equal(plan.rerunRequired, true); assert.equal(plan.reusedRequests, 0);
+  await assert.rejects(start(reopened, root), { status: 409 });
+  await assert.rejects(start(reopened, root, { retry: true }), { status: 409 });
+  assert.equal(calls, 2); assert.equal(await readFile(legacy.file, 'utf8'), before);
+  await start(reopened, root, { rerun: true }); assert.equal((await finish(reopened, root)).status, 'complete');
+  assert.ok(systems.length > 1); assert.ok(systems.every(system => system === DISCOVER_PRODUCTS_PROMPT));
+  const saved = (await savedRun(root)).state;
+  assert.deepEqual(saved.runs[0], legacy.state.runs[0], 'the old failed request and its paid windows must remain unchanged');
+  assert.notEqual(saved.runs[1].contractHash, saved.runs[0].contractHash);
+  assert.equal(saved.runs[1].completed.length, systems.length, 'new rules start their own windows rather than borrowing old paid output');
+});
+
+test('previous-prompt completed reuse still requires matching model, transcript and window policy', async t => {
+  const root = await setup(t); let calls = 0;
+  const client = async input => { calls++; return response(input); };
+  const first = route({ modelClient: client }); await start(first, root); const complete = await finish(first, root);
+  await previousPromptRecord(root);
+  for (const options of [{ modelIdentity: 'other' }, { maxBytes: 23000 }, { contextCues: 2 }, { readTranscript: async () => ({ cues: transcript.cues.map((cue, index) => index ? cue : { ...cue, text: '已修改转写' }) }) }]) {
+    const changed = route({ modelClient: client, ...options });
+    assert.equal((await get(changed, root)).stale, true);
+    assert.equal((await changed.plan(root, 's')).cached, false);
+    await assert.rejects(start(changed, root), { status: 409 });
+    await assert.rejects(apply(changed, root, complete.runId, initial), { status: 409 });
+  }
+  assert.equal(calls, 1);
+});
+
+test('output budget upgrade keeps a completed product split reusable without a new request', async t => {
+  const root = await setup(t); let calls = 0;
+  let identity = { provider: 'deepseek', endpoint: 'https://api.deepseek.com/responses', model: 'deepseek-flash', maxOutputTokens: 16384, reasoningEffort: 'low' };
+  const options = { modelIdentity: () => identity, modelClient: async input => { calls++; return response(input); } };
+  const first = route(options); await start(first, root); const completed = await finish(first, root);
+  assert.equal(completed.status, 'complete'); const before = calls;
+  identity = { ...identity, maxOutputTokens: 32768, outputFormat: 'json_object' };
+  const reopened = route(options), state = await get(reopened, root);
+  assert.equal(state.stale, false); assert.equal(state.runId, completed.runId);
+  assert.equal((await reopened.plan(root, 's')).cached, true);
+  await start(reopened, root); assert.equal(calls, before);
+  assert.equal(await readFile(join(root, 'film.html'), 'utf8'), 'unchanged-film');
+});
 
 test('closed and unknown-identity services do not call a model or create task files', async t => {
   const root = await setup(t); let calls = 0;

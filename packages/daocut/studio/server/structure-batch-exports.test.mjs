@@ -57,15 +57,23 @@ async function fixture(t, { count = 8, hold = false, captureFailure } = {}) {
     materialized.push(snapshot.planId);
   };
   let configuredDrafts = null;
-  const options = { plans: { status: async () => structuredClone(state) }, exports, outputRoot: () => output, capture, materialize, pollMs: 1, revealFolder: async folder => { revealed.push(folder); }, draftsRoot: () => configuredDrafts };
+  const statusRequests = [];
+  const options = { plans: { status: async (_root, request) => { statusRequests.push(structuredClone(request)); return structuredClone(state); } }, exports, outputRoot: () => output, capture, materialize, pollMs: 1, revealFolder: async folder => { revealed.push(folder); }, draftsRoot: () => configuredDrafts };
   const managers = [];
   const make = () => { const value = createStructureBatchExports(options); managers.push(value); return value; };
   t.after(async () => { await Promise.all(managers.map(m => m.stop())); assert.ok(resolve(dir).startsWith(resolve(base) + sep)); await rm(dir, { recursive: true, force: true }); });
   const request = ids => ({ ...scope, taskKey: state.taskKey, planIds: ids, requestId: randomUUID() });
-  return { project, root, output, current, captured, materialized, sent, jobs, failures, state, make, request, revealed, setDrafts: folder => { configuredDrafts = folder; },
+  return { project, root, output, current, captured, materialized, sent, jobs, failures, state, make, request, revealed, statusRequests, setDrafts: folder => { configuredDrafts = folder; },
     resume: () => { paused = false; jobs.forEach(complete); }, max: () => maximum,
   };
 }
+
+test('batch plan lookup preserves the exact task key selected by the user', async t => {
+  const f = await fixture(t), m = f.make(), request = f.request(['plan-2']);
+  const batch = await m.create(f.project, request); await m.wait(f.project, batch.id);
+  assert.equal(f.statusRequests.length, 1);
+  assert.deepEqual(f.statusRequests[0], { ...scope, taskKey: request.taskKey });
+});
 
 test('only checked plans are frozen and exported, in original plan order, without changing the parent film', async t => {
   const f = await fixture(t, { count: 256 }), m = f.make();
@@ -78,6 +86,15 @@ test('only checked plans are frozen and exported, in original plan order, withou
   const saved = (await m.list(f.project)).batches[0];
   assert.equal(saved.status, 'complete'); assert.equal(saved.completed, 3); assert.equal(saved.progress, 1);
   assert.ok(saved.items.every(x => x.origin === 'private' && x.revision && !Object.hasOwn(x, 'snapshot')));
+  assert.equal(await readFile(join(f.root, 'film.html'), 'utf8'), 'existing parent film');
+});
+
+test('saved local plans use the existing checked-item Jianying exporter', async t => {
+  const f = await fixture(t), m = f.make();
+  f.state.context.visibility = 'local';
+  const batch = await m.create(f.project, f.request(['plan-2']));
+  await m.wait(f.project, batch.id);
+  assert.deepEqual(f.sent.map(item => item.snapshot.planId), ['plan-2']);
   assert.equal(await readFile(join(f.root, 'film.html'), 'utf8'), 'existing parent film');
 });
 

@@ -18,11 +18,11 @@ const failure = (code, message) => Object.assign(new Error(message), { code });
 // The new analysis contract already encloses all necessary context in one source
 // range. Older saved analyses/cursors keep their original interpretation and IDs.
 const completeSpeech = review => review?.contract === 'complete-speech-v1';
-const canOpen = atom => atom.completeSpeech
+const canOpen = atom => atom.completeSpeech || atom.aiComposition
   ? atom.roles.length > 0 && !atom.roles.includes('purchase')
   : atom.roles.includes('hook');
 
-function prepare(input = {}) {
+function prepare(input = {}, { aiComposition = false } = {}) {
   const scope = input.scope ?? {}, issues = [], reviewItems = [];
   const issue = (code, message, candidate, extra = {}) => {
     const value = { code, message, ...(candidate ? { candidateId: candidate.id, text: candidate.text, startMs: candidate.startMs, endMs: candidate.endMs } : {}), ...extra };
@@ -103,12 +103,12 @@ function prepare(input = {}) {
     let group = groups.get(key);
     const conditions = canonical(review.conditions);
     if (!group) {
-      group = { key, candidate, candidateIds: [], roles: [], coreIds: [], requireIds: [], excludeIds: [], conditions: {}, cueRange: [cueIndices[first], cueIndices[last]], completeSpeech: completeSpeech(review), invalid: false };
+      group = { key, candidate, candidateIds: [], roles: [], coreIds: [], requireIds: [], excludeIds: [], conditions: {}, cueRange: [cueIndices[first], cueIndices[last]], completeSpeech: completeSpeech(review), aiComposition, invalid: false };
       groups.set(key, group);
     }
     group.candidateIds.push(candidate.id);
     group.roles = unique([...group.roles, ...review.roles]).sort();
-    const coreIds = completeSpeech(review) ? (review.roles.includes('core') ? [`speech-${hash(stableCandidate(candidate)).slice(0, 24)}`] : []) : (review.coreIds ?? []);
+    const coreIds = completeSpeech(review) || aiComposition ? (review.roles.includes('core') ? [`speech-${hash(stableCandidate(candidate)).slice(0, 24)}`] : []) : (review.coreIds ?? []);
     group.coreIds = unique([...group.coreIds, ...coreIds]).sort();
     group.requireIds = unique([...group.requireIds, ...review.requires]);
     group.excludeIds = unique([...group.excludeIds, ...(review.excludes ?? [])]);
@@ -179,7 +179,7 @@ function prepare(input = {}) {
   ].filter(([role]) => !atoms.some(atom => (role === 'hook' ? canOpen(atom) : atom.roles.includes(role)) && (role !== 'core' || atom.coreIds.length)));
   for (const [role, message] of missing) issue(`MISSING_${role.toUpperCase()}`, message);
   for (const item of reviewItems) item.issues = issues.filter(value => value.candidateId === item.candidateId);
-  const speechLabels = Object.fromEntries(atoms.filter(atom => atom.completeSpeech).flatMap(atom => atom.coreIds.map(id => [id, atom.candidate.text.length > 24 ? `${atom.candidate.text.slice(0, 24)}…` : atom.candidate.text])));
+  const speechLabels = Object.fromEntries(atoms.filter(atom => atom.completeSpeech || atom.aiComposition).flatMap(atom => atom.coreIds.map(id => [id, atom.candidate.text.length > 24 ? `${atom.candidate.text.slice(0, 24)}…` : atom.candidate.text])));
   const coreLabels = Object.fromEntries(unique(atoms.flatMap(atom => atom.coreIds)).map(id => [id, speechLabels[id] ?? (string(input.semanticReview?.coreLabels?.[id]) ? input.semanticReview.coreLabels[id] : id)]));
   const inspection = { version: STRUCTURE_COMPOSITION_VERSION, inputHash, scope: { ...scope }, ready: validScope && missing.length === 0, materialComplete,
     candidateCount: selected.length, eligibleCount: atoms.length, ignoredCount: candidates.length - selected.length, issues, reviewItems, coreLabels };
@@ -187,6 +187,26 @@ function prepare(input = {}) {
 }
 
 export function inspectCompositionInput(input) { return prepare(input).inspection; }
+export function inspectAiCompositionInput(input) { return prepare(input, { aiComposition: true }).inspection; }
+
+/** Validate an explicitly chosen sequence. This never searches or rearranges it. */
+export function validateStructureSequences(input, sequences) {
+  const prepared = prepare(input, { aiComposition: true }), plans = [], issues = [], accepted = [], seen = new Set();
+  const indices = new Map(prepared.atoms.flatMap(atom => atom.candidateIds.map(id => [id, atom.index])));
+  sequences.forEach((sequence, row) => {
+    const path = [];
+    const valid = sequence.every(id => {
+      const index = indices.get(id);
+      if (index === undefined || path.some(item => prepared.atoms[item].roles.includes('purchase')) || !canAppend(prepared.atoms, path, index)) return false;
+      path.push(index); return true;
+    }) && validPath(prepared.atoms, path);
+    if (!valid) { issues.push({ code: 'AI_SEQUENCE_INVALID', message: `AI 方案 ${row + 1} 的结构、完整范围、上下文或活动条件不成立，未自动改排`, row }); return; }
+    const plan = planFor(prepared, path);
+    if (seen.has(plan.id)) return;
+    seen.add(plan.id); plans.push(plan); accepted.push(row);
+  });
+  return { plans, issues, accepted, inspection: prepared.inspection };
+}
 
 function canAppend(atoms, path, index) {
   if (path.includes(index)) return false;

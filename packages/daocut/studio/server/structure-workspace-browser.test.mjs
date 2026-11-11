@@ -157,7 +157,18 @@ test('structure UI previews without mutation and preserves independent drafts th
       if (savedMediaReview) mediaReviewReads += 1;
       return route.fulfill({ json: liveAnalysisState() });
     });
-    await page.route('**/structure-plans**', route => route.fulfill({ json: { status: 'complete', taskKey: 'synthetic-public-task', context: { ...scope, visibility: 'shared' }, plans, complete: true, materialComplete: true, allValidCombinationsEnumerated: true, issues: [], requestCount: 0, ...(savedMediaReview ? { mediaReview: savedMediaReview, mediaReviewOrigin: 'local' } : {}), ...(savedVisualReview ? { visualReview: savedVisualReview, visualReviewOrigin: 'local' } : {}) } }));
+    let structureSubmissions = 0, structurePolls = 0;
+    await page.route('**/structure-plans**', async route => {
+      if (route.request().method() === 'POST') {
+        assert.ok(route.request().url().endsWith('/structure-plans/generate'));
+        assert.deepEqual(route.request().postDataJSON(), { ...scope, confirmed: true, confirmationId: 'synthetic-ai-confirmation', continue: false });
+        structureSubmissions++;
+      } else if (structureSubmissions) structurePolls++;
+      const status = !structureSubmissions ? 'idle' : structurePolls < 2 ? 'running' : 'complete';
+      await route.fulfill({ json: { status, taskKey: 'synthetic-public-task', context: { ...scope, visibility: 'shared' }, plans: status === 'complete' ? plans : [], complete: status === 'complete', generationMethod: 'ai', materialComplete: true, allValidCombinationsEnumerated: false, issues: [], requestCount: structureSubmissions,
+        confirmation: { enabled: true, id: 'synthetic-ai-confirmation', service: { provider: 'mock', model: 'simulated-structure', endpoint: 'https://mock.invalid/structure' }, candidateCount: 4, transcriptSegments: 4, requestCount: 1, visibility: 'shared' },
+        ...(savedMediaReview ? { mediaReview: savedMediaReview, mediaReviewOrigin: 'local' } : {}), ...(savedVisualReview ? { visualReview: savedVisualReview, visualReviewOrigin: 'local' } : {}) } });
+    });
     await page.route('**/structure-drafts', async route => {
       try {
         const body = route.request().postDataJSON(), plan = plans.find(item => item.id === body.planId);
@@ -195,9 +206,10 @@ test('structure UI previews without mutation and preserves independent drafts th
     await page.getByRole('button', { name: '重新分析结构', exact: true }).click();
     const workflowDialog = page.getByRole('dialog', { name: '确认分析', exact: true });
     await workflowDialog.getByText('其中：文字分析 2 次 ＋ AI 看图 1 次', { exact: true }).waitFor();
+    await workflowDialog.locator('details > summary').click();
     await workflowDialog.getByText('画面发送至：https://model.invalid/vision', { exact: true }).waitFor();
-    assert.match(await workflowDialog.innerText(), /看图请求可能计费/);
-    assert.match(await workflowDialog.innerText(), /本讲解抽帧与对应原话/);
+    assert.match(await workflowDialog.innerText(), /请求可能计费/);
+    assert.match(await workflowDialog.innerText(), /发送抽帧进行看图核查/);
     await workflowDialog.getByRole('button', { name: '取消', exact: true }).click();
     assert.equal(visualReviewRequests, 0, 'the text workflow confirmation never sends a request by merely opening');
     const analysisVisualReview = page.locator('details[aria-label="已保存的 AI 看图核查"]');
@@ -222,7 +234,20 @@ test('structure UI previews without mutation and preserves independent drafts th
     await page.locator('summary').filter({ hasText: /^分析详情$/ }).click();
     await productCard.getByRole('button', { name: '拼结构', exact: true }).click();
     const panel = page.getByRole('complementary', { name: '公共结构方案' });
+    const structureDialog = page.getByRole('dialog', { name: '确认 AI 拼结构', exact: true });
+    await structureDialog.getByText('simulated-structure', { exact: false }).waitFor();
+    assert.match(await structureDialog.innerText(), /1 次|1次/);
+    assert.equal(structureSubmissions, 0, 'opening confirmation does not send a model request');
+    await structureDialog.getByRole('button', { name: '取消', exact: true }).click();
+    assert.equal(structureSubmissions, 0);
+    await productCard.getByRole('button', { name: '拼结构', exact: true }).click();
+    await structureDialog.getByRole('button', { name: '确认 AI 拼结构', exact: true }).click();
     await panel.locator('[data-structure-plan="synthetic-plan-a"]').waitFor();
+    assert.equal(structureSubmissions, 1, 'progress polling must use GET, never repeated model POSTs');
+    assert.ok(structurePolls >= 2);
+    assert.doesNotMatch(await panel.innerText(), /已列出全部|正在枚举/);
+    await productCard.getByRole('button', { name: '拼结构', exact: true }).click();
+    assert.equal(structureSubmissions, 1, 'saved plans are reused without another confirmation/request');
     const planMediaReview = panel.locator('details[aria-label="方案复用的音画核查"]');
     await planMediaReview.getByText('音画工具结果已保存', { exact: true }).waitFor();
     await planMediaReview.locator('summary').click();

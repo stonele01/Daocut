@@ -1,4 +1,4 @@
-import { structureRole, type StructurePlan } from './structure-workspace.ts';
+import { previewClipDuration, structureRole, structureSpeedLabel, type StructurePlan } from './structure-workspace.ts';
 
 const roleShort: Record<string, string> = { hook: '钩子', story: '故事', display: '展示', pain: '痛点', core: '卖点', offer: '福利', trust: '背书', purchase: '逼单', context: '前文' };
 const roleColor: Record<string, string> = { hook: '#ba8543', story: '#ba8543', display: '#0e7490', pain: '#d58a50', core: '#9d79d8', offer: '#6b99dc', trust: '#6b99dc', purchase: '#69b39c', context: '#9ca3af' };
@@ -14,7 +14,7 @@ export function structureDraftLabel(planId: string, plans: readonly ({ id: strin
   const index = plans.findIndex(plan => plan.id === planId);
   const plan = plans[index];
   if (plan?.clips && plan.coreIds && typeof plan.durationMs === 'number') {
-    const card = structurePlanCard({ clips: plan.clips, coreIds: plan.coreIds, coreLabels: plan.coreLabels, durationMs: plan.durationMs });
+    const card = structurePlanCard({ clips: plan.clips, coreIds: plan.coreIds, coreLabels: plan.coreLabels, durationMs: plan.durationMs, speed: plan.speed, version: plan.version });
     // This is the public plan's duration; personal trimming may have changed the draft's length.
     return `方案 ${planLetter(index)} · ${card.title} · 原方案${card.durationLabel.replace(' 秒', '秒')}`;
   }
@@ -29,7 +29,7 @@ function excerpt(text: string): string {
 }
 
 /** Display labels describe confirmed selling points and source order, never new marketing copy. */
-export function structurePlanCard(plan: Pick<StructurePlan, 'clips' | 'coreIds' | 'coreLabels' | 'durationMs'>) {
+export function structurePlanCard(plan: Pick<StructurePlan, 'clips' | 'coreIds' | 'coreLabels' | 'durationMs'> & Partial<Pick<StructurePlan, 'speed' | 'version'>>) {
   const coreIds = [...new Set(plan.coreIds)];
   const labels = coreIds.flatMap(id => plan.coreLabels?.[id] ? [plan.coreLabels[id]!] : []);
   const hook = plan.clips.find(clip => clip.roles.includes('hook'));
@@ -44,7 +44,7 @@ export function structurePlanCard(plan: Pick<StructurePlan, 'clips' | 'coreIds' 
   }
   const blocks = plan.clips.map(clip => ({
     roles: clip.roles, label: clip.roles.map(role => roleShort[role] ?? role).join('/'),
-    fullLabel: clip.roles.map(structureRole).join('/'), durationMs: clip.endMs - clip.startMs,
+    fullLabel: clip.roles.map(structureRole).join('/'), durationMs: previewClipDuration(plan, clip),
     color: roleColor[clip.roles.find(role => role !== 'context') ?? 'context'] ?? '#9ca3af',
   }));
   const middle: { label: string; count: number }[] = [];
@@ -59,14 +59,18 @@ export function structurePlanCard(plan: Pick<StructurePlan, 'clips' | 'coreIds' 
     ...(blocks.length > 1 ? [`${blocks.at(-1)!.fullLabel}收尾`] : []),
   ].join('，') : '';
   const seconds = plan.durationMs / 1000;
+  const accelerated = plan.speed === 1.3;
   return {
     title: coreSequence.length ? coreSequence.map(item => `${item.label}${item.count > 1 ? `（${item.count}段）` : ''}`).join(' → ') : labels.join('＋') || '结构方案',
     subtitle: coreClips.length ? `卖点原话：${coreClips.map(clip => excerpt(clip.text)).join(' → ')}` : '卖点原话待核对',
     fullCoreQuotes: coreClips.map(clip => clip.text).join(' → '),
     hook: hook?.text.trim() ? `钩子：${excerpt(hook.text)}` : '钩子原话待核对',
     fullHook: hook?.text ?? '',
-    blocks, summary, coreCount: coreIds.length,
+    blocks, summary, coreCount: coreIds.length, speedLabel: structureSpeedLabel(plan),
+    durationInRange: seconds >= 30 && seconds <= (accelerated ? 40 : 50),
     durationLabel: `${Number.isInteger(seconds) ? seconds : seconds.toFixed(1)} 秒`,
-    durationHint: seconds < 30 ? '不足30秒 · 可用' : seconds > 50 ? '超过50秒 · 可用' : '参考时长内',
+    durationHint: accelerated
+      ? seconds < 30 ? '不足30秒 · 需核对' : seconds > 40 ? '超过40秒 · 需核对' : '30～40秒内'
+      : seconds < 30 ? '不足30秒 · 可用' : seconds > 50 ? '超过50秒 · 可用' : '参考时长内',
   };
 }

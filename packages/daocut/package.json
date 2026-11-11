@@ -1,6 +1,6 @@
 {
   "name": "daocut",
-  "version": "0.2.21",
+  "version": "0.2.29",
   "description": "The open source AI video agent: films as web pages, the manual that teaches your coding agent to make them, the `daocut` command, and Studio, the editor to change anything in them.",
   "license": "MIT",
   "homepage": "https://github.com/stonele01/Daocut",
@@ -51,7 +51,10 @@
     "!src/*.test.mjs",
     "MANUAL.md",
     "studio/server/**/*.mjs",
+    "!studio/server/real-nas-integration.mjs",
+    "!studio/server/source-axis-fixture-temp.mjs",
     "studio/server/text-structure-reference.txt",
+    "studio/server/prompts/*.txt",
     "studio/server/**/*.js",
     "!studio/server/**/*.test.mjs",
     "studio/client.mjs",

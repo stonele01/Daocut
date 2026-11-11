@@ -117,8 +117,9 @@ test('compact window merging does not silently confirm a legacy duplicate', asyn
 });
 test('mock client returns source-derived text and times with verification warning', async () => {
   const result = await analyzeTextStructure({ ...input(), client: async ({ system, input: body }) => {
-    assert.match(system, /本次只提供原片时间基准的 ASR/);
-    assert.match(TEXT_STRUCTURE_PROMPT, /价格锚点福利机制/);
+    assert.equal(system, TEXT_STRUCTURE_PROMPT);
+    assert.match(system, /未提供音频、画面或已有音画核查记录/);
+    assert.match(system, /价格对比包含在福利机制里/);
     assert.equal(JSON.parse(body).cues.length, 2);
     return { candidates: [item], issues: [] };
   } });
@@ -163,8 +164,9 @@ test('injected DeepSeek client uses only fake fetch and returns parsed output', 
     assert.equal(url, 'https://api.deepseek.com/responses');
     const body = JSON.parse(options.body);
     assert.equal(body.input[0].role, 'system');
-    assert.equal(body.max_output_tokens, 16384);
+    assert.equal(body.max_output_tokens, 32768);
     assert.deepEqual(body.reasoning, { effort: 'low' });
+    assert.deepEqual(body.text, { format: { type: 'json_object' } });
     return { ok: true, json: async () => ({ status: 'completed', output: [{ content: [{ type: 'output_text', text: JSON.stringify({ candidates: [item], issues: [] }) }] }] }) };
   } });
   assert.equal(reads, 0);

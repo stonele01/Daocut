@@ -110,3 +110,13 @@ export function productRangeSummary(data: ProductAnalysis, productId: string) {
   const ranges = data.intervals.filter(i => i.productId === productId);
   return { ranges, count: ranges.length, totalMs: ranges.reduce((sum, range) => sum + range.endMs - range.startMs, 0) };
 }
+
+/** Explicit single-product shortcut; never merges existing lectures/returns. */
+export function applyWholeProductLecture(data: ProductAnalysis, selectedProductId: string, sourceId: string): ProductAnalysis {
+  const source = data.sources.find(s => s.id === sourceId), product = data.products.find(p => p.id === selectedProductId);
+  if (!source || !product?.sourceIds.includes(sourceId)) throw new Error('请选择当前商品的来源视频');
+  if (data.intervals.some(i => i.sourceId === sourceId) || data.scopes?.some(i => i.sourceId === sourceId) || data.unassigned?.some(i => i.sourceId === sourceId)) throw new Error('此视频已有讲解范围，请选择或调整已有范围');
+  if (data.products.filter(p => p.sourceIds.includes(sourceId)).length !== 1) throw new Error('此视频关联多个商品，请先核对讲解范围');
+  if (source.durationMs === null || !Number.isFinite(source.durationMs) || source.durationMs <= 0) throw new Error('视频时长不可用，请先核对来源');
+  return applyProductEdit(data, { type: 'range', id: productId(), sourceId, productId: selectedProductId, startMs: 0, endMs: source.durationMs });
+}

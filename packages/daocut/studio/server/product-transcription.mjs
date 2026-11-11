@@ -7,13 +7,65 @@ import { inside, readable } from './files.mjs';
 import { parseVtt, transcriptPath } from './transcripts.mjs';
 import { AUDIO_SEGMENT_POLICY, planAudioSegments, mergeAudioSegments, validateTranscriptCues } from './transcription-segments.mjs';
 import { resolveSharedMedia, sharedMediaManifest } from './shared-media.mjs';
-import doubao from './providers/doubao.mjs';
+import doubao, { doubaoResult } from './providers/doubao.mjs';
 import { probe } from './derived.mjs';
 import { readReviewedTranscript, readCompletedSegmentTranscript } from './transcript-review.mjs';
 
 const running = new Map();
 const notSubmitted = (reason) => Object.assign(new Error('Transcription did not upload audio.'), { code: 'ASR_NOT_SUBMITTED', reason });
 const digest = id => createHash('sha256').update(id).digest('hex');
+
+// Match the provider's existing 150ms tail tolerance. Only an end inside this
+// small tail is bounded; starting outside the source or larger overruns fail.
+function boundedResult(row, durationMs) {
+  const timingAdjustments = [];
+  const endAt = (kind, index, startMs, endMs) => {
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || startMs < 0 || startMs >= durationMs || endMs < startMs || endMs > durationMs + 150) throw new Error(kind === 'sentence' ? 'Transcription has invalid timestamps; sentence-level location is unavailable.' : 'Transcription returned invalid timestamps. Check the saved response before retrying.');
+    if (endMs > durationMs) {
+      timingAdjustments.push({ kind, index, originalEndMs: endMs, endMs: durationMs });
+      return durationMs;
+    }
+    return endMs;
+  };
+  if (typeof row?.text !== 'string' || !Array.isArray(row.words) || !row.words.length || row.words.some(w => typeof w?.token !== 'string' || !Number.isFinite(w.start) || !Number.isFinite(w.end))) throw new Error('Transcription returned invalid timestamps.');
+  const words = row.words.map((w, i) => ({ ...w, end: endAt('word', i, w.start * 1000, w.end * 1000) / 1000 }));
+  validateTranscriptCues(row.cues);
+  const cues = row.cues.map((c, i) => ({ ...c, endMs: endAt('sentence', i, c.startMs, c.endMs) }));
+  validateTranscriptCues(cues, durationMs);
+  return { ...row, words, cues, ...(timingAdjustments.length ? { timingAdjustments } : {}) };
+}
+
+/** Pure recovery from a matching saved provider success. Does not read media,
+ * credentials or the network, and cannot replace an already completed cache. */
+export function restoreProductTranscriptCache(previous, response) {
+  if (previous?.status !== 'pending' || previous.segmented) throw new Error('Only a pending single-response transcript can be recovered.');
+  const requestId = previous.requestId;
+  if (!/^[a-f0-9-]{36}$/i.test(requestId ?? '') || response?.requestId !== requestId || !previous.attempts?.some(a => a.requestId === requestId)
+    || response.provider !== 'doubao' || response.model !== 'volc.bigasr.auc_turbo' || response.httpStatus !== 200 || response.serviceStatus !== '20000000'
+    || response.sourceId !== previous.sourceId || response.assetPath !== previous.assetPath || !previous.fingerprint
+    || !['size', 'mtimeMs', 'ctimeMs', 'path'].every(key => previous.fingerprint[key] !== undefined && previous.fingerprint[key] === response.sourceFingerprint?.[key])
+    || !Number.isFinite(previous.durationMs) || previous.durationMs <= 0) throw new Error('Saved response does not match this pending source and request.');
+  const row = boundedResult(doubaoResult(response.body, response.serviceStatus), previous.durationMs);
+  return { ...previous, status: 'complete', text: row.text, cues: row.cues,
+    words: row.words.map(w => ({ text: w.token, startMs: Math.round(w.start * 1000), endMs: Math.round(w.end * 1000) })), rawWords: row.rawWords,
+    ...(row.timingAdjustments ? { timingAdjustments: row.timingAdjustments } : {}),
+    attempts: previous.attempts.map(a => a.requestId === requestId ? { ...a, status: 'complete', recoveredFromResponse: true } : a),
+    recovery: { kind: 'saved-provider-response', requestId, responseSha256: digest(JSON.stringify(response)) } };
+}
+
+async function savedResponse(loc, previous) {
+  if (previous?.status !== 'pending' || previous.segmented || !same(previous, loc) || previous.durationMs !== loc.durationMs || !/^[a-f0-9-]{36}$/i.test(previous.requestId ?? '')) return null;
+  const dir = join(loc.dir, 'raw-responses');
+  await checkCachePath(loc.root, dir);
+  let response;
+  try {
+    const path = join(dir, `${previous.requestId}.json`);
+    await checkCachePath(loc.root, path);
+    response = JSON.parse(await readFile(path, 'utf8'));
+  }
+  catch { return null; }
+  try { return restoreProductTranscriptCache(previous, response); } catch { return null; }
+}
 
 export async function productSourcePath(root, assetPath) {
   const manifest = await sharedMediaManifest(root);
@@ -73,7 +125,7 @@ const save = async (loc, data) => {
 };
 const view = (value, durationMs = value.durationMs) => {
   validateTranscriptCues(value.cues, Number.isFinite(durationMs) ? durationMs : Infinity);
-  return { sourceId: value.sourceId, text: value.text, words: value.words, ...(value.rawWords ? { rawWords: value.rawWords } : {}), cues: value.cues, cached: true, ...transcriptProvenance(value) };
+  return { sourceId: value.sourceId, text: value.text, words: value.words, ...(value.rawWords ? { rawWords: value.rawWords } : {}), cues: value.cues, cached: true, ...(value.recovery?.kind === 'saved-provider-response' ? { recoveredFromResponse: true } : {}), ...transcriptProvenance(value) };
 };
 
 function transcriptProvenance(value) {
@@ -144,6 +196,8 @@ export async function readProductTranscript(root, source) {
   if (!value) return null;
   if (value.status === 'pending') {
     if (value.segmented) { const completed = await readCompletedSegmentTranscript(loc); if (completed) return completed; }
+    const recovered = await savedResponse(loc, value);
+    if (recovered) return view(recovered);
     throw new Error('The previous transcription may have been submitted. Check the service before retrying.');
   }
   legacyProvenance(value, loc);
@@ -218,6 +272,8 @@ export async function transcribeProductSource(root, source, { getKey, signal = n
       if (completed) return completed;
       throw Object.assign(new Error('共享原始分段已完成，请核对本机接缝；不会重复上传音频'), { code: 'ASR_BOUNDARY_REVIEW' });
     }
+    const recovered = await savedResponse(loc, previous);
+    if (recovered) { await save(loc, recovered); return view(recovered); }
     if (previous?.status === 'pending' && !previous.segmented && !retryUncertain) throw new Error('The previous transcription may have been submitted. Check the service before retrying.');
     if (!Number.isFinite(source.durationMs) || source.durationMs <= 0) {
       let durationMs;
@@ -243,15 +299,12 @@ export async function transcribeProductSource(root, source, { getKey, signal = n
     let result;
     try { result = await runProvider('asr', { src: source.assetPath, requestId: state.requestId }, { key: credential, signal, read: async () => audio, say: () => {}, root, onResponse: rawResponseWriter(loc, state.requestId) }); }
     catch (error) { if (error.code === 'ASR_RESPONSE_SAVE_FAILED') throw error; throw new Error('Transcription failed or was interrupted after submission may have begun. Check the service before retrying.'); }
-    const row = result?.index?.[0];
-    if (typeof row?.text !== 'string' || !Array.isArray(row.words) || !row.words.length || row.words.some(w => typeof w.token !== 'string' || !Number.isFinite(w.start) || !Number.isFinite(w.end) || w.start < 0 || w.end < w.start || w.end * 1000 > source.durationMs)) throw new Error('Transcription returned invalid timestamps. Check the service before retrying.');
-    if (!Array.isArray(row.cues) || !row.cues.length || row.cues.some((c, i) => typeof c.text !== 'string' || !c.text.trim() || !Number.isFinite(c.startMs) || !Number.isFinite(c.endMs) || c.startMs < 0 || c.endMs <= c.startMs || (i > 0 && c.startMs < row.cues[i - 1].startMs))) throw new Error('Transcription has no valid sentence timestamps; sentence-level location is unavailable. Check the service before retrying.');
-    validateTranscriptCues(row.cues, Number.isFinite(source.durationMs) ? source.durationMs : Infinity);
+    const row = boundedResult(result?.index?.[0], source.durationMs);
     const latest = await stat(loc.input);
     if (latest.size !== loc.fingerprint.size || latest.mtimeMs !== loc.fingerprint.mtimeMs || latest.ctimeMs !== loc.fingerprint.ctimeMs || await realpath(loc.input) !== loc.fingerprint.path) throw new Error('Source changed during transcription; the result was not accepted. Check the service before retrying.');
     state.attempts.at(-1).status = 'complete';
     state.attempts.at(-1).completedAt = new Date().toISOString();
-    const completed = { ...state, status: 'complete', requestId: result.receipt?.requestId ?? state.requestId, text: row.text, words: row.words.map(w => ({ text: w.token, startMs: Math.round(w.start * 1000), endMs: Math.round(w.end * 1000) })), ...(Array.isArray(row.rawWords) ? { rawWords: row.rawWords } : {}), cues: row.cues };
+    const completed = { ...state, status: 'complete', requestId: result.receipt?.requestId ?? state.requestId, text: row.text, words: row.words.map(w => ({ text: w.token, startMs: Math.round(w.start * 1000), endMs: Math.round(w.end * 1000) })), ...(Array.isArray(row.rawWords) ? { rawWords: row.rawWords } : {}), cues: row.cues, ...(row.timingAdjustments ? { timingAdjustments: row.timingAdjustments } : {}) };
     await save(loc, completed);
     return { ...view(completed), cached: false };
   })();
@@ -287,10 +340,10 @@ async function transcribeSegments(root, source, loc, { getKey, signal, retryUnce
     let result;
     try { result = await runProvider('asr', { src: source.assetPath, requestId: segment.requestId }, { key: credential, signal, read: async () => audio, say: () => {}, root, onResponse: rawResponseWriter(loc, segment.requestId) }); }
     catch (error) { if (error.code === 'ASR_RESPONSE_SAVE_FAILED') throw error; throw new Error('Transcription failed or was interrupted after submission may have begun. Check the service before retrying.'); }
-    const row = result?.index?.[0];
+    const row = boundedResult(result?.index?.[0], segment.endMs - segment.startMs);
     segment.cues = validateTranscriptCues(row?.cues, segment.endMs - segment.startMs);
-    if (!Array.isArray(row.words) || !row.words.length || row.words.some(w => typeof w.token !== 'string' || !Number.isFinite(w.start) || !Number.isFinite(w.end) || w.start < 0 || w.end < w.start || w.end * 1000 > segment.endMs - segment.startMs)) throw new Error('Transcription returned invalid timestamps. Check the service before retrying.');
     segment.words = row.words; segment.rawWords = row.rawWords; segment.text = row.text;
+    if (row.timingAdjustments) segment.timingAdjustments = row.timingAdjustments;
     segment.requestId = result.receipt?.requestId ?? segment.requestId;
     segment.status = 'complete'; segment.completedAt = new Date().toISOString();
     Object.assign(segment.attempts.at(-1), { status: 'complete', completedAt: segment.completedAt });

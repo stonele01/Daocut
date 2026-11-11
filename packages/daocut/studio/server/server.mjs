@@ -66,7 +66,8 @@ import { createProductDiscovery } from './product-discovery-route.mjs';
 import { createProductPreparation } from './product-preparation.mjs';
 import { createProductWorkflow } from './product-workflow.mjs';
 import { createSharedAnalysis } from './shared-analysis.mjs';
-import { createStructurePlans } from './structure-plans.mjs';
+import { createStructurePlanInputReader } from './structure-plans.mjs';
+import { createAiStructurePlans } from './ai-structure-plans.mjs';
 import { createStructureWorkspace } from './structure-workspace.mjs';
 import { createStructureBatchExports } from './structure-batch-exports.mjs';
 import { transcriptReviewRoute } from './transcript-review.mjs';
@@ -130,7 +131,8 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
     try { await authorizeTask(); } catch (error) { throw new HttpError(403, error instanceof Error ? error.message : 'Company sign-in required.', { code: 'company-auth-required' }); }
   };
   const sharedAnalysisService = sharedAnalysis ? createSharedAnalysis(sharedAnalysis) : undefined;
-  const structurePlans = createStructurePlans({ sharedAnalysis: sharedAnalysisService });
+  const structurePlans = createAiStructurePlans({ sharedAnalysis: sharedAnalysisService, modelClient: liveAnalysis?.modelClient, modelIdentity: liveAnalysis?.modelIdentity,
+    readInput: createStructurePlanInputReader({ liveAnalysis: liveAnalysisRoute, readTranscript: liveAnalysis?.readTranscript }) });
   const productWorkflowRoute = createProductWorkflow({ liveAnalysis: liveAnalysisRoute, discovery: productDiscoveryRoute, sharedAnalysis: sharedAnalysisService, analysisServices, readTranscript: liveAnalysis?.readTranscript, probeSource: liveAnalysis?.probeSource ?? productDiscovery?.probeSource, authorizeTask: authorizeCompanyTask });
   let COOKIE = cookieName(port);
   let FRAMED = framedCookieName(port);
