@@ -50,6 +50,22 @@ async function analyze(context, intervalId = 'a1', route = context.route, body) 
   return finish(route, context.root, intervalId);
 }
 
+test('a confirmed transcript seam stays complete while speech analysis is running', async t => {
+  const c = await setup(t), dir = join(c.root, '.film', 'live-analysis');
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, createHash('sha256').update('s').digest('hex') + '.json'), JSON.stringify({ version: 2, sourceId: 's', transcription: { status: 'failed', code: 'ASR_BOUNDARY_REVIEW', localReviewRequired: true }, analysis: { status: 'idle' }, analyses: {}, results: {}, attempts: {} }));
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  const route = createLiveAnalysis({ ...c.options, readTranscript: async () => ({ cues: c.cues, localReconciled: true }), modelClient: async () => { await held; return output(); } });
+  try {
+    await request(route, c.root, 'POST', 'a1');
+    const state = await request(route, c.root, 'GET', 'a1');
+    assert.equal(state.analysis.status, 'running');
+    assert.equal(state.transcription.status, 'complete');
+    assert.equal(state.transcription.code, undefined);
+  } finally { release(); await finish(route, c.root, 'a1'); }
+});
+
 test('A → B → A independent ranges and input versions survive reopen without calls on GET or cached POST', async t => {
   const c = await setup(t);
   const ids = {};
@@ -110,6 +126,35 @@ test('multiple prompt versions remain separately reusable', async t => {
   assert.equal(c.calls(), 2);
 });
 
+test('successful reanalysis archives the previous automatic run without mixing catalogues', async t => {
+  const c = await setup(t), first = await analyze(c), other = await analyze(c, 'b1');
+  const before = (await readProductAnalysis(c.root)).analysis;
+  const previous = before.candidates.filter(item => item.runId === first.analysis.currentRunId);
+  const next = await analyze(c, 'a1', c.route, { rerun: true });
+  assert.equal(next.analysis.status, 'complete');
+  const saved = (await readProductAnalysis(c.root)).analysis;
+  assert.deepEqual(saved.archivedCandidates, previous);
+  assert.deepEqual(saved.candidates.map(item => item.runId), [other.analysis.currentRunId, next.analysis.currentRunId]);
+  assert.deepEqual(saved.intervals, before.intervals);
+  const calls = c.calls(); await request(c.route, c.root, 'POST', 'a1');
+  assert.equal(c.calls(), calls, 'reading or reopening the result must not resend analysis');
+  assert.equal((await readProductAnalysis(c.root)).analysis.archivedCandidates.length, previous.length);
+});
+
+test('reanalysis preserves manually edited old candidates and manually added material', async t => {
+  const c = await setup(t); await analyze(c);
+  const before = (await readProductAnalysis(c.root)).analysis;
+  before.candidates[0].text = '人工修正原话';
+  before.candidates.push({ ...before.candidates[0], id: 'manual-candidate', origin: 'manual', runId: undefined });
+  delete before.candidates.at(-1).runId;
+  await writeProductAnalysis(c.root, before, probe);
+  await analyze(c, 'a1', c.route, { rerun: true });
+  const saved = (await readProductAnalysis(c.root)).analysis;
+  assert.deepEqual(saved.candidates.slice(0, 2), before.candidates);
+  assert.equal(saved.archivedCandidates?.length ?? 0, 0);
+  assert.equal(saved.candidates.length, 3);
+});
+
 test('missing model identity and legacy state are readable but never treated as current', async t => {
   const c = await setup(t), first = await analyze(c);
   const unknown = createLiveAnalysis({ ...c.options, modelIdentity: undefined });
@@ -164,7 +209,7 @@ test('public model identity inspection never decrypts credentials or sends a req
   const c = await setup(t); let credentialReads = 0, network = 0;
   const client = createDeepSeekTextClient({ getConfig: async () => { credentialReads++; throw Error('must not decrypt'); }, getPublicConfig: async () => ({ baseUrl: 'https://api.deepseek.com/v1', model: 'example-model', apiKey: 'must-not-be-returned' }), fetch: async () => { network++; } });
   const publicIdentity = await client.getCacheIdentity();
-  assert.deepEqual(publicIdentity, { provider: 'deepseek', endpoint: 'https://api.deepseek.com/v1/responses', model: 'example-model', maxOutputTokens: 32768, reasoningEffort: 'low', outputFormat: 'json_object' });
+  assert.deepEqual(publicIdentity, { provider: 'deepseek', endpoint: 'https://api.deepseek.com/v1/responses', model: 'example-model', maxOutputTokens: 65536, reasoningEffort: 'high', outputFormat: 'json_object' });
   const route = createLiveAnalysis({ ...c.options, modelIdentity: undefined, modelClient: client });
   await request(route, c.root, 'GET', 'a1'); await request(route, c.root, 'GET', 'b1');
   assert.equal(credentialReads, 0); assert.equal(network, 0);
@@ -177,13 +222,13 @@ test('public model metadata must match the execution configuration before any re
   assert.equal(network, 0);
 });
 
-test('output budget upgrade reuses completed low-reasoning results without changing saved data', async t => {
+test('high default reuses completed low-reasoning analysis without rewriting or regenerating saved data', async t => {
   const c = await setup(t);
   c.identity = { provider: 'deepseek', endpoint: 'https://api.deepseek.com/responses', model: 'deepseek-flash', maxOutputTokens: 16384, reasoningEffort: 'low', configurationId: 'synthetic' };
   const first = await analyze(c);
   const file = join(c.root, '.film/live-analysis', `${createHash('sha256').update('s').digest('hex')}.json`);
   const before = await readFile(file, 'utf8');
-  c.identity = { ...c.identity, maxOutputTokens: 32768, outputFormat: 'json_object' };
+  c.identity = { ...c.identity, maxOutputTokens: 32768, reasoningEffort: 'high', outputFormat: 'json_object' };
   const reopened = createLiveAnalysis(c.options);
   const state = await request(reopened, c.root, 'GET', 'a1');
   assert.equal(state.analysis.status, 'complete'); assert.equal(state.analysis.stale, false);
@@ -191,6 +236,10 @@ test('output budget upgrade reuses completed low-reasoning results without chang
   await request(reopened, c.root, 'POST', 'a1');
   assert.equal(c.calls(), 1);
   assert.equal(await readFile(file, 'utf8'), before);
+  c.identity.maxOutputTokens = 65536;
+  const increased = await request(reopened, c.root, 'GET', 'a1');
+  assert.equal(increased.analysis.stale, false);
+  assert.equal(increased.analysis.currentRunId, first.analysis.currentRunId);
   c.identity.reasoningEffort = 'none';
   assert.equal((await request(reopened, c.root, 'GET', 'a1')).analysis.stale, true, 'a reasoning-mode change is not merely a budget upgrade');
 });
@@ -208,8 +257,8 @@ test('shortened prompt reuses old completed analysis without rewriting its saved
   assert.equal(c.calls(), 1); assert.equal(await readFile(file, 'utf8'), before);
 });
 
-test('approved full prompt reuses only a verified previous-prompt result without rewriting its old identity', async t => {
-  const c = await setup(t), previous = textStructureModule.PREVIOUS_TEXT_STRUCTURE_PROMPT;
+for (const promptName of ['PREVIOUS_ATTRIBUTED_TEXT_STRUCTURE_PROMPT', 'PREVIOUS_CURATED_TEXT_STRUCTURE_PROMPT', 'PREVIOUS_TEXT_STRUCTURE_PROMPT', 'PREVIOUS_FULL_TEXT_STRUCTURE_PROMPT', 'PREVIOUS_SENTENCE_TEXT_STRUCTURE_PROMPT']) test(`current prompt reuses ${promptName} without rewriting its old identity`, async t => {
+  const c = await setup(t), previous = textStructureModule[promptName];
   assert.equal(typeof previous, 'string'); assert.notEqual(previous, TEXT_STRUCTURE_PROMPT);
   const old = createLiveAnalysis({ ...c.options, structurePrompt: previous });
   const completed = await analyze(c, 'a1', old);

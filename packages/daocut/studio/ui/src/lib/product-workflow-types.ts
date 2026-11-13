@@ -1,5 +1,5 @@
 /** Public request metadata only. No credentials or browser-only imports. */
-export type ProductWorkflowRequest = { sourceId: string; action: 'transcription' | 'discovery' | 'analysis'; productId?: string; intervalId?: string; retry?: boolean; rerun?: boolean; newVersion?: boolean };
+export type ProductWorkflowRequest = { sourceId: string; action: 'transcription' | 'discovery' | 'analysis'; prepare?: boolean; productId?: string; intervalId?: string; retry?: boolean; rerun?: boolean; newVersion?: boolean };
 export type SharedResultVersion = {
   taskKey: string; sha256: string; sequence: number; createdAt?: string; model?: string;
 };
@@ -23,6 +23,7 @@ export type SharedAnalysisState = {
 export type ProductWorkflowPlan = ProductWorkflowRequest & {
   identity: string; source: { assetPath: string; durationMs: number }; scope?: { sourceId?: string; productId: string; intervalId: string; startMs: number; endMs: number };
   service: { enabled: boolean; provider: string; name?: string; model: string; endpoint: string; error?: string };
+  nextStage?: { service: ProductWorkflowPlan['service']; contractIdentity: string };
   enabled: boolean; cached: boolean; requestCount: number | null; totalRequests: number | null; reusedRequests: number;
   transcriptSegments: number | null; audioSegments?: { startMs: number; endMs: number; coreStartMs?: number; coreEndMs?: number }[];
   cost: { estimate: number | null; basis: string; uncertain: boolean }; retryRequired: boolean; error?: string;

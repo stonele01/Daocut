@@ -5,7 +5,7 @@ export interface StructureScope { sourceId: string; productId: string; intervalI
 export interface StructurePlan {
   id: string; version?: string | number; scope: StructureScope; durationMs: number; speed: 1 | 1.3; coreIds: string[];
   coreLabels?: Record<string, string>; referenceDuration?: string;
-  clips: { sourceId: string; assetPath?: string; startMs: number; endMs: number; text: string; roles: string[]; coreIds: string[]; speed?: 1 | 1.3 }[];
+  clips: { candidateId?: string; sourceId: string; assetPath?: string; startMs: number; endMs: number; text: string; roles: string[]; coreIds: string[]; speed?: 1 | 1.3 }[];
 }
 export interface StructurePlansState {
   status: 'idle' | 'running' | 'complete' | 'publish-pending' | 'busy' | 'unavailable' | 'failed';
@@ -14,7 +14,9 @@ export interface StructurePlansState {
   issues?: { code: string; message: string; candidateId?: string; text?: string; startMs?: number; endMs?: number }[]; stats?: Record<string, number>;
   context?: StructureScope & { visibility: string }; requestCount?: number;
   generationMethod?: 'ai'; canContinue?: boolean; recoverable?: boolean;
-  confirmation?: { enabled: boolean; id?: string; rulesVersion?: string; message?: string; service?: { model?: string; provider?: string; endpoint?: string }; requestCount?: number; candidateCount?: number; transcriptSegments?: number; continuation?: boolean; visibility?: string };
+  usablePlanIds?: string[];
+  coverage?: { total: number; covered: number; openingCovered?: number; remainingIds: string[]; openingIds: string[]; excluded: { id: string; reason: string; startMs?: number; endMs?: number; text?: string }[]; targetVariants?: number | null; targetCounts?: Record<string, number>; totalVariants?: number; totalDistinctVariants?: number; remainingVariants?: number; perOpening?: { openingId: string; savedCount: number; distinctCount: number; remaining: number }[] };
+  confirmation?: { enabled: boolean; id?: string; rulesVersion?: string; message?: string; service?: { model?: string; provider?: string; endpoint?: string }; requestCount?: number; candidateCount?: number; transcriptSegments?: number; openingCount?: number; batchCount?: number; batchBasis?: string; continuation?: boolean; visibility?: string; targetVariants?: number | null; existingPlanCount?: number; plannedNewVariants?: number };
   mediaReview?: ProductMediaReview;
   mediaReviewOrigin?: 'shared' | 'local';
   visualReview?: ProductVisualReview;
@@ -23,6 +25,35 @@ export interface StructurePlansState {
 }
 export interface StructureDraft { projectId: string; planId: string; planVersion: string | number; scope: StructureScope; durationMs: number }
 export interface StructureWorkspaceState { ownerId: string; activeProjectId: string; drafts: StructureDraft[] }
+
+/** Finished results are for viewing/export. Only start or resume unfinished work. */
+export function needsStructureGeneration(state: StructurePlansState | null): boolean {
+  return state?.status === 'idle' || !!(state?.status === 'complete' && state.canContinue && state.complete === false
+    && (state.requestCount ?? 0) > 0 && state.coverage?.remainingIds.length);
+}
+
+export function isSavedStructurePlanUsable(state: StructurePlansState | null, planId: string): boolean {
+  if (!state?.plans.some(plan => plan.id === planId)) return false;
+  if (state.status === 'complete') return true;
+  return ['ai-structure-plans-v4', 'ai-structure-plans-v5', 'ai-structure-plans-v6', 'ai-structure-plans-v7', 'ai-structure-plans-v8'].includes(state.version ?? '')
+    && ['running', 'busy', 'failed', 'publish-pending'].includes(state.status)
+    && !!state.usablePlanIds?.includes(planId);
+}
+
+/** Group the same source opening across saved rule versions, without renumbering plans. */
+export function groupStructurePlansByOpening<T extends Pick<StructurePlan, 'id' | 'scope' | 'clips'>>(plans: readonly T[]): { key: string; openingId?: string; plans: T[] }[] {
+  const groups = new Map<string, { key: string; openingId?: string; plans: T[] }>();
+  for (const plan of plans) {
+    const clip = plan.clips[0], scope = plan.scope;
+    const key = JSON.stringify([scope.sourceId, scope.productId, scope.intervalId, clip
+      ? clip.candidateId ? ['candidate', clip.candidateId] : ['source-range', clip.sourceId, clip.startMs, clip.endMs]
+      : ['missing-opening', plan.id]]);
+    let group = groups.get(key);
+    if (!group) { group = { key, openingId: clip?.candidateId, plans: [] }; groups.set(key, group); }
+    group.plans.push(plan);
+  }
+  return [...groups.values()];
+}
 
 /** Group by selling-point identity only. Every distinct playable sequence remains available. */
 export function groupStructurePlans<T extends { id: string; coreIds: string[] }>(plans: readonly T[]): { key: string; plans: T[] }[] {
@@ -50,4 +81,4 @@ export function previewPosition(plan: PreviewPlan, timeMs: number) {
   }
   return { index: 0, sourceMs: 0, offsetMs: 0 };
 }
-export const structureRole = (role: string) => ({ hook: '钩子', story: '故事', display: '产品展示', core: '卖点', purchase: '购买逼单', pain: '痛点', offer: '福利机制', trust: '信任背书', context: '必要上下文' }[role] ?? role);
+export const structureRole = (role: string) => ({ hook: '钩子', story: '故事', intro: '产品介绍', display: '产品展示', core: '卖点', purchase: '购买逼单', pain: '痛点', price: '价格机制', offer: '福利机制', trust: '信任背书', context: '必要上下文' }[role] ?? role);

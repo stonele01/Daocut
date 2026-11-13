@@ -175,6 +175,7 @@ export interface SourcePreviewProps {
   sources: MediaSources;
   onClose: () => void;
   sourceId?: string;
+  mediaVersion?: number;
   ranges?: SourceProductRange[];
   selectedProductId?: string | null;
   selectedIntervalId?: string | null;
@@ -196,7 +197,7 @@ export function SourcePreview(props: SourcePreviewProps) {
     : <MediaPreviewPane key={props.file.path} {...props} />;
 }
 
-function MediaPreviewPane({ file, sources, onClose, onPlace, sourceId, ranges, selectedProductId, selectedIntervalId, seekRequest, onSelectRange, hideSourceTimeline, onSourceClock, onClearPreviewRange }: SourcePreviewProps) {
+function MediaPreviewPane({ file, sources, onClose, onPlace, sourceId, mediaVersion = 0, ranges, selectedProductId, selectedIntervalId, seekRequest, onSelectRange, hideSourceTimeline, onSourceClock, onClearPreviewRange }: SourcePreviewProps) {
   const t = useT();
   const rootRef = React.useRef<HTMLDivElement>(null);
   const mediaRef = React.useRef<HTMLVideoElement & HTMLAudioElement>(null);
@@ -222,6 +223,13 @@ function MediaPreviewPane({ file, sources, onClose, onPlace, sourceId, ranges, s
   clockRef.current = onSourceClock;
   const durationRef = React.useRef(duration);
   durationRef.current = duration;
+  const scrubTarget = React.useRef<number | null>(null);
+  const finishScrub = React.useCallback(() => {
+    const media = mediaRef.current, target = scrubTarget.current;
+    if (!media || media.readyState < 1 || media.seeking || target == null) return;
+    scrubTarget.current = null;
+    if (Math.abs(media.currentTime - target) > 0.01) media.currentTime = target;
+  }, []);
 
   const record = React.useCallback((media: HTMLMediaElement, event: string, error?: unknown) => {
     const entry = playbackDiagnostic(media, event, error);
@@ -248,6 +256,30 @@ function MediaPreviewPane({ file, sources, onClose, onPlace, sourceId, ranges, s
     });
   }, [record]);
   React.useEffect(() => () => { playSequence.current++; desiredPlaying.current = false; }, []);
+
+  // A completed local cache replaces the remote file at the same media URL. Reload
+  // the decoder too, preserving the selected moment and whether it was playing.
+  const loadedVersion = React.useRef(mediaVersion);
+  React.useEffect(() => {
+    if (loadedVersion.current === mediaVersion) return;
+    loadedVersion.current = mediaVersion;
+    const media = mediaRef.current;
+    if (!media || file.kind !== 'video') return;
+    const at = media.currentTime, resume = desiredPlaying.current;
+    playSequence.current++;
+    media.pause();
+    const restore = () => {
+      media.currentTime = at;
+      setTime(at);
+      if (resume) playMedia(media);
+    };
+    media.addEventListener('loadedmetadata', restore, { once: true });
+    const url = new URL(src, window.location.href);
+    url.searchParams.set('preview', String(mediaVersion));
+    media.src = url.href;
+    media.load();
+    return () => media.removeEventListener('loadedmetadata', restore);
+  }, [mediaVersion, file.kind, src, playMedia]);
 
   React.useEffect(() => { clockRef.current?.({ time: 0, duration: (file.durationMs ?? 0) / 1000 }); }, [file.path, file.durationMs, sourceId]);
   React.useEffect(() => { clockRef.current?.({ time: mediaRef.current?.currentTime ?? 0, duration }); }, [duration]);
@@ -277,11 +309,12 @@ function MediaPreviewPane({ file, sources, onClose, onPlace, sourceId, ranges, s
     const media = mediaRef.current;
     if (media) {
       if (media.paused) pauseMedia(media);
-      media.currentTime = seconds;
+      scrubTarget.current = seconds;
+      finishScrub();
     }
     setTime(seconds);
     clockRef.current?.({ time: seconds, duration: durationRef.current });
-  }, [clearPreviewRange, pauseMedia]);
+  }, [clearPreviewRange, pauseMedia, finishScrub]);
 
   const toggle = React.useCallback(() => {
     const media = mediaRef.current;
@@ -308,14 +341,16 @@ function MediaPreviewPane({ file, sources, onClose, onPlace, sourceId, ranges, s
     return () => window.removeEventListener('keydown', onKey, true);
   }, [onClose, timed, toggle]);
 
-  /* the playhead follows the media every frame while it plays (timeupdate is 4 Hz) */
+  /* Check range ends each frame, but don't rebuild the source timeline at display refresh rate. */
   React.useEffect(() => {
     if (!playing) return;
     let raf = 0;
+    let published = 0;
     const step = () => { const m = mediaRef.current; if (m) {
       const range = previewRangeRef.current;
       if (range && m.currentTime >= range.endMs / 1000) { m.pause(); m.currentTime = range.endMs / 1000; setTime(m.currentTime); clockRef.current?.({ time: m.currentTime, duration: durationRef.current }); return; }
-      setTime(m.currentTime);
+      const now = performance.now();
+      if (now - published >= 100) { published = now; setTime(m.currentTime); }
     } raf = requestAnimationFrame(step); };
     raf = requestAnimationFrame(step);
     return () => cancelAnimationFrame(raf);
@@ -351,6 +386,7 @@ function MediaPreviewPane({ file, sources, onClose, onPlace, sourceId, ranges, s
     }
     if (appliedSeek.current === key || cancelledSeek.current === key) return;
     if (preparedSeek.current !== key) {
+      scrubTarget.current = null;
       preparedSeek.current = key;
       pauseMedia(media);
       setPlayError(null);
@@ -370,6 +406,7 @@ function MediaPreviewPane({ file, sources, onClose, onPlace, sourceId, ranges, s
   React.useEffect(() => { applySeek(); }, [applySeek]);
 
   const mediaEvents = {
+    onSeeked: finishScrub,
     onPlay: (e: React.SyntheticEvent<HTMLMediaElement>) => { if (!e.currentTarget.paused) { desiredPlaying.current = true; setPlaying(true); setPlaybackState('loading'); record(e.currentTarget, 'play'); } },
     onPlaying: (e: React.SyntheticEvent<HTMLMediaElement>) => { if (!e.currentTarget.paused) { setPlayError(null); setPlaying(true); setPlaybackState('playing'); record(e.currentTarget, 'playing'); } },
     onPause: (e: React.SyntheticEvent<HTMLMediaElement>) => { if (e.currentTarget.paused) { playSequence.current++; desiredPlaying.current = false; setPlaying(false); setPlaybackState('paused'); } },

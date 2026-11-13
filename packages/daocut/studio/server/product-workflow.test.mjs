@@ -29,6 +29,7 @@ async function fixture(t, options = {}) {
     await onReceipt?.({ id: `mock-${text}`, model: 'deepseek-flash', usage: { input_tokens: 12, output_tokens: 6 } });
     const parsed = JSON.parse(input);
     return parsed.intervalId ? { candidates: [{ firstCue: 0, lastCue: parsed.cues.length - 1, tags: ['卖点'], details }], issues: [] }
+      : options.twoProducts ? { products: [{ key: 'p', name: '模拟商品', variant: '', aliases: [], evidence: [0] }, { key: 'q', name: '第二个商品', variant: '', aliases: [], evidence: [2] }], ranges: [{ key: 'p', firstCue: 0, lastCue: 1, kind: 'lecture', reason: '第一个品', evidence: [0] }, { key: 'q', firstCue: 2, lastCue: 4, kind: 'lecture', reason: '第二个品', evidence: [2] }], issues: [] }
       : { products: [{ key: 'p', name: '模拟商品', variant: '', aliases: [], evidence: [0] }], ranges: [{ key: 'p', firstCue: 0, lastCue: 4, kind: 'lecture', reason: '完整讲解', evidence: [0, 4] }], issues: [] };
   };
   const liveOptions = { transcribe: async () => { asr++; if (asrFailure) throw asrFailure; transcript = { cues, words: [] }; return transcript; }, modelClient, modelIdentity: () => service.text, readTranscript, probeSource: probe, ...(options.structureWindowPolicy ? { structureWindowPolicy: options.structureWindowPolicy } : {}) };
@@ -41,6 +42,73 @@ async function fixture(t, options = {}) {
 const plan = (f, action, extra = {}) => f.workflow.plan(f.root, { sourceId: f.source.id, action, ...extra });
 const execute = (f, p, extra = {}) => f.workflow.execute(f.root, { confirmed: true, plan: p, ...extra });
 const settle = f => f.workflow.wait(f.root, f.source.id);
+
+for (const count of [1, 2]) test(`one preparation confirmation transcribes the full source and applies ${count} actual products`, async t => {
+  const f = await fixture(t, { twoProducts: count === 2 });
+  const preparation = await plan(f, 'transcription', { prepare: true });
+  assert.equal(preparation.nextStage.service.model, 'deepseek-flash');
+  await Promise.all([execute(f, preparation), execute(f, preparation)]); await settle(f);
+  const result = (await readProductAnalysis(f.root)).analysis;
+  assert.equal(result.products.length, count); assert.equal(result.intervals.length, count); assert.equal(result.candidates.length, 0);
+  assert.deepEqual(f.counts(), { asr: 1, text: 1 });
+  assert.equal((await f.workflow.status(f.root, f.source.id)).preparation.status, 'complete');
+  assert.equal((await f.workflow.status(f.root, f.source.id)).discoveryReady, true);
+  const reopened = f.make(); await reopened.status(f.root, f.source.id);
+  assert.deepEqual(f.counts(), { asr: 1, text: 1 }, 'reopening is read-only');
+});
+
+test('preparation reuses a completed transcript and stops on discovery failure without automatic retry', async t => {
+  const f = await fixture(t); f.setTranscript({ cues: f.cues }); f.fail(true);
+  await execute(f, await plan(f, 'discovery', { prepare: true })); await settle(f);
+  assert.deepEqual(f.counts(), { asr: 0, text: 1 });
+  assert.equal((await f.workflow.status(f.root, f.source.id)).preparation.status, 'failed');
+  f.workflow = f.make(); await f.workflow.status(f.root, f.source.id);
+  assert.deepEqual(f.counts(), { asr: 0, text: 1 });
+  f.fail(false); await execute(f, await plan(f, 'discovery', { prepare: true, retry: true }), { retryAcknowledged: true }); await settle(f);
+  assert.deepEqual(f.counts(), { asr: 0, text: 2 });
+  assert.equal((await readProductAnalysis(f.root)).analysis.products.length, 1);
+});
+
+test('preparation stops before discovery when transcription needs local seam review', async t => {
+  const f = await fixture(t);
+  f.failAsr(Object.assign(Error('字幕接缝待核对'), { code: 'ASR_BOUNDARY_REVIEW', localReviewRequired: true }));
+  await execute(f, await plan(f, 'transcription', { prepare: true })); await settle(f);
+  assert.deepEqual(f.counts(), { asr: 1, text: 0 });
+  assert.equal((await f.workflow.status(f.root, f.source.id)).preparation.status, 'failed');
+});
+
+test('preparation checks both service configurations before starting audio', async t => {
+  const f = await fixture(t), preparation = await plan(f, 'transcription', { prepare: true });
+  f.service.text.model = 'changed-model';
+  await assert.rejects(execute(f, preparation), { status: 409 });
+  assert.deepEqual(f.counts(), { asr: 0, text: 0 });
+  f.service.text.enabled = false;
+  const disabled = await plan(f, 'transcription', { prepare: true }); assert.equal(disabled.enabled, false);
+});
+
+test('combined preparation keeps saved manual product ranges and returns a reviewable proposal', async t => {
+  const f = await fixture(t); f.setTranscript({ cues: f.cues });
+  await updateProductAnalysis(f.root, data => { data.products.push({ id: 'manual', name: '人工商品', sourceIds: [f.source.id] }); data.intervals.push({ id: 'manual-range', sourceId: f.source.id, productId: 'manual', startMs: 0, endMs: 20000 }); return data; }, probe);
+  const before = (await readProductAnalysis(f.root)).analysis;
+  const initial = await f.workflow.status(f.root, f.source.id);
+  assert.equal(initial.ready, true, 'manual scopes remain available for editing');
+  assert.equal(initial.discoveryReady, false, 'a manual whole-video card is not completed discovery');
+  assert.equal(initial.phase, 'discovery');
+  assert.equal(initial.needsReview, false);
+  assert.deepEqual(f.counts(), { asr: 0, text: 0 });
+  await execute(f, await plan(f, 'discovery', { prepare: true })); await settle(f);
+  assert.deepEqual((await readProductAnalysis(f.root)).analysis, before);
+  assert.equal((await f.workflow.status(f.root, f.source.id)).needsReview, true);
+  assert.equal((await f.workflow.status(f.root, f.source.id)).discoveryReady, false);
+  assert.deepEqual(f.counts(), { asr: 0, text: 1 });
+  const result = await f.workflow.status(f.root, f.source.id);
+  await f.discovery.apply(f.root, { sourceId: f.source.id, runId: result.discovery.runId, expected: before, replaceReviewed: true });
+  const applied = await f.make().status(f.root, f.source.id);
+  assert.equal(applied.discoveryReady, true);
+  assert.equal(applied.phase, 'ready');
+  assert.equal(applied.needsReview, false);
+  assert.deepEqual(f.counts(), { asr: 0, text: 1 });
+});
 
 test('ordinary existing video is registered once without inventing a product or contacting services', async t => {
   const f = await fixture(t);

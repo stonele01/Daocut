@@ -51,11 +51,12 @@ import { clipThumbId, overridesToken } from '@/lib/thumb-frame';
 import { useLoadedThumbs } from '@/lib/use-loaded-thumbs';
 import { droppedOverrides, overrideTarget, undoneFields, type DroppedEdits, type PersonEdit } from '@/lib/dropped-overrides';
 import { filmFrameBox, type FilmFrameId } from '@/lib/film-frame';
-import { canvasFor, fitToCanvas } from '@/lib/canvas-fit';
+import { canvasFor, fitToCanvas, firstVideoCanvas } from '@/lib/canvas-fit';
 import { factsOfProbe, mediaListingOf, resourceKindOf, srcHitsAsset, warmProjectMedia, type MediaListing, type MediaProxy, type MediaResult, type MediaSources, type WorkspaceResource } from '@/lib/workspace-resources';
 import { BrandLoadingScreen } from './BrandLoadingScreen';
 import { BrandLogo } from './BrandLogo';
 import { SettingsModal } from './settings/SettingsModal';
+import { requestFeedback } from '@/lib/feedback-request';
 import { useSettings } from './settings/use-settings';
 import { DesktopDialog } from './DesktopDialog';
 import type { ContextMenuEntry } from './ContextMenu';
@@ -362,6 +363,9 @@ export function ProjectView({ projectId, onProject, onLeave, structure }: {
    * preview again behind the picture, so it plays what it should.
    */
   const [proxies, setProxies] = React.useState<Record<string, MediaProxy>>({});
+  const [previewMediaVersion, setPreviewMediaVersion] = React.useState(0);
+  const previewCacheStatus = Object.values(proxies).find(s => s.reason === 'space')
+    ?? Object.values(proxies).find(s => s.state === 'making' || s.state === 'waiting');
   const [prefsTick, setPrefsTick] = React.useState(0);
   React.useEffect(() => {
     const changed = () => setPrefsTick((n) => n + 1);
@@ -381,9 +385,11 @@ export function ProjectView({ projectId, onProject, onLeave, structure }: {
       const states = answer.states ?? {};
       setProxies(states);
       const now = Object.keys(states).filter((path) => states[path]!.state === 'ready' && before[path] && before[path]!.state !== 'ready');
+      if (now.length) setPreviewMediaVersion(n => n + 1);
       if (now.some((path) => blocksRef.current.some((b) => b.src && srcHitsAsset(b.src, path)))) preview.current?.reload?.();
       before = states;
       if (Object.values(states).some((s) => s.state === 'waiting' || s.state === 'making')) timer = window.setTimeout(() => { void ask(); }, 1500);
+      else if (Object.values(states).some((s) => s.reason === 'space')) timer = window.setTimeout(() => { void ask(); }, 10000);
     };
     void ask();
     return () => { alive = false; window.clearTimeout(timer); };
@@ -1151,7 +1157,8 @@ export function ProjectView({ projectId, onProject, onLeave, structure }: {
     return planRoom(editModel(), onTracks, { mode, ...switchesOf(readTimelinePrefs()) }).ops;
   }, [editModel]);
   const dropAsset = React.useCallback(async (file: ResourceDragItem, target: AssetDropTarget, atMs: number): Promise<string | null> => {
-    const plan = assetDropInsert(file, timelineTracks, target, atMs, stageRef.current);
+    const sourceCanvas = !file.saved ? firstVideoCanvas(stageRef.current, !!film.film?.tracks.some(track => track.clips.length), { ...file, ...facts.get(file.path) }) : null;
+    const plan = assetDropInsert(file, timelineTracks, target, atMs, sourceCanvas ?? stageRef.current);
     if ('error' in plan) return plan.error === 'locked' ? t('timeline.trackLocked') : t('timeline.dropNotClip');
     /* a thing of Saved (lib/saved): brought into the project first (a file imported, a bundle's files copied in), then
        put where it was dropped: a file as a file of the project goes, a clip as it was saved */
@@ -1175,13 +1182,14 @@ export function ProjectView({ projectId, onProject, onLeave, structure }: {
     if (pending) setPendingDrops((all) => [...all, pending]);
     try {
       return await edit([
+        ...(sourceCanvas ? [{ op: 'stage' as const, ...sourceCanvas }] : []),
         { op: 'insert', clip: plan.element as never, at: plan.at, ...(plan.track != null ? { track: plan.track } : {}) },
         ...roomFor([{ track: plan.track, atSec: plan.at, durMs: assetRunMs([file]) }], target.edit),
       ], 'history.stepDrop');
     } finally {
       if (pending) setPendingDrops((all) => all.filter((d) => d.id !== pending.id));
     }
-  }, [timelineTracks, edit, roomFor, t, projectId, editModel]);
+  }, [timelineTracks, edit, roomFor, t, projectId, editModel, film.film, facts]);
   const dropAssetRef = React.useRef(dropAsset);
   dropAssetRef.current = dropAsset;
   /**
@@ -1192,9 +1200,10 @@ export function ProjectView({ projectId, onProject, onLeave, structure }: {
   const addMedia = React.useCallback(async (file: WorkspaceResource, how: { mode?: EditMode; range?: SourceRange | null; atPlayhead?: boolean } = {}) => {
     const target = timelineCommands.current?.target() ?? null;
     const at = how.atPlayhead || target != null ? snapToFrame(timeRef.current) : 'end';
-    const plan = placeMedia(editModel(), { file, range: how.range ?? null, target, at, ...(how.mode ? { mode: how.mode } : {}), ...switchesOf(readTimelinePrefs()), stage: stageRef.current });
+    const sourceCanvas = firstVideoCanvas(stageRef.current, !!film.film?.tracks.some(track => track.clips.length), { ...file, ...facts.get(file.path) });
+    const plan = placeMedia(editModel(), { file, range: how.range ?? null, target, at, ...(how.mode ? { mode: how.mode } : {}), ...switchesOf(readTimelinePrefs()), stage: sourceCanvas ?? stageRef.current });
     if ('error' in plan) { toast.show(plan.error === 'locked' ? t('timeline.trackLocked') : t('timeline.dropNotClip')); return; }
-    const failed = await edit(plan.ops, 'history.stepDrop');
+    const failed = await edit([...(sourceCanvas ? [{ op: 'stage' as const, ...sourceCanvas }] : []), ...plan.ops], 'history.stepDrop');
     if (failed) { toast.show(failed); return; }
     if (how.atPlayhead) {
       const end = plan.startMs + plan.durMs;
@@ -1202,7 +1211,7 @@ export function ProjectView({ projectId, onProject, onLeave, structure }: {
       if (end <= player.current.duration * 1000 + 1) seek(end);
       else seekWhenLonger.current = end;
     }
-  }, [editModel, edit, pause, seek, t, toast]);
+  }, [editModel, edit, pause, seek, t, toast, film.film, facts]);
   /*
    * A thing of Saved put on the timeline without a drag (its "+", Enter, the source viewer's `,` and `.`): brought into
    * the project first, then as a file of the project goes (`how`), or a clip as it was saved, at the playhead on the
@@ -1627,6 +1636,7 @@ export function ProjectView({ projectId, onProject, onLeave, structure }: {
     setResourceDragData(event.dataTransfer, { ...file, range: { inMs: range.startMs, outMs: range.endMs } });
     event.dataTransfer.effectAllowed = 'copy';
   }, [projectId, productData, listing, toast, candidateUnavailable, canDragCandidate, sourceFile, sourceClock.duration]);
+
   const selectedCandidate = productData?.analysis.candidates.find((candidate) => candidate.id === selectedCandidateId) ?? null;
   const currentSource = productData?.analysis.sources.find((source) => source.assetPath === pickedMedia?.path);
   const axisSourceId = productData?.analysis.sources.find((source) => source.assetPath === sourceFile?.path)?.id ?? sourceFile?.path ?? '';
@@ -1662,7 +1672,7 @@ export function ProjectView({ projectId, onProject, onLeave, structure }: {
     </div>
     {inDemo ? <div className="shrink-0 border-b border-[var(--border)] px-3 py-1.5 text-[11px] text-[var(--text-muted)]">演示模式 · 内容与视频均为合成示例</div> : null}
     {assetsMode === 'products' ? productError ? <p role="alert" className="p-3 text-[12px] text-[var(--text-muted)]">{productError}</p> : productData ? (
-      <ProductPanel currentSourcePath={sourceFile?.path} tag={selectedTag} onTagChange={setSelectedTag} canDragCandidate={canDragCandidate} candidateUnavailable={candidateUnavailable} candidateHistorical={candidateHistorical} projectId={analysisProjectId} onReturnToProject={analysisProjectId !== projectId ? structure?.onReturnToProject : undefined} onAnalysisComplete={async () => { const result = await readProductAnalysis(analysisProjectId); productDataRef.current = result; setProductData(result); }} analysis={productData.analysis} history={productData.history} files={listing?.files ?? []} selectedProductId={selectedProductId}
+      <ProductPanel currentSourcePath={sourceFile?.path} tag={selectedTag} onTagChange={setSelectedTag} canDragCandidate={canDragCandidate} candidateUnavailable={candidateUnavailable} candidateHistorical={candidateHistorical} projectId={analysisProjectId} onReturnToProject={analysisProjectId !== projectId ? structure?.onReturnToProject : undefined} onAnalysisComplete={async () => { const result = await readProductAnalysis(analysisProjectId); productDataRef.current = result; setProductData(result); structure?.onAnalysisUpdated?.(); }} analysis={productData.analysis} history={productData.history} files={listing?.files ?? []} selectedProductId={selectedProductId}
         onSelectProduct={selectProduct} rangeSelection={selectedProductRange} onRangeSelectionChange={setProductRangeSelection} onCompose={structure?.onCompose} onSave={(next) => saveProducts(next, productData.analysis)} onRestore={async () => { if (productData.history) await saveProducts(productData.history, productData.analysis); }}
         onLocate={(sourceId, ms, candidateId, play) => { if (candidateId) setCandidateSelectionTick(value => value + 1); locateProductSource(sourceId, ms, candidateId, play); }} onAddCandidate={addProductCandidate} onDragCandidate={dragProductCandidate} onDragCandidateEnd={clearResourceDrag}
         sharedAdd={<SharedMediaAddPanel projectId={projectId} onAdded={(assets) => {
@@ -3184,6 +3194,7 @@ export function ProjectView({ projectId, onProject, onLeave, structure }: {
                 </button>
               </Tooltip>}
               <UpdateButton />
+              <button type="button" onClick={() => requestFeedback()} className="flex h-[26px] shrink-0 items-center rounded-md px-2 text-[12px] text-[var(--text-dim)] transition duration-150 hover:bg-[var(--bg-hover)] active:scale-95">问题反馈</button>
               <WebUpdateButton />
               {!studioHost && <Tooltip label={t('desktop.title')} side="bottom">
                 <button type="button" aria-haspopup="dialog" onClick={() => setDesktopOpen(true)}
@@ -3295,6 +3306,10 @@ export function ProjectView({ projectId, onProject, onLeave, structure }: {
                     </button>
                   </Tooltip>
                   <span className="min-w-0 flex-1" />
+                  {previewCacheStatus && <span role="status" className="max-w-[65%] truncate text-[11px] text-[var(--text-muted)] animate-in fade-in duration-150" title={previewCacheStatus.message}>
+                    {previewCacheStatus.reason === 'space' ? previewCacheStatus.message : previewCacheStatus.state === 'making'
+                      ? `正在准备流畅预览 ${Math.round((previewCacheStatus.ratio ?? 0) * 100)}%` : '预览缓存排队中'}
+                  </span>}
                   {structure && <button type="button" className="rounded px-2 py-1 text-[12px] transition hover:bg-[var(--bg-hover)] active:scale-95" onClick={structure.onShowPlans}>方案</button>}
                   <Tooltip label={t(inspectorOpen ? 'inspector.hide' : 'inspector.show')} side="bottom">
                     <button type="button" onClick={() => setInspectorOpen(!inspectorOpen)}
@@ -3312,12 +3327,12 @@ export function ProjectView({ projectId, onProject, onLeave, structure }: {
                     if (!picked || !block) return;
                     void onImport([picked], 'assets', () => {}).then(([landed]) => relinkBlock(block, landed ?? `assets/${picked.name}`), (err: Error) => toast.show(err.message));
                   }} />
-                {structure?.preview && <StructurePlanPreview key={structure.preview.id} plan={structure.preview} folder={structure.previewFolder} seekRequest={structure.previewRequest} onClose={structure.onClosePreview} />}
+                {structure?.preview && <StructurePlanPreview key={structure.preview.id} plan={structure.preview} folder={structure.previewFolder} mediaVersion={previewMediaVersion} seekRequest={structure.previewRequest} onClose={structure.onClosePreview} />}
                 {pickedMedia && !structure?.preview ? (
                   <div className="absolute inset-x-0 bottom-0 top-8 z-20">
                     {/* a bundle of Saved plays its page as its clip had it; any other bundle shows its picture */}
                     <SourcePreview file={pickedSaved && pickedMedia.bundle && !pickedMedia.bundle.page ? { ...pickedMedia, kind: 'image' } : pickedMedia} sources={pickedSaved ? savedSources : mediaSources} onClose={() => pickMedia(null)} onPlace={placeFromSource}
-                      sourceId={currentSource?.id} ranges={pickedSaved ? undefined : sourceRanges} selectedProductId={selectedProductId} selectedIntervalId={selectedProductRange.intervalId} seekRequest={sourceSeek}
+                      sourceId={currentSource?.id} mediaVersion={pickedSaved ? 0 : previewMediaVersion} ranges={pickedSaved ? undefined : sourceRanges} selectedProductId={selectedProductId} selectedIntervalId={selectedProductRange.intervalId} seekRequest={sourceSeek}
                       onClearPreviewRange={clearSourceSelection}
                       hideSourceTimeline={!pickedSaved} onSourceClock={pickedSaved ? undefined : onSourceClock}
                       onSelectRange={(range) => { selectSourceProductRange(range); locateProductSource(range.sourceId, range.startMs, range.kind === 'candidate' ? range.id : undefined); }} />
@@ -3482,9 +3497,7 @@ export function ProjectView({ projectId, onProject, onLeave, structure }: {
                         <p className="text-[var(--text-muted)]">{sourceTime(selectedCandidate.startMs)} – {sourceTime(selectedCandidate.endMs)}</p>
                         <p className="mt-2 whitespace-pre-wrap break-words">{selectedCandidate.text || '无原话'}</p>
                         <div className="mt-2 flex flex-wrap gap-1">{selectedCandidate.tags.length ? displayStructureTags(selectedCandidate.tags).map((tag) => <span key={tag} className="rounded border px-1.5 py-0.5 text-[10px]" style={{ backgroundColor: structureColor(tag).bg, color: structureColor(tag).text, borderColor: structureColor(tag).border }}>{tag}</span>) : <span className="text-[var(--text-muted)]">无标签</span>}</div>
-                        <p className="mt-2 text-[var(--text-muted)]">来源：{selectedCandidate.origin} · 版本：{selectedCandidate.version}</p>
-                        {selectedCandidate.origin === 'ai-text' && <p className="mt-2 text-[var(--warn)]">仅文字识别，画面待核实</p>}
-                        {selectedCandidate.details && <div className="mt-2 space-y-1 text-[var(--text-muted)]"><p>类型：{selectedCandidate.details.subtypes?.join(' · ') || '未说明'}</p><p>判断依据：{selectedCandidate.details.reason || '未说明'}</p><p>证据：{selectedCandidate.details.evidence?.join(' · ') || '未说明'}</p><p>上下文：{selectedCandidate.details.context || '未说明'}</p><p>重复情况：{selectedCandidate.details.repetition || '未说明'}</p><p>待复核：{selectedCandidate.details.review?.join(' · ') || '未说明'}</p></div>}
+                        
                         {candidateUnavailable(selectedCandidate) && <p className="mt-2 text-[var(--warn)]">已过期或状态未确认，需重新分析</p>}
                         {(() => { const interval = productData?.analysis.intervals.find((item) => item.id === selectedCandidate.intervalId); return interval && (selectedCandidate.startMs < interval.startMs || selectedCandidate.endMs > interval.endMs) ? <p className="mt-2 text-[var(--warn)]">候选超出当前讲解区间，请复核</p> : null; })()}
                         <button type="button" disabled={candidateUnavailable(selectedCandidate)} onClick={() => addProductCandidate(selectedCandidate.id)} className="mt-3 rounded bg-[var(--accent)] px-3 py-1.5 text-white transition hover:opacity-85 active:scale-95 disabled:opacity-40">加入成片</button>

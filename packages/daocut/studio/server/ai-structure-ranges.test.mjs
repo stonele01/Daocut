@@ -188,3 +188,17 @@ test('all returned valid rows are retained, and model completeness remains disti
   assert.equal(result.plans.length, 2); assert.equal(result.modelComplete, false); assert.equal(result.allValidCombinationsEnumerated, false);
   assert.ok(result.issues.some(i => i.message === '还有其他开头未完成'));
 });
+
+test('v3 accepts a complete price-comparison opening and a pain after the selling point, with purchase still last', () => {
+  const f = fixture();
+  const list = [piece(1, 110, 110, ['福利机制']), piece(1, 106, 109, ['卖点']), piece(0, 100, 101, ['痛点']), piece(2, 112, 113, ['行动指令'])];
+  const value = { ...response([list]), schema: 'ai-structure-plans-v3' };
+  const current = validateAiStructureRanges(f, value).plans[0], old = validateAiStructureRanges(f, response([list])).plans[0];
+  assert.ok(current); assert.equal(current.version, value.schema);
+  assert.deepEqual(current.clips[0].roles, ['hook', 'offer']);
+  assert.deepEqual(current.clips.map(clip => clip.cueRange), [[110, 110], [106, 109], [100, 101], [112, 113]]);
+  assert.equal(current.speed, 1.3); assert.equal(current.durationMs, 45000 / 1.3);
+  assert.notEqual(current.id, old.id); assert.notEqual(current.inputHash, old.inputHash);
+  const purchaseFirst = [list[3], ...list.slice(0, 3)];
+  rejected(f, { ...value, plans: [purchaseFirst] }, 'AI_RANGE_STRUCTURE');
+});

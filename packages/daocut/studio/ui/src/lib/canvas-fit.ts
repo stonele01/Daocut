@@ -16,6 +16,13 @@ import type { FilmBox, FilmSrcKind } from './film.ts';
 
 type Size = { w: number; h: number };
 
+/** First video in an untouched empty project chooses the delivery canvas. */
+export function firstVideoCanvas(stage: Size, hasClips: boolean, file: { kind: string; w?: number; h?: number }): Size | null {
+  if (hasClips || stage.w !== 1920 || stage.h !== 1080 || file.kind !== 'video'
+    || !Number.isInteger(file.w) || !Number.isInteger(file.h) || !(file.w! > 0 && file.h! > 0)) return null;
+  return { w: file.w!, h: file.h! };
+}
+
 /** Even sizes: H.264 samples chroma in 2×2 blocks and refuses odd dimensions. At most 8192 a side. */
 const even = (n: number) => Math.max(2, Math.min(8192, Math.round(n / 2) * 2));
 

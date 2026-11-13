@@ -38,6 +38,22 @@ test('independent same-product ranges remain separate even when cues are adjacen
   assert.deepEqual(separated.intervals.map(i => [i.startMs, i.endMs]), [[0, 900], [20000, 21000]]);
 });
 
+test('confirmed continuous speech keeps one product across windows despite an uncertain formal name', () => {
+  const results = [
+    { products: [product('a', '防晒', 0, { identityUncertain: true, nameUncertain: true })], ranges: [{ ...lecture('a', 0, 2), scopeStatus: 'confirmed' }], issues: [] },
+    { products: [product('a', '防晒乳', 3, { identityUncertain: true, nameUncertain: true })], ranges: [{ ...lecture('a', 3, 5), scopeStatus: 'confirmed' }], issues: [] },
+  ];
+  const joined = combine([window(0, 2), window(3, 5)], results);
+  assert.equal(joined.products.length, 1);
+  assert.equal(joined.products[0].identityUncertain, true);
+  assert.deepEqual(joined.intervals.map(x => [x.firstCue, x.lastCue]), [[0, 5]]);
+  results[1].ranges[0].scopeStatus = 'uncertain';
+  assert.equal(combine([window(0, 2), window(3, 5)], results).products.length, 2);
+  results[1].ranges[0].scopeStatus = 'confirmed';
+  results[1].products[0].variant = '另一个规格';
+  assert.equal(combine([window(0, 2), window(3, 5)], results).products.length, 2);
+});
+
 test('duplicate model ranges receive one stable interval and conflicting mention stays unassigned', () => {
   const duplicated = combine([window(0, 5)], [{ products: [product('a', '甲', 0)], ranges: [lecture('a', 0), lecture('a', 0)], issues: [] }]);
   assert.equal(duplicated.intervals.length, 1);
@@ -48,6 +64,24 @@ test('duplicate model ranges receive one stable interval and conflicting mention
     { products: [], ranges: [{ key: null, firstCue: 1, lastCue: 2, kind: 'mention', reason: '只是提及', evidence: [1] }], issues: [] },
   ]);
   assert.equal(conflict.intervals.length, 0);
+});
+
+test('a brief acknowledgement at the window boundary does not split a continuous unnamed product', () => {
+  const input = cues.map(cue => ({ ...cue })); input[2].text = '是的。'; input[2].startMs = 1950; input[2].endMs = 2100;
+  const results = [
+    { products: [product('a', '防晒', 0, { nameUncertain: true })], ranges: [{ ...lecture('a', 0, 1), scopeStatus: 'confirmed' }], issues: [] },
+    { products: [product('a', '防晒', 3, { nameUncertain: true })], ranges: [{ ...lecture('a', 3, 5), scopeStatus: 'confirmed' }], issues: [] },
+  ];
+  const run = () => combineDiscoveryWindows({ sourceId: 's', runId: 'r', durationMs: 6000, cues: input, windows: [window(0, 2), window(3, 5)], results });
+  const output = run();
+  assert.equal(output.products.length, 1);
+  assert.deepEqual(output.intervals.map(range => [range.firstCue, range.lastCue]), [[0, 5]]);
+  assert.equal(output.unassigned.length, 0);
+  input[2].text = '接下来换另一个产品';
+  assert.equal(run().products.length, 2);
+  input[2].text = '是的。';
+  results[1].products[0].variant = '不同规格';
+  assert.equal(run().products.length, 2);
 });
 
 test('alias evidence permits a match; missing evidence and different variants do not force a merge', () => {

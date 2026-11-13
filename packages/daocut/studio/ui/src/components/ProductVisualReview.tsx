@@ -12,6 +12,7 @@ export function ProductVisualReviewDetails({ review, origin = 'saved', label = '
     <summary className="cursor-pointer transition-colors hover:text-[var(--accent)]">{view.summary}</summary>
     <div className="mt-1 max-h-52 overflow-auto animate-in fade-in slide-in-from-top-1 duration-150">
       {view.originLabel && <p>{view.originLabel}</p>}{view.range && <p>原片范围：{view.range}</p>}{view.productName && <p>{view.productName}</p>}<p>{view.note}</p>
+      {review?.status === 'failed' && <p className="mt-1">这是看图任务未完成的状态，需要检查已保存的返回；不是要求你逐段核对模型输出。</p>}
       {view.entries.map((entry, index) => <div key={index} className="mt-2 border-t border-[var(--border)] pt-1"><p>{entry.range}</p><p>{entry.product} · {entry.display}</p><p>{entry.observation}</p><p>{entry.evidence}</p>{entry.issues.map((issue, i) => <p key={i} className="text-[var(--warn)]">{issue}</p>)}</div>)}
       {view.issues.map((issue, index) => <p key={index} className="mt-1 text-[var(--warn)]">{issue}</p>)}
     </div>

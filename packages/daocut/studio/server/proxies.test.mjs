@@ -4,6 +4,8 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { ensureProxies, heavy, proxySize, readyProxy } from './proxies.mjs';
 
 const hasFfmpeg = (() => { try { execFileSync('ffmpeg', ['-version'], { stdio: 'ignore' }); return true; } catch { return false; } })();
@@ -28,7 +30,7 @@ test('a proxy is its height on the short side, even, the shape kept, never large
 test('heavy footage gets a proxy in the background, with the same frames at the same times; light footage none', { skip: !hasFfmpeg && 'no ffmpeg' }, async () => {
   const root = mkdtempSync(join(tmpdir(), 'of-proxies-'));
   mkdirSync(join(root, 'assets'));
-  execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc=size=2560x1440:rate=25:duration=1', '-pix_fmt', 'yuv420p', join(root, 'assets', 'big.mp4')]);
+  execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc=size=2560x1440:rate=25:duration=1', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1', '-c:a', 'aac', '-pix_fmt', 'yuv420p', join(root, 'assets', 'big.mp4')]);
   execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc=size=640x360:rate=25:duration=1', '-pix_fmt', 'yuv420p', join(root, 'assets', 'small.mp4')]);
   const first = await ensureProxies(root, ['assets/big.mp4', 'assets/small.mp4'], 540);
   assert.deepEqual(Object.keys(first), ['assets/big.mp4']);
@@ -42,5 +44,41 @@ test('heavy footage gets a proxy in the background, with the same frames at the 
   const proxy = readyProxy(root, 'assets/big.mp4', 540);
   const info = JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-count_frames', '-show_entries', 'stream=width,height,nb_read_frames,codec_name', '-of', 'json', proxy]).toString()).streams[0];
   assert.deepEqual([info.width, info.height, info.codec_name, Number(info.nb_read_frames)], [960, 540, 'h264', 25]);
+  const sound = JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=codec_name', '-of', 'json', proxy]).toString()).streams[0];
+  assert.equal(sound.codec_name, 'aac', 'source and plan previews retain the recording audio');
   assert.equal(readyProxy(root, 'assets/big.mp4', 720), null, 'another height is another proxy');
+});
+
+test('insufficient space keeps the source, waits without partial files, and resumes after space is freed', { skip: !hasFfmpeg && 'no ffmpeg' }, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'of-proxy-low-space-'));
+  mkdirSync(join(root, 'assets'));
+  const source = join(root, 'assets', 'big.mp4');
+  execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=size=2560x1440:rate=25:duration=1', '-pix_fmt', 'yuv420p', source]);
+  const originalStatfs = fs.statfsSync;
+  fs.statfsSync = () => ({ bavail: 100 * 1024, bsize: 1024 });
+  syncBuiltinESMExports();
+  try {
+    let states = await ensureProxies(root, ['assets/big.mp4'], 540);
+    for (const end = Date.now() + 10000; states['assets/big.mp4'].state !== 'failed' && Date.now() < end;) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      states = await ensureProxies(root, ['assets/big.mp4'], 540);
+    }
+    assert.equal(states['assets/big.mp4'].state, 'failed');
+    assert.equal(states['assets/big.mp4'].reason, 'space');
+    assert.match(states['assets/big.mp4'].message, /腾出空间后会自动继续/);
+    assert.equal(readyProxy(root, 'assets/big.mp4', 540), null);
+    assert.ok(fs.statSync(source).size > 0);
+    assert.deepEqual(fs.readdirSync(join(root, '.film/cache/proxies')), []);
+    for (let i = 0; i < 3; i++) {
+      assert.equal((await ensureProxies(root, ['assets/big.mp4'], 540))['assets/big.mp4'].state, 'failed', 'no encoder retry while the disk is full');
+    }
+  } finally { fs.statfsSync = originalStatfs; syncBuiltinESMExports(); }
+  let states = await ensureProxies(root, ['assets/big.mp4'], 540);
+  assert.equal(states['assets/big.mp4'].state, 'waiting');
+  for (const end = Date.now() + 30000; states['assets/big.mp4'].state !== 'ready' && Date.now() < end;) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    states = await ensureProxies(root, ['assets/big.mp4'], 540);
+  }
+  assert.equal(states['assets/big.mp4'].state, 'ready', 'same running server recovers without restarting');
+  assert.ok(fs.statSync(readyProxy(root, 'assets/big.mp4', 540)).size > 0);
 });

@@ -22,6 +22,7 @@
 import { mkdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { clipKind, clipSpan, kindOf, soundRole } from '../../src/film-doc.mjs';
+import { prepareMediaReferences } from '../../src/shared-media-reference.mjs';
 import { probe } from './derived.mjs';
 import { readProjectFilm } from './film.mjs';
 import { HttpError, json, readJson } from './http.mjs';
@@ -177,11 +178,15 @@ export function clipCues(lines, span, extra = {}) {
  * neither read nor written.
  * @param {string} root @param {import('../../src/film-doc.d.mts').FilmDoc} doc
  */
-function heardClips(root, doc) {
-  return doc.tracks.flatMap((track) => (track.muted || track.hidden ? [] : track.clips.filter((clip) => {
+async function heardClips(root, doc) {
+  const clips = doc.tracks.flatMap((track) => (track.muted || track.hidden ? [] : track.clips.filter((clip) => {
     const kind = kindOf(clip);
-    return (kind === 'sound' || kind === 'video') && !(clip.volume !== undefined && clip.volume <= 0) && inProject(root, clip.src) !== null;
+    return (kind === 'sound' || kind === 'video') && !(clip.volume !== undefined && clip.volume <= 0);
   })));
+  // On a cold app start the synchronous path check cannot yet resolve a logical
+  // reference. Verify the film's sources first, instead of silently returning no subtitles.
+  for (const src of new Set(clips.map((clip) => clip.src))) await prepareMediaReferences(root, src);
+  return clips.filter((clip) => inProject(root, clip.src) !== null);
 }
 
 /**
@@ -251,7 +256,7 @@ export async function filmCaptions(root, options = {}) {
   /** @type {FilmSubtitleCue[]} */
   const cues = [];
   const untranscribed = new Set();
-  for (const clip of heardClips(root, doc)) {
+  for (const clip of await heardClips(root, doc)) {
     const said = await transcriptOf(clip.src);
     if (!said) { if (await wantsTranscript(root, clip.src)) untranscribed.add(clip.src); continue; }
     /* a transcript that runs on past the end of its file is not this file's any more (it was made again faster, or
@@ -347,7 +352,7 @@ export async function translateFilmSubtitles(root, language, options) {
   const out = { language, translated: [], already: 0, same: 0, failed: [] };
   /** @type {{ src: string, transcript: import('./transcripts.mjs').Transcript }[]} */
   const todo = [];
-  for (const src of new Set((doc ? heardClips(root, doc) : []).map((c) => c.src))) {
+  for (const src of new Set((doc ? await heardClips(root, doc) : []).map((c) => c.src))) {
     const transcript = await readTranscript(root, src);
     if (!transcript) continue;
     const text = transcript.lines.map((l) => l.text).join(' ');

@@ -41,12 +41,12 @@ test('v2 public and edited private clips export their frozen 1.3x picture audio 
     return fetch(input, options);
   });
   await mkdir(join(root, 'assets'), { recursive: true }); await mkdir(join(root, '.film'));
-  await run('ffmpeg', ['-v', 'error', '-nostdin', '-f', 'lavfi', '-i', 'testsrc2=size=160x90:rate=25', '-f', 'lavfi', '-i', 'sine=frequency=880:sample_rate=48000', '-t', '5.2', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-movflags', '+faststart', join(root, 'assets/live.mp4')], { windowsHide: true, timeout: 15000 });
+  await run('ffmpeg', ['-v', 'error', '-nostdin', '-f', 'lavfi', '-i', 'testsrc2=size=90x160:rate=25', '-f', 'lavfi', '-i', 'sine=frequency=880:sample_rate=48000', '-t', '5.2', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-movflags', '+faststart', join(root, 'assets/live.mp4')], { windowsHide: true, timeout: 15000 });
   const project = { id: 'speed-parent', name: '倍速隔离验收', path: root };
   const scope = { sourceId: 'source', productId: 'product', intervalId: 'lecture', startMs: 0, endMs: 5200 };
   await writeFile(join(root, '.film/id'), `${project.id}\n`);
   await writeFile(join(root, '.film/settings.json'), JSON.stringify({ fps: 25 }));
-  await writeFile(join(root, 'film.html'), filmHtml({ stage: { w: 160, h: 90 }, tracks: [{ clips: [{ id: 'existing', src: 'assets/live.mp4', time: [0, 1] }] }] }));
+  await writeFile(join(root, 'film.html'), filmHtml({ stage: { w: 1920, h: 1080 }, tracks: [{ clips: [{ id: 'existing', src: 'assets/live.mp4', time: [0, 1] }] }] }));
   const subtitles = 'WEBVTT\n\n00:00:00.520 --> 00:00:01.560\n公共钩子\n\n00:00:02.080 --> 00:00:03.120\n公共卖点\n\n00:00:03.640 --> 00:00:04.680\n公共逼单\n';
   await writeFile(join(root, 'assets/live.vtt'), subtitles);
   await writeFile(join(root, '.film/product-analysis.json'), JSON.stringify({ version: 1, sources: [{ id: 'source', assetPath: 'assets/live.mp4', durationMs: 5200 }], products: [{ id: 'product', sourceIds: ['source'] }], intervals: [{ ...scope, id: 'lecture' }], candidates: [] }));
@@ -58,7 +58,8 @@ test('v2 public and edited private clips export their frozen 1.3x picture audio 
   const plans = [plan('plan-a'), plan('plan-b')];
   const legacy = await ensureStructureDraft(root, { parentProjectId: project.id, plan: { ...plans[0], version: 'ai-structure-plans-v1', speed: 1, durationMs: 3120 } });
   const personal = await ensureStructureDraft(root, { parentProjectId: project.id, plan: plans[1] });
-  const privateFilm = filmHtml({ stage: { w: 160, h: 90 }, tracks: [{ clips: [
+  assert.deepEqual((await readProjectFilm(personal.root)).value.stage, { w: 90, h: 160 });
+  const privateFilm = filmHtml({ stage: { w: 1920, h: 1080 }, tracks: [{ clips: [
     { id: 'private-core', src: 'assets/live.mp4', at: 0, time: [2.6, 3.12], speed: 1.3 },
     { id: 'private-hook', src: 'assets/live.mp4', at: 0.4, time: [1.04, 1.56], speed: 1.3 },
     { id: 'private-purchase', src: 'assets/live.mp4', at: 0.8, time: [4.16, 4.68], speed: 1.3 },
@@ -85,17 +86,26 @@ test('v2 public and edited private clips export their frozen 1.3x picture audio 
     const expected = [0, 1, 2].map(position => ({ start: position * segmentUs, duration: segmentUs }));
     assert.equal(info.duration, segmentUs * 3);
     assert.deepEqual(segments('video').map(clip => clip.target_timerange), expected);
-    assert.deepEqual(segments('audio').map(clip => clip.target_timerange), expected);
+    assert.deepEqual(segments('audio'), [], 'original audio stays on the video, with no duplicate audio track');
+    assert.deepEqual(info.canvas_config, { width: 90, height: 160, ratio: 'original' });
+    const sourceStarts = index ? [2600000, 1040000, 4160000] : [520000, 2080000, 3640000];
+    for (const [i, clip] of segments('video').entries()) {
+      assert.equal(clip.speed, 1.3);
+      assert.equal(clip.volume, 1);
+      assert.equal(clip.is_tone_modify, false);
+      assert.deepEqual(clip.source_timerange, { start: sourceStarts[i], duration: Math.round(segmentUs * 1.3) });
+      assert.deepEqual(clip.clip.scale, { x: 1, y: 1 });
+      assert.equal(info.materials.speeds.find(speed => clip.extra_material_refs.includes(speed.id)).speed, 1.3);
+    }
     assert.deepEqual(segments('text').map(clip => clip.target_timerange), expected, JSON.stringify(await filmCaptions(join(finished.storageFolder, '_snapshots', item.id))));
     const words = info.materials.texts.map(material => JSON.parse(material.content).text).join(' ');
     assert.match(words, index ? /私人卖点.*私人钩子.*私人逼单/ : /公共钩子.*公共卖点.*公共逼单/);
     assert.doesNotMatch(words, /稍后修改/);
-    // Existing NLE export bakes changed-speed picture/audio. The Jianying speed
-    // field is consequently 1; the derived media carries the requested timing.
+    assert.equal(info.materials.videos.length, 1, 'all cuts share the frozen original');
+    assert.equal(info.materials.audios.length, 0);
     for (const material of [...info.materials.videos, ...info.materials.audios]) {
-      assert.ok(resolve(material.path).startsWith(resolve(dirname(item.outputs[0])) + sep));
-      const result = await run('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', material.path], { windowsHide: true, timeout: 10000 });
-      assert.ok(Math.abs(Number(result.stdout.trim()) - segmentUs / 1000000) <= 0.04, `baked ${material.path} must match the 1.3x target duration`);
+      assert.ok(resolve(material.path).startsWith(resolve(finished.storageFolder) + sep));
+      assert.equal(digest(await readFile(material.path)), digest(await readFile(join(root, 'assets/live.mp4'))), 'no rendered intermediary replaces the original');
     }
     const snapshotRoot = join(finished.storageFolder, '_snapshots', item.id);
     const frozen = (await readProjectFilm(snapshotRoot)).value.tracks[0].clips;

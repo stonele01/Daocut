@@ -45,7 +45,7 @@ import { exactRate } from '../../src/rate.mjs';
  *   the sound of; `fade`: its fades in and out, film seconds (fitted to its length)
  * @typedef {{ stage: { w: number, h: number }, duration: number, pictures: NlePicture[], sounds: NleSound[] }} NleFilm
  * @typedef {{ title: string, fps: number, audio: 'clips' | 'stems', media: 'copy' | 'link', mediaDir: string,
- *   stems?: SoundRole[], audioTracks?: 'roles' | 'source', alpha?: NleAlpha }} NlePlanOptions
+ *   stems?: SoundRole[], audioTracks?: 'roles' | 'source', alpha?: NleAlpha, nativeSpeed?: boolean }} NlePlanOptions
  * @typedef {'png' | 'prores4444'} NleAlpha How a picture with alpha is written, in a MOV (default ProRes 4444)
  * @typedef {{ timebase: number, ntsc: boolean, fps: number }} NleRate
  * @typedef {{ kind: 'render', clip: string, frames: number }
@@ -59,7 +59,7 @@ import { exactRate } from '../../src/rate.mjs';
  * @typedef {{ id: string, name: string, path: string, job: NleMediaJob, durationFrames: number,
  *   video?: { w: number, h: number, alpha: boolean, still: boolean, fps?: number }, audio?: { channels: number, sampleRate: number } }} NleFile
  * @typedef {{ id: string, name: string, fileId: string, start: number, end: number, in: number, out: number, enabled: boolean,
- *   motion?: { scale: number, center: { h: number, v: number } }, gain?: number,
+ *   motion?: { scale: number, center: { h: number, v: number } }, gain?: number, speed?: number, sourceRange?: { from: number, to: number },
  *   levels?: { when: number, value: number }[], linkGroup?: string, sourceRow?: string }} NleClip
  *   Sequence frames [start, end), file frames [in, out); `gain` linear; `levels` its gain's keyframes (its fades),
  *   frames from the clip's first
@@ -253,16 +253,20 @@ export function planNleTimeline(film, opts) {
       visual.push({ track: p.track, ...span, clip: { id: clipId(), name: p.id, fileId: file.id, ...span, in: 0, out: len, enabled: !p.hidden, ...link } });
     };
     /* a clip with a look of its own (the film's CSS: a crop, round corners) is drawn as the film draws it */
-    if (p.kind === 'page' || p.styled || p.faded || !p.facts || (p.kind === 'video' && Math.abs(p.speed - 1) > 1e-6)) { bake(); continue; }
+    if (p.kind === 'page' || p.styled || p.faded || !p.facts || (!opts.nativeSpeed && p.kind === 'video' && Math.abs(p.speed - 1) > 1e-6)) { bake(); continue; }
     const placement = containMotion(p.facts, stage, p.box);
     if (placement.kind === 'bake') { bake(); continue; }
     const inFrame = p.kind === 'still' ? 0 : toFrame(p.from, rate);
-    const file = sourceFile(p, p.kind, inFrame + len);
-    const out = reach(file, inFrame + len);
+    const speed = p.kind === 'video' && opts.nativeSpeed ? p.speed : 1;
+    const sourceEnd = p.from + (p.end - p.at) * speed;
+    const needed = opts.nativeSpeed && p.kind === 'video' ? toFrame(sourceEnd, rate) : inFrame + len;
+    const file = sourceFile(p, p.kind, needed);
+    const out = reach(file, needed);
     if (out <= inFrame) continue;
     /** @type {NleClip} */
     const clip = {
-      id: clipId(), name: p.id, fileId: file.id, start: span.start, end: span.start + out - inFrame, in: inFrame, out, enabled: !p.hidden,
+      id: clipId(), name: p.id, fileId: file.id, start: span.start, end: out === needed ? span.end : span.start + Math.round((out - inFrame) / speed), in: inFrame, out, enabled: !p.hidden,
+      ...(opts.nativeSpeed && p.kind === 'video' ? { speed, sourceRange: { from: p.from, to: Math.min(sourceEnd, out === needed ? sourceEnd : out / rate.fps) } } : {}),
       ...link,
       ...(placement.kind === 'motion' ? { motion: placement.motion } : {}),
     };
@@ -304,12 +308,14 @@ export function planNleTimeline(film, opts) {
       const len = span.end - span.start;
       if (len <= 0) continue;
       const linked = s.picture ? footage.get(s.picture) : undefined;
-      const own = linked && Math.abs(s.speed - 1) < 1e-6 && Math.abs(linked.picture.from - s.from) < 0.002 && Math.abs(linked.picture.at - s.at) < 0.002;
+      const own = linked && Math.abs(s.speed - linked.picture.speed) < 1e-6 && Math.abs(linked.picture.from - s.from) < 0.002 && Math.abs(linked.picture.at - s.at) < 0.002 && Math.abs(linked.picture.end - s.at - length) < 0.002;
       /** @type {NleFile} */
       let file;
       let inFrame;
       const faded = Boolean(s.fade && (s.fade[0] > 0 || s.fade[1] > 0));
-      if (Math.abs(s.speed - 1) > 1e-6 || faded) {
+      const speed = opts.nativeSpeed && !faded ? s.speed : 1;
+      const native = opts.nativeSpeed && !faded;
+      if ((!opts.nativeSpeed && Math.abs(s.speed - 1) > 1e-6) || faded) {
         /* another speed: an editor would play the source at its own speed, so the part played comes slowed or sped
            (its pitch kept), as the film plays it, as a WAV of its own exactly as long as its clip: the source seconds
            its frames take, as the picture of a clip at another speed is rendered. A sound that fades too: its
@@ -323,14 +329,16 @@ export function planNleTimeline(film, opts) {
         inFrame = 0;
       } else {
         inFrame = toFrame(s.from, rate);
-        file = own && linked ? linked.file : sourceFile(s, 'audio', inFrame + len);
+        file = own && linked ? linked.file : sourceFile(s, 'audio', native ? toFrame(s.to, rate) : inFrame + len);
       }
       if (!file.audio) continue;
-      const out = reach(file, inFrame + len);
+      const needed = native ? toFrame(s.to, rate) : inFrame + len;
+      const out = reach(file, needed);
       if (out <= inFrame) continue;
       /** @type {NleClip} */
       const clip = {
-        id: clipId(), name: s.id, fileId: file.id, start: span.start, end: span.start + out - inFrame, in: inFrame, out,
+        id: clipId(), name: s.id, fileId: file.id, start: span.start, end: out === needed ? span.end : span.start + Math.round((out - inFrame) / speed), in: inFrame, out,
+        ...(native ? { speed, sourceRange: { from: s.from, to: out === needed ? s.to : out / rate.fps } } : {}),
         enabled: s.enabled,
         ...(sourceTracks && s.sourceRow ? { sourceRow: s.sourceRow } : {}),
         ...(Math.abs(s.volume - 1) > 1e-6 ? { gain: round6(Math.min(3.98109, s.volume)) } : {}),
@@ -532,14 +540,14 @@ export function xmemlDocument(timeline) {
 export function probeSource(path) {
   return new Promise((done) => {
     const proc = spawn('ffprobe', ['-v', 'error', '-show_entries',
-      'format=duration,format_name:stream=codec_type,width,height,avg_frame_rate,r_frame_rate,channels,sample_rate,pix_fmt:stream_tags=alpha_mode',
+      'format=duration,format_name:stream=codec_type,width,height,avg_frame_rate,r_frame_rate,channels,sample_rate,pix_fmt:stream_tags=alpha_mode,rotate:stream_side_data=rotation',
       '-of', 'json', path], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
     let out = '';
     proc.stdout.on('data', (c) => { out += c; });
     proc.on('error', () => done({}));
     proc.on('close', () => {
       try {
-        /** @type {{ format?: { duration?: string, format_name?: string }, streams?: { codec_type?: string, width?: number, height?: number, avg_frame_rate?: string, r_frame_rate?: string, channels?: number, sample_rate?: string, pix_fmt?: string, tags?: { alpha_mode?: string } }[] }} */
+        /** @type {{ format?: { duration?: string, format_name?: string }, streams?: { codec_type?: string, width?: number, height?: number, avg_frame_rate?: string, r_frame_rate?: string, channels?: number, sample_rate?: string, pix_fmt?: string, tags?: { alpha_mode?: string, rotate?: string }, side_data_list?: { rotation?: number }[] }[] }} */
         const json = JSON.parse(out);
         const streams = json.streams ?? [];
         const v = streams.find((s) => s.codec_type === 'video');
@@ -548,9 +556,11 @@ export function probeSource(path) {
         const still = /image|png|mjpeg|jpeg|bmp|tiff/.test(json.format?.format_name ?? '');
         const fr = (/** @type {string | undefined} */ raw) => { const [n, d] = (raw ?? '').split('/').map(Number); return n && d ? n / d : undefined; };
         const fps = fr(v?.avg_frame_rate) ?? fr(v?.r_frame_rate);
+        const rotation = Number(v?.side_data_list?.find(s => s.rotation != null)?.rotation ?? v?.tags?.rotate ?? 0);
+        const quarter = Math.abs(Math.round(rotation / 90)) % 2 === 1;
         done({
-          ...(v?.width ? { w: v.width } : {}),
-          ...(v?.height ? { h: v.height } : {}),
+          ...(v?.width ? { w: quarter ? v.height : v.width } : {}),
+          ...(v?.height ? { h: quarter ? v.width : v.height } : {}),
           ...(Number.isFinite(sec) && sec > 0 && !still ? { duration: sec } : {}),
           ...(fps && fps < 500 && !still ? { fps } : {}),
           hasVideo: Boolean(v),

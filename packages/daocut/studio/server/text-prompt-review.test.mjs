@@ -18,8 +18,8 @@ test('the text-only prompt has one machine output contract while preserving the 
 test('shorter wording retains paid window boundaries but reports the actual smaller request bytes', () => {
   const cues = Array.from({ length: 210 }, (_, i) => ({ startMs: i * 1000, endMs: i * 1000 + 900, text: '模拟一次完整商品讲解内容。'.repeat(9) }));
   const args = { sourceId: 's', productId: 'p', intervalId: 'i', cues, rangeStartMs: 0, rangeEndMs: 210000 };
-  const oldWindows = structure.textStructureWindows({ ...args, prompt: legacy });
-  const windows = structure.textStructureWindows({ ...args, prompt: previous });
+  const oldWindows = structure.textStructureWindows({ ...args, prompt: legacy, cueEncoding: structure.LEGACY_TEXT_CUE_ENCODING });
+  const windows = structure.textStructureWindows({ ...args, prompt: previous, cueEncoding: structure.LEGACY_TEXT_CUE_ENCODING });
   assert.ok(windows.length > 1);
   assert.deepEqual(windows.map(w => [w.firstCue, w.lastCue]), oldWindows.map(w => [w.firstCue, w.lastCue]));
   for (const window of windows) {

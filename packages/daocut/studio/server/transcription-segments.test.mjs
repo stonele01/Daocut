@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { planAudioSegments, mergeAudioSegments, validateTranscriptCues } from './transcription-segments.mjs';
+import { planAudioSegments, mergeAudioSegments, mergeAudioTranscript, validateTranscriptCues } from './transcription-segments.mjs';
 
 test('23 minute source uses two audio windows and ten seconds of shared boundary context', () => {
   const ranges = planAudioSegments(1404879);
@@ -19,12 +19,15 @@ test('audio offsets restore source time without joining the intervening product'
   assert.deepEqual(cues, [{ text: 'A', startMs: 100, endMs: 900 }, { text: 'B', startMs: 1800, endMs: 2200 }, { text: 'A返场', startMs: 3100, endMs: 3800 }]);
 });
 
-test('incompatible overlap is a review issue, never a silent transcript overwrite', () => {
+test('different overlap recognitions resolve once using the audio interior without mutating raw results', () => {
   const ranges = planAudioSegments(4000, { targetMs: 2000, overlapMs: 1000 });
-  assert.throws(() => mergeAudioSegments([
+  const segments = [
     { ...ranges[0], cues: [{ text: '不同规格甲', startMs: 1600, endMs: 2200 }] },
     { ...ranges[1], cues: [{ text: '不同规格乙', startMs: 300, endMs: 900 }] },
-  ], 4000), error => error.code === 'ASR_BOUNDARY_REVIEW');
+  ];
+  const raw = structuredClone(segments);
+  assert.deepEqual(mergeAudioSegments(segments, 4000), [{ text: '不同规格甲', startMs: 1600, endMs: 2200 }]);
+  assert.deepEqual(segments, raw);
 });
 
 test('timestamp drift cannot make both windows drop the same boundary utterance', () => {
@@ -38,10 +41,28 @@ test('timestamp drift cannot make both windows drop the same boundary utterance'
 
 test('decimal points and percentages remain meaningful when comparing overlap transcripts', () => {
   const ranges = planAudioSegments(4000, { targetMs: 2000, overlapMs: 1000 });
-  for (const [a, b] of [['1.2升', '12升'], ['12%', '12']]) assert.throws(() => mergeAudioSegments([
+  for (const [a, b] of [['1.2升', '12升'], ['12%', '12']]) assert.deepEqual(mergeAudioSegments([
     { ...ranges[0], cues: [{ text: a, startMs: 1800, endMs: 2200 }] },
     { ...ranges[1], cues: [{ text: b, startMs: 300, endMs: 700 }] },
-  ], 4000), error => error.code === 'ASR_BOUNDARY_REVIEW');
+  ], 4000), [{ text: b, startMs: 1800, endMs: 2200 }]);
+});
+
+test('split sentences at an audio cut continue automatically and keep words from the chosen recognition', () => {
+  const ranges = planAudioSegments(6000, { targetMs: 3000, overlapMs: 2000 });
+  const result = mergeAudioTranscript([
+    { ...ranges[0], cues: [{ text: '算下来每瓶四十二。', startMs: 2400, endMs: 2900 }, { text: '我手在抖因为', startMs: 3500, endMs: 3990 }], words: [{ token: '我手在抖因为', start: 3.5, end: 3.99 }] },
+    { ...ranges[1], cues: [{ text: '算下来每瓶四十二。', startMs: 400, endMs: 900 }, { text: '我手在抖。', startMs: 1500, endMs: 1900 }, { text: '因为赔钱。', startMs: 1900, endMs: 2400 }], words: [{ token: '我手在抖', start: 1.5, end: 1.9 }, { token: '因为赔钱', start: 1.9, end: 2.4 }] },
+  ], 6000);
+  assert.deepEqual(result.cues.map(cue => cue.text), ['算下来每瓶四十二。', '我手在抖。', '因为赔钱。']);
+  assert.deepEqual(result.words, [{ text: '我手在抖', startMs: 3500, endMs: 3900 }, { text: '因为赔钱', startMs: 3900, endMs: 4400 }]);
+});
+
+test('repetition at separate source times and words present on only one side are retained', () => {
+  const ranges = planAudioSegments(4000, { targetMs: 2000, overlapMs: 1000 });
+  assert.deepEqual(mergeAudioSegments([
+    { ...ranges[0], cues: [{ text: '买一瓶', startMs: 1600, endMs: 1800 }] },
+    { ...ranges[1], cues: [{ text: '买一瓶', startMs: 600, endMs: 800 }, { text: '再送一瓶', startMs: 850, endMs: 1100 }] },
+  ], 4000).map(cue => cue.text), ['买一瓶', '买一瓶', '再送一瓶']);
 });
 
 test('invalid audio policy and out-of-source cues are rejected', () => {

@@ -1,5 +1,6 @@
 /** Selected structure plans become immutable export snapshots; only one is handed to the existing queue at a time. */
 import { createHash } from 'node:crypto';
+import { isSavedStructurePlanUsable } from './structure-plan-availability.mjs';
 import { mkdir, readFile, readdir, realpath, stat } from 'node:fs/promises';
 import { join, resolve, relative, isAbsolute, sep } from 'node:path';
 import { HttpError } from './http.mjs';
@@ -285,8 +286,8 @@ export function createStructureBatchExports({ plans, exports, outputRoot, captur
         return view(previous);
       }
       const state = await plans.status(project.path, { ...scope, taskKey: request.taskKey });
-      if (state.status !== 'complete' || !['shared', 'local'].includes(state.context?.visibility) || state.taskKey !== request.taskKey
-        || request.planIds.some(id => !state.plans?.some(plan => plan.id === id))) throw new HttpError(409, '所选方案不属于当前已保存版本，请重新读取方案列表');
+      if (!['shared', 'local'].includes(state.context?.visibility) || state.taskKey !== request.taskKey
+        || request.planIds.some(id => !isSavedStructurePlanUsable(state, id))) throw new HttpError(409, '所选方案不属于当前已保存版本，请重新读取方案列表');
       const selected = state.plans.map((plan, index) => ({ plan, ordinal: index + 1 })).filter(item => request.planIds.includes(item.plan.id));
       const outputBase = destination === 'jianying' ? await configuredDraftsFolder(true) : chosenFolder ?? await defaultFolder();
       if (destination === 'jianying' && chosenFolder && chosenFolder !== outputBase) throw new HttpError(409, '剪映草稿目录已变化，请重新打开导出核对保存位置');

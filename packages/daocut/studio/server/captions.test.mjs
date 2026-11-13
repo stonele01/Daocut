@@ -288,7 +288,7 @@ test('making subtitles transcribes the speech with no transcript; with no servic
 });
 
 test('a transcript written a word (or a character) per cue is its words: they are joined into lines, each still timed', async () => {
-  const chars = ['认', '识', 'O', 'p', 'e', 'n', 'F', 'i', 'l', 'm', '。'];
+  const chars = ['认', '识', 'D', 'a', 'o', 'c', 'u', 't', '。'];
   const body = `WEBVTT\n\n${chars.map((c, i) => `00:00:00.${String(i * 90).padStart(3, '0')} --> 00:00:00.${String(i * 90 + 90).padStart(3, '0')}\n${c}`).join('\n\n')}\n\n00:00:01.000 --> 00:00:01.000\n \n`;
   const root = project([{ clips: [{ id: 'vo', src: 'assets/vo.wav' }] }], { 'assets/vo.vtt': body });
   const { cues } = await filmCaptions(root, noProbe);
