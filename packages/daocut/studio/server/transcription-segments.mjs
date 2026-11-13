@@ -17,7 +17,12 @@ export function validateTranscriptCues(cues, durationMs = Infinity) {
   return cues;
 }
 
-/** Inspect every seam before publishing; ambiguous results stay in the raw manifest for local review. */
+/** Assemble validated absolute timestamps; raw provider segments remain available for optional correction. */
 export function mergeAudioSegments(segments, durationMs) {
-  return resolveAudioSeams(inspectAudioSeams(segments, durationMs), {});
+  return mergeAudioTranscript(segments, durationMs).cues;
+}
+
+export function mergeAudioTranscript(segments, durationMs) {
+  const inspection = inspectAudioSeams(segments, durationMs);
+  return { cues: resolveAudioSeams(inspection, {}), words: inspection.words };
 }

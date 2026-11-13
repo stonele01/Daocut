@@ -45,11 +45,11 @@ export function ProductWorkflowConfirmation({ projectId, request, onDone, onClos
     submitted.current = true; setBusy(true); setError('');
     const stillCurrent = () => mounted.current && currentKey.current === executionKey;
     try {
-      if (publishOnly) await api.publishSharedAnalysis(projectId, plan.sourceId, plan.shared!.taskKey);
+      if (publishOnly && !request.prepare) await api.publishSharedAnalysis(projectId, plan.sourceId, plan.shared!.taskKey);
       else await api.executeProductWorkflow(projectId, plan, reviewed);
       if (!stillCurrent()) return;
-      await onDone();
       if (stillCurrent()) onClose();
+      await onDone();
     } catch (reason) {
       if (!stillCurrent()) return;
       setError(String((reason as Error).message ?? reason));
@@ -57,7 +57,7 @@ export function ProductWorkflowConfirmation({ projectId, request, onDone, onClos
       setPlan(null);
     } finally { if (stillCurrent()) { submitted.current = false; setBusy(false); } }
   };
-  const label = names[request.action];
+  const label = request.prepare ? '转写并拆品' : names[request.action];
   const from = plan?.scope?.startMs ?? 0, to = plan?.scope?.endMs ?? plan?.source.durationMs ?? 0;
   const sharedReuse = plan?.shared?.mode === 'reuse';
   const displayedService = sharedReuse ? plan.shared?.result?.service : plan?.service;
@@ -72,22 +72,24 @@ export function ProductWorkflowConfirmation({ projectId, request, onDone, onClos
       else if (!event.shiftKey && document.activeElement === nodes.at(-1)) { event.preventDefault(); nodes[0]?.focus(); }
     }}>
     <div className="min-h-0 space-y-3 overflow-y-auto p-4">
-    <strong className="block text-[15px]">{preparingProducts && request.action !== 'analysis' ? request.action === 'transcription' ? '转写直播' : '识别商品' : `确认${label}`}</strong>
+    <strong className="block text-[15px]">{request.prepare ? '转写并拆品' : preparingProducts && request.action !== 'analysis' ? request.action === 'transcription' ? '转写直播' : '识别商品' : `确认${label}`}</strong>
     {!plan && !error && <p>正在读取请求计划…</p>}
     {plan && <>
+      {request.prepare && <p>整条视频转写后自动识别商品；只有一个品就生成一个品。已有结果会复用，不自动开始话术分析。</p>}
       {plan.newVersion && <p>{plan.cached ? '已有新版结果，本次不重复请求；当前工程继续使用原版本，请在版本列表中手动采用。' : '本次将生成新的共享版本，需要新请求；当前工程继续使用原版本，完成后由你决定是否采用。'}</p>}
-      <p>{reviewBlocked ? '分段已完成，待核对字幕接缝，无需重新转写。' : publishOnly ? '仅补存共享结果，不请求模型。' : sharedBusy ? '同事正在处理，等待共享结果。' : sharedReuse ? '复用共享结果，不请求模型。' : plan.cached ? '复用已保存结果，不请求模型。' : request.action === 'transcription' ? '发送本段音频转成文字，完成后由你选择下一步。' : visualRequests > 0 ? '分析所选讲解的文字，并发送抽帧进行看图核查。' : '仅发送转写文字、时间和识别指令。'}</p>
+      {!request.prepare && <p>{reviewBlocked ? '分段已完成，待核对字幕接缝，无需重新转写。' : publishOnly ? '仅补存共享结果，不请求模型。' : sharedBusy ? '同事正在处理，等待共享结果。' : sharedReuse ? '复用共享结果，不请求模型。' : plan.cached ? '复用已保存结果，不请求模型。' : request.action === 'transcription' ? '将整条原视频的音频转成文字，各商品复用这份转写。' : visualRequests > 0 ? '分析所选讲解的文字，并发送抽帧进行看图核查。' : '仅发送转写文字、时间和识别指令。'}</p>}
       {plan.shared?.reason && <p>{plan.shared.reason}</p>}
       <p className="break-all">素材：{plan.source.assetPath}</p>
       <p>范围：{sourceTime(from)} – {sourceTime(to)}</p>
       <p>服务：{displayedService?.name || displayedService?.provider || (sharedReuse ? '旧结果未记录' : '未配置')} · {displayedService?.model || (sharedReuse ? '旧结果未记录' : '未配置')}</p>
-      <p>新增请求 {plan.requestCount ?? '待确定'} 次{plan.reusedRequests > 0 ? ` · 复用 ${plan.reusedRequests} 段` : ''}</p>
+      {plan.nextStage && <p>接着拆品：{plan.nextStage.service.name || plan.nextStage.service.provider} · {plan.nextStage.service.model}。拆品请求次数在转写完成后按文字长度确定。</p>}
+      <p>{plan.nextStage ? '转写新增请求' : '新增请求'} {plan.requestCount ?? '待确定'} 次{plan.reusedRequests > 0 ? ` · 复用 ${plan.reusedRequests} 段` : ''}</p>
       {request.action === 'analysis' && plan.visual && <>
         <p>其中：文字分析 {textRequests ?? '尚无法确定'} 次 ＋ AI 看图 {visualRequests} 次</p>
         {visualRequests > 0 && <p>看图：{plan.visual.name || plan.visual.provider || '未配置'} · {plan.visual.model || '未配置'}</p>}
         {!plan.visual.enabled && !plan.cached && !sharedReuse && <p>AI 看图未配置：本次只做文字分析，画面仍待核查。{plan.visual.error}</p>}
       </>}
-      {!plan.cached && !publishOnly && !sharedBusy && plan.cost.uncertain && <p className="text-[var(--text-muted)]">本次请求可能计费，费用以服务账单为准。</p>}
+      {(!plan.cached || !!plan.nextStage) && !publishOnly && !sharedBusy && (plan.cost.uncertain || !!plan.nextStage) && <p className="text-[var(--text-muted)]">本次请求可能计费，费用以服务账单为准。</p>}
       {plan.rerun && !plan.cached && !publishOnly && <p>本次重新分析会产生新请求；人工修正和取用修改保留。</p>}
       {plan.retryRequired && !reviewBlocked && <label className="flex items-start gap-2"><input type="checkbox" aria-label="已核查服务记录，确认显式重试" checked={reviewed} onChange={event => setReviewed(event.target.checked)} />已核查服务记录，确认重试未完成部分，可能再次计费</label>}
       {(plan.error || (!plan.enabled && !plan.cached && !publishOnly && !sharedBusy && !reviewBlocked)) && <p role="alert" className="text-red-400">{plan.error || plan.service.error || '请先在设置中配置此服务。已有结果仍保留。'}</p>}
@@ -107,7 +109,7 @@ export function ProductWorkflowConfirmation({ projectId, request, onDone, onClos
     {error && <p role="alert" className="text-red-400">{error}</p>}
     </div>
     <div className="flex shrink-0 flex-wrap gap-2 border-t border-[var(--border)] bg-[var(--dock-pane)] p-4">
-      <button type="button" className={`${button} min-h-9 flex-1 bg-[var(--accent)]/20 text-[var(--text)]`} disabled={disabled} onClick={() => void execute()}>{reviewBlocked ? '等待接缝核对' : sharedBusy ? '等待共享结果' : publishOnly ? '仅重试保存共享结果' : plan?.shared?.mode === 'reuse' ? '使用共享版本' : plan?.cached ? '使用已保存结果' : `确认${label}`}</button>
+      <button type="button" className={`${button} min-h-9 flex-1 bg-[var(--accent)]/20 text-[var(--text)]`} disabled={disabled} onClick={() => void execute()}>{busy ? '正在启动…' : reviewBlocked ? '等待接缝核对' : sharedBusy ? '等待共享结果' : publishOnly ? '仅重试保存共享结果' : request.prepare ? '确认转写并拆品' : plan?.shared?.mode === 'reuse' ? '使用共享版本' : plan?.cached ? '使用已保存结果' : `确认${label}`}</button>
       <button ref={cancel} type="button" className={`${button} min-h-9 px-4`} disabled={busy} onClick={onClose}>{error ? '返回任务状态' : '取消'}</button>
       {(error || sharedBusy) && !busy && <button type="button" className={button} onClick={() => setTick(value => value + 1)}>重新读取计划</button>}
     </div>

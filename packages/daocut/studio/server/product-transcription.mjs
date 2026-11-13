@@ -5,7 +5,7 @@ import { join, relative, sep } from 'node:path';
 import { writeAtomic } from './atomic.mjs';
 import { inside, readable } from './files.mjs';
 import { parseVtt, transcriptPath } from './transcripts.mjs';
-import { AUDIO_SEGMENT_POLICY, planAudioSegments, mergeAudioSegments, validateTranscriptCues } from './transcription-segments.mjs';
+import { AUDIO_SEGMENT_POLICY, planAudioSegments, mergeAudioTranscript, validateTranscriptCues } from './transcription-segments.mjs';
 import { resolveSharedMedia, sharedMediaManifest } from './shared-media.mjs';
 import doubao, { doubaoResult } from './providers/doubao.mjs';
 import { probe } from './derived.mjs';
@@ -351,8 +351,7 @@ async function transcribeSegments(root, source, loc, { getKey, signal, retryUnce
   }
   const latest = await stat(loc.input);
   if (latest.size !== loc.fingerprint.size || latest.mtimeMs !== loc.fingerprint.mtimeMs || latest.ctimeMs !== loc.fingerprint.ctimeMs) throw new Error('Source changed during transcription; completed segments were preserved for inspection.');
-  const cues = mergeAudioSegments(manifest.segments, source.durationMs);
-  const words = manifest.segments.flatMap(s => s.words.map(w => ({ text: w.token, startMs: Math.round(w.start * 1000) + s.startMs, endMs: Math.round(w.end * 1000) + s.startMs })).filter(w => (w.startMs + w.endMs) / 2 >= s.coreStartMs && (w.startMs + w.endMs) / 2 < s.coreEndMs));
+  const { cues, words } = mergeAudioTranscript(manifest.segments, source.durationMs);
   const completed = { ...state, status: 'complete', text: cues.map(c => c.text).join(' '), cues, words, segments: manifest.segments.map(({ cues, words, rawWords, text, ...metadata }) => metadata) };
   await save(loc, completed);
   return { ...view(completed), cached: false };

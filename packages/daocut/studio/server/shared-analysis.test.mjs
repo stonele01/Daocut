@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { createSharedAnalysis } from './shared-analysis.mjs';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+import { mediaContentHash } from '../../src/shared-media-reference.mjs';
 
 const base = resolve('../../.tmp/shared-live-20261104/backend');
 export function mockCoordinator() {
@@ -40,6 +43,20 @@ test('same library content on two computers shares identity; other content never
   assert.equal(p.taskKey, q.taskKey); assert.equal(p.sourceIdentity, q.sourceIdentity);
   await writeFile(join(f.roots[1], 'assets/live.mp4'), 'different live same filename');
   assert.notEqual((await b.prepare(f.roots[1], f.source, f.input)).taskKey, p.taskKey);
+});
+
+test('shared results reuse the full identity already verified while opening the video', async t => {
+  const f = await fixture(t), path = join(f.roots[0], f.source.assetPath);
+  const expected = await mediaContentHash(path);
+  const stream = t.mock.method(fs, 'createReadStream', () => { throw Error('duplicate full-media read'); });
+  syncBuiltinESMExports();
+  try {
+    const plan = await f.make().prepare(f.roots[0], f.source, f.input);
+    assert.equal(plan.source.sha256, expected);
+    assert.equal(stream.mock.callCount(), 0);
+    await writeFile(path, 'changed original');
+    await assert.rejects(f.make().prepare(f.roots[0], f.source, f.input), /duplicate full-media read/);
+  } finally { stream.mock.restore(); syncBuiltinESMExports(); }
 });
 test('one claimant publishes immutable first result; another reuses with no acquisition', async t => {
   const f = await fixture(t), a = f.make(), b = f.make(), p = await a.prepare(f.roots[0], f.source, f.input), q = await b.prepare(f.roots[1], f.source, f.input);

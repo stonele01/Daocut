@@ -18,6 +18,7 @@ import { createReadStream, existsSync, mkdirSync, openSync, readFileSync, realpa
 import { basename, extname, isAbsolute, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
+import { withMediaReferenceSnapshot } from '../../src/shared-media-reference.mjs';
 import { pipeline } from 'node:stream';
 import { mkdir, readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
@@ -1055,7 +1056,7 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
 
   const editor = createServer((req, res) => {
     if (!ownHost(req, /** @type {import('node:net').AddressInfo} */ (editor.address()).port)) { json(res, 403, { error: 'not this address' }); return; }
-    route(req, res).catch((/** @type {unknown} */ e) => {
+    (req.method === 'GET' ? withMediaReferenceSnapshot(() => route(req, res)) : route(req, res)).catch((/** @type {unknown} */ e) => {
       const status = e instanceof HttpError || e instanceof ProjectError || e instanceof ProjectBackupError || e instanceof FileError || e instanceof SharedMediaError || e instanceof HistoryError || e instanceof MediaError || e instanceof ExportError
         || e instanceof FetchError || e instanceof BrowseError ? e.status : 500;
       if (status === 500) console.error(e);

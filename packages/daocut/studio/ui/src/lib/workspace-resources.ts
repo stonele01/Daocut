@@ -60,7 +60,7 @@ export interface SavedBundle {
   overrides?: readonly FilmOverride[];
 }
 
-export interface MediaProxy { state: 'waiting' | 'making' | 'ready' | 'failed'; ratio?: number }
+export interface MediaProxy { state: 'waiting' | 'making' | 'ready' | 'failed'; ratio?: number; reason?: 'space' | 'encode'; message?: string }
 
 /** Where a linked file or folder is kept (`to`, a full path); `missing`: it cannot be reached (a NAS that is off). */
 export interface MediaLink {

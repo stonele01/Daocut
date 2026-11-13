@@ -23,6 +23,13 @@ const joinText = lines => lines.reduce((text, line) => text + (/[A-Za-z]$/.test(
 const canonicalCandidate = candidate => ({ cueRange: candidate.cueRange, tags: [...candidate.tags].sort(), details: candidate.details ?? {}, composition: candidate.composition });
 
 /** Public inputs stay hash-pinned. A completed local result can compose locally, never authorize publication. */
+export function needsProductScopeConfirmation(product, interval) {
+  // A saved interval already represents an assigned lecture (legacy discovery
+  // kept mixed/uncertain ranges in unassigned). Product identity uncertainty
+  // controls naming/merging, not whether this lecture may be composed locally.
+  return !product || !interval || interval.scopeStatus === 'uncertain';
+}
+
 export function createStructurePlanInputReader({ readAnalysis = readProductAnalysis, readTranscript = readProductTranscript, liveAnalysis } = {}) {
   return async (root, request) => {
     const { analysis } = await readAnalysis(root);
@@ -32,7 +39,8 @@ export function createStructurePlanInputReader({ readAnalysis = readProductAnaly
     const product = analysis.products.find(item => item.id === request.productId && item.sourceIds.includes(source.id));
     const context = { sourceId: source.id, productId: request.productId, intervalId: request.intervalId, ...(interval ? bounds(interval) : {}) };
     const unavailable = (code, message, visibility = 'unavailable') => ({ source, context, visibility, issues: [issue(code, message)] });
-    if (!interval || !product || product.identityUncertain) return unavailable('UNCONFIRMED_PRODUCT_SCOPE', '需要已确认归属的单个商品讲解段，历史待核对话术不能按时间猜归属');
+    if (!interval || !product) return unavailable('UNCONFIRMED_PRODUCT_SCOPE', '请先选择一个已保存的商品讲解段');
+    if (needsProductScopeConfirmation(product, interval)) return unavailable('UNCONFIRMED_PRODUCT_SCOPE', '这段讲解的商品归属尚未确认，请核对商品范围；现有话术已保留。' + ((product.review ?? []).filter(note => !note.includes('仅依据转写')).join('；')));
     if (['startMs', 'endMs'].some(key => Object.hasOwn(request, key) &&
       (!['number', 'string'].includes(typeof request[key]) || String(request[key]).trim() === '' || !Number.isFinite(Number(request[key])) || Number(request[key]) !== interval[key]))) {
       throw new HttpError(409, '商品讲解范围已变化，请刷新当前段；未继续旧范围生成');

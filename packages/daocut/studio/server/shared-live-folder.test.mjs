@@ -154,6 +154,25 @@ test('reopening delegates an empty-project refresh without rerunning initializat
   assert.deepEqual(second.sharedRead, refreshed);
 });
 
+test('opening the live folder resumes its parent when an edited structure draft is also recent', async () => {
+  const { inspectLiveFolder, openLiveProject } = await api();
+  const { openProject } = await import('./projects.mjs');
+  const live = await inspectLiveFolder({ folder, initialize: true }, { coordinate });
+  const args = { folder, videoPath: live.videos[0].path };
+  const first = await openLiveProject({ ...args, requestId: 'draft-parent-001' }, { coordinate });
+  const child = join(first.project.path, '.film/structure-drafts', 'a'.repeat(24));
+  await mkdir(join(child, 'assets'), { recursive: true });
+  await mkdir(join(child, '.film'), { recursive: true });
+  await writeFile(join(child, 'film.html'), 'private edited structure');
+  await writeFile(join(child, '.film/structure-draft.json'), JSON.stringify({ version: 1, parentProjectId: first.project.id }));
+  await writeFile(join(child, 'assets/.daocut-source-media.json'), await readFile(join(first.project.path, 'assets/.daocut-source-media.json')));
+  await openProject(child);
+  const reopened = await openLiveProject({ ...args, requestId: 'draft-parent-002' }, { coordinate });
+  assert.equal(reopened.status, 'opened');
+  assert.equal(reopened.project.id, first.project.id);
+  assert.equal(await readFile(join(child, 'film.html'), 'utf8'), 'private edited structure');
+});
+
 test('multiple personal projects require a choice; an unrelated project cannot be selected', async () => {
   const { inspectLiveFolder, openLiveProject } = await api();
   const live = await inspectLiveFolder({ folder, initialize: true }, { coordinate });

@@ -150,6 +150,9 @@ async function openPersonal(/** @type {OpenInput} */ input, /** @type {Dependenc
   const sha256 = await mediaContentHash(path);
   const matches = []; let replaced = false;
   for (const recent of (await readState()).recent) {
+    // A structure draft is a child of the live project, not another live workspace.
+    // Reopen the parent; its individual edits remain available through Edit copy.
+    if ((await stat(join(recent.path, '.film/structure-draft.json')).catch(() => null))?.isFile()) continue;
     if (!(await stat(join(recent.path, 'film.html')).catch(() => null))?.isFile()) continue;
     for (const [asset, source] of Object.entries((await sharedMediaManifest(recent.path)).items)) {
       if (source.libraryId !== live.library.id || source.relativePath !== video.path) continue;

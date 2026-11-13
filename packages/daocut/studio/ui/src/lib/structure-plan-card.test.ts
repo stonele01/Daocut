@@ -15,11 +15,11 @@ const plan: StructurePlan = {
   ],
 };
 
-test('compact card text distinguishes selling points and retains source quotes without inventing marketing claims', () => {
+test('compact cards lead with the real opening and retain selling-point quotes without inventing claims', () => {
   const before = JSON.stringify(plan), card = structurePlanCard(plan);
-  assert.equal(card.title, '500毫升容量 → 单手按压开盖');
+  assert.equal(card.title, '开头｜拿杯子总要拧半天');
   assert.equal(card.subtitle, '卖点原话：这个杯子是五百毫升的。 → 杯盖可以单手按压打开。');
-  assert.equal(card.hook, '钩子：拿杯子总要拧半天？');
+  assert.equal(card.hook, '开头原话：拿杯子总要拧半天？');
   assert.equal(card.coreCount, 2);
   assert.equal(card.durationLabel, '54 秒');
   assert.equal(card.durationHint, '超过50秒 · 可用');
@@ -38,8 +38,8 @@ test('1.3x cards show accelerated subclip durations and the 30–40 second rule 
   assert.deepEqual(card.blocks.map(block => block.durationMs), accelerated.clips.map(clip => (clip.endMs - clip.startMs) / 1.3));
   assert.equal(card.fullCoreQuotes, structurePlanCard(plan).fullCoreQuotes);
   assert.equal(JSON.stringify(accelerated), before);
-  assert.equal(structurePlanCard({ ...accelerated, durationMs: 41000 }).durationHint, '超过40秒 · 需核对');
-  assert.equal(structurePlanCard({ ...accelerated, durationMs: 29000 }).durationHint, '不足30秒 · 需核对');
+  assert.equal(structurePlanCard({ ...accelerated, durationMs: 41000 }).durationHint, '超过40秒');
+  assert.equal(structurePlanCard({ ...accelerated, durationMs: 29000 }).durationHint, '不足30秒');
   assert.equal(structurePlanCard({ ...accelerated, durationMs: 41000 }).durationInRange, false);
   assert.equal(structurePlanCard(plan).speedLabel, '原速');
   assert.equal(structurePlanCard({ ...plan, durationMs: 42000 }).durationHint, '参考时长内');
@@ -59,28 +59,30 @@ test('letters remain distinct after Z and duration hints do not reject short or 
   assert.deepEqual([0, 1, 25, 26, 27, 701, 702].map(planLetter), ['A', 'B', 'Z', 'AA', 'AB', 'ZZ', 'AAA']);
   assert.equal(structurePlanCard({ ...plan, durationMs: 29000 }).durationHint, '不足30秒 · 可用');
   assert.equal(structurePlanCard({ ...plan, durationMs: 42000 }).durationHint, '参考时长内');
-  assert.equal(structurePlanCard({ ...plan, clips: [] }).title, '500毫升容量＋单手按压开盖');
-  assert.equal(structurePlanCard({ ...plan, clips: [], coreLabels: undefined }).title, '结构方案');
+  assert.equal(structurePlanCard({ ...plan, clips: [] }).title, '开头待核对');
+  assert.equal(structurePlanCard({ ...plan, clips: [], coreLabels: undefined }).title, '开头待核对');
 });
 
 test('same hook remains distinguishable by selling-point order and exact wording, without changing plan data', () => {
   const reversed = { ...plan, clips: [plan.clips[0]!, plan.clips[2]!, plan.clips[1]!, plan.clips[3]!] };
-  assert.equal(structurePlanCard(reversed).title, '单手按压开盖 → 500毫升容量');
+  assert.equal(structurePlanCard(reversed).title, structurePlanCard(plan).title);
+  assert.notEqual(structurePlanCard(reversed).subtitle, structurePlanCard(plan).subtitle);
   const first = { ...plan, coreIds: ['capacity'], clips: [plan.clips[0]!, plan.clips[1]!, plan.clips[3]!] };
   const other = { ...first, clips: [plan.clips[0]!, { ...plan.clips[1]!, text: '五百毫升容量，通勤路上喝水够用。' }, plan.clips[3]!] };
   const before = JSON.stringify([first, other]);
-  assert.equal(structurePlanCard(first).title, '500毫升容量');
-  assert.equal(structurePlanCard(other).title, '500毫升容量');
+  assert.equal(structurePlanCard(first).title, '开头｜拿杯子总要拧半天');
+  assert.equal(structurePlanCard(other).title, '开头｜拿杯子总要拧半天');
   assert.notEqual(structurePlanCard(first).subtitle, structurePlanCard(other).subtitle);
   assert.equal(JSON.stringify([first, other]), before);
   const repeated = { ...first, clips: [first.clips[0]!, first.clips[1]!, other.clips[1]!, first.clips[2]!] };
-  assert.equal(structurePlanCard(repeated).title, '500毫升容量（2段）');
+  assert.equal(structurePlanCard(repeated).title, structurePlanCard(first).title);
+  assert.notEqual(structurePlanCard(repeated).subtitle, structurePlanCard(first).subtitle);
   assert.equal(structurePlanCard(repeated).coreCount, 1);
 });
 
 test('draft selector labels show content and duration while preserving the stable plan reference', () => {
   const before = JSON.stringify(plan);
-  assert.equal(structureDraftLabel(plan.id, [plan]), '方案 A · 500毫升容量 → 单手按压开盖 · 原方案54秒');
+  assert.equal(structureDraftLabel(plan.id, [plan]), '方案 A · 开头｜拿杯子总要拧半天 · 原方案54秒');
   assert.equal(JSON.stringify(plan), before);
 });
 
@@ -110,4 +112,35 @@ test('story and display roles retain readable block labels without turning body 
   assert.ok(!card.blocks[1]!.roles.includes('hook'));
   assert.equal(card.fullHook, mixed.clips[0]!.text);
   assert.equal(JSON.stringify(mixed), before);
+});
+
+test('opening titles use the first clip even without a hook tag and skip generic greetings', () => {
+  const actual = { ...plan, clips: [
+    { ...plan.clips[0]!, text: '哪些人去用？姐妹们，你们有没有那种脸？干，干纹细纹很严重，一做表情全是皱皱巴巴的这种的脸。', roles: ['pain'] },
+    { ...plan.clips[1]!, text: '后面这一句才有钩子标签。', roles: ['hook', 'core'] },
+    ...plan.clips.slice(2),
+  ] };
+  const before = JSON.stringify(actual), card = structurePlanCard(actual);
+  assert.equal(card.title, '痛点共鸣｜干纹细纹很严重');
+  assert.equal(card.fullHook, actual.clips[0]!.text);
+  assert.ok(!card.title.includes('后面'));
+  assert.equal(JSON.stringify(actual), before);
+});
+
+test('prices need an actual comparison cue, and nearby purchase qualifications remain visible', () => {
+  const cardFor = (text: string) => structurePlanCard({ ...plan, clips: [{ ...plan.clips[0]!, text, roles: ['offer', 'hook'] }, ...plan.clips.slice(1)] });
+  assert.equal(cardFor('别人卖198块，今天59块两瓶。').title, '价格对比｜别人卖198块');
+  assert.equal(cardFor('59块两瓶。').title, '价格福利｜59块两瓶');
+  assert.equal(cardFor('领券后，59元两瓶。').title, '价格福利｜领券后，59元两瓶');
+  assert.equal(cardFor('会员专享，59元两瓶。').title, '价格福利｜会员专享，59元两瓶');
+});
+
+test('usage, story and short openings stay readable and are computed for old plan versions too', () => {
+  const cardFor = (text: string, roles: string[], version = 'ai-structure-plans-v1') => structurePlanCard({ ...plan, version,
+    clips: [{ ...plan.clips[0]!, text, roles }, ...plan.clips.slice(1)] });
+  assert.equal(cardFor('怎么用？姐妹们，非常好用，非常简单。洗完脸先用水，第二步摇一摇它。', ['hook', 'core']).title, '使用方法｜洗完脸先用水');
+  assert.equal(cardFor('我第一次带孩子露营，赶上了大雨。', ['story']).title, '故事经历｜我第一次带孩子露营');
+  assert.equal(cardFor('省时间。', ['core'], 'ai-structure-plans-v3').title, '卖点切入｜省时间');
+  assert.equal(cardFor('别买错。', ['hook']).title, '开头｜别买错');
+  assert.equal(cardFor(' ', ['hook']).title, '开头待核对');
 });

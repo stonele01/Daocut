@@ -8,23 +8,18 @@ test('normal desktop wires existing local media tools without inspecting files o
   let requests = 0, checks = 0;
   const bridge = async () => { requests++; throw Error('no model configuration should be read'); };
   const normal = createDesktopAnalysisServices({ textBridge: bridge });
-  assert.equal(typeof normal.liveAnalysis.mediaReview, 'function');
-  assert.equal(typeof normal.liveAnalysis.visualReview?.identity, 'function');
-  assert.equal(typeof normal.liveAnalysis.visualReview?.review, 'function');
+  assert.equal(normal.liveAnalysis.mediaReview, undefined, 'text results must not wait for whole-video media inspection');
+  assert.equal(normal.liveAnalysis.visualReview, undefined, 'normal product analysis must not schedule a separate image request');
   const fake = async (...args) => { checks++; return { args }; };
   const injected = createDesktopAnalysisServices({ textBridge: bridge, mediaReview: fake });
   assert.equal(injected.liveAnalysis.mediaReview, fake);
   assert.equal(requests, 0); assert.equal(checks, 0);
 });
 
-test('desktop image adapter reads existing chat image model without executing a model request', async () => {
-  const requests = [];
-  const model = { id: 'chat', name: '模拟看图模型', api: 'openai-responses', baseUrl: 'https://example.invalid', model: 'mock', levels: ['auto'], effort: 'auto' };
-  const service = createDesktopAnalysisServices({ textBridge: async request => {
-    requests.push(request.operation); assert.equal(request.operation, 'public-visual-config'); return model;
-  } });
-  assert.deepEqual(await service.liveAnalysis.visualReview.identity(), model);
-  assert.deepEqual(requests, ['public-visual-config']);
+test('legacy visual adapters can be injected without enabling one in the normal desktop workflow', () => {
+  const visualReview = { identity: async () => null, review: async () => assert.fail('must not execute on construction') };
+  const service = createDesktopAnalysisServices({ textBridge: async () => assert.fail('must not read visual configuration'), visualReview });
+  assert.equal(service.liveAnalysis.visualReview, visualReview);
 });
 
 test('desktop adapters inspect settings without network or chmod and honor the provider choice and disconnect state', async t => {

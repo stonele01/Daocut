@@ -66,6 +66,7 @@ jobs:
     timeout-minutes: 15
     env:
       DAOCUT_COMPANY_UPDATES: ''
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
     defaults:
       run:
         working-directory: apps/company-service
@@ -77,14 +78,25 @@ jobs:
         shell: pwsh
         run: |
           "npm_config_cache=$env:RUNNER_TEMP/company-npm-cache" >> $env:GITHUB_ENV
+          "npm_config_store_dir=$env:RUNNER_TEMP/company-pnpm-store" >> $env:GITHUB_ENV
+          "COREPACK_HOME=$env:RUNNER_TEMP/company-corepack" >> $env:GITHUB_ENV
           "DAOCUT_COMPANY_TEST_ROOT=$env:RUNNER_TEMP/company-service-tests" >> $env:GITHUB_ENV
+      - uses: pnpm/action-setup@v4
+        with:
+          dest: ${{ runner.temp }}/pnpm
+          run_install: false
       - uses: actions/setup-node@v4
         with:
           node-version: 24.16.0
           cache: npm
           cache-dependency-path: apps/company-service/package-lock.json
+      - name: Install the desktop dependencies used by integration tests
+        # Service tests import the real desktop client and Studio modules.
+        # The service itself remains excluded from this pnpm workspace.
+        working-directory: ${{ github.workspace }}
+        run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Install the independent locked service
-        # Its native better-sqlite3 addon needs npm's install scripts; no pnpm workspace install in this job.
+        # Its native better-sqlite3 addon still uses the service's own npm lockfile.
         run: npm ci --no-audit --no-fund
       - run: npm run typecheck
       - run: npm test

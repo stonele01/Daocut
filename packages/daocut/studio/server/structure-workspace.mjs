@@ -4,6 +4,7 @@ import { ensureStructureDraft, listStructureDrafts, structureDraftContext } from
 import { writeAtomic } from './atomic.mjs';
 import { openProject } from './projects.mjs';
 import { HttpError, json, readJson } from './http.mjs';
+import { isSavedStructurePlanUsable } from './structure-plan-availability.mjs';
 
 export function createStructureWorkspace({ plans, batches, register = openProject }) {
   const assertOwner = async project => { if (await structureDraftContext(project.path)) throw new HttpError(409, '请从原工程打开公共方案'); };
@@ -30,7 +31,7 @@ export function createStructureWorkspace({ plans, batches, register = openProjec
   async function edit(project, request) {
     await assertOwner(project);
     const state = await plans.status(project.path, request);
-    const plan = state.status === 'complete' && state.taskKey === request.taskKey && ['shared', 'local'].includes(state.context?.visibility) && state.plans?.find(plan => plan.id === request.planId);
+    const plan = isSavedStructurePlanUsable(state, request.planId) && state.taskKey === request.taskKey && ['shared', 'local'].includes(state.context?.visibility) && state.plans?.find(plan => plan.id === request.planId);
     if (!plan) throw new HttpError(409, '找不到此讲解段已保存的方案，请重新读取方案列表');
     const draft = await ensureStructureDraft(project.path, { parentProjectId: project.id, plan });
     return { project: await register(draft.root), meta: draft.meta };

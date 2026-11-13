@@ -69,7 +69,7 @@ import { broken, encoders, FRAMES_709, hardwareEncoder, hardwareOptions, onTheCh
 import { COMMAND_ROOM, filmSound, filterScriptOption, kill as killProcess, mix, open } from '../../src/shared.mjs';
 import { defaultWorkers, machine } from '../../src/render.mjs';
 import { filmVideos } from '../../src/seekable.mjs';
-import { FILM_FILE, clipFade, filmHtml, fittedFade, kindOf, pictureRect, readFilmFile } from '../../src/film-doc.mjs';
+import { FILM_FILE, clipFade, clipSpan, filmHtml, fittedFade, kindOf, pictureRect, readFilmFile } from '../../src/film-doc.mjs';
 import { layerBlocks, rowBadges, trackKind } from './track-layout.mjs';
 import { fcpxmlDocument } from './fcpxml.mjs';
 import { NLE_FPS, nleFps, planNleTimeline, probeSource, soundStem, xmemlDocument } from './nle.mjs';
@@ -1279,19 +1279,39 @@ export function createExports({ onChange = () => {}, captions = subtitlesForExpo
     const scratch = join(root, '.film', 'cache', 'export', `nle-${process.pid}-${randomBytes(4).toString('hex')}`);
     const final = freeFile(dir, baseName(job.name, ask), '');
     const staging = join(dir, `.${basename(final)}.partial-${process.pid}-${job.id}`);
+    /** @type {Map<string, import('./nle.mjs').SourceFacts>} */
+    const facts = new Map();
+    const factsOf = async (/** @type {string} */ path) => {
+      if (!facts.has(path)) facts.set(path, existsSync(path) ? await probeSource(path) : {});
+      return /** @type {import('./nle.mjs').SourceFacts} */ (facts.get(path));
+    };
     try {
       await mkdir(scratch, { recursive: true });
-      await filmElsewhere(root, scratch, { stage: doc.stage, tracks: doc.tracks.map((t) => ({ clips: t.clips })) });
-      const probe = await open(scratch, { root });
       /** @type {{ id: string, at: number, end: number, from: number, to: number, speed: number, native: number | null, w: number | null, h: number | null }[]} */
       let loaded;
-      try {
-        loaded = await probe.film.page.evaluate(() => /** @type {any} */ (window).__filmEditor.stage.clips().map((/** @type {any} */ c) => ({
-          id: c.id, at: c.at, end: c.end, from: c.span.from, to: c.span.to, speed: c.span.speed,
-          native: Number.isFinite(c.native) ? c.native : null, w: c.nw ?? null, h: c.nh ?? null,
-        })));
-      } finally {
-        await probe.close();
+      const clips = doc.tracks.flatMap(track => track.clips);
+      const plain = app && clips.every(row => ['video', 'sound'].includes(kindOf(row) ?? '') && !row.class && !row.style && !row.overrides?.length);
+      if (plain) {
+        // Cuts and constant speed have all their timing in film.html. No player,
+        // video decoding or frame renderer is needed to write a native draft.
+        loaded = [];
+        for (const row of clips) {
+          const f = await factsOf(clipPath(root, row.src));
+          if (f.duration === undefined || !(f.duration > 0)) throw new ExportError(`无法读取原片时长：${row.src}`);
+          const span = clipSpan(row, f.duration, row.id), at = row.at ?? 0;
+          loaded.push({ id: row.id, at, end: at + span.length, ...span, native: f.duration, w: f.w ?? null, h: f.h ?? null });
+        }
+      } else {
+        await filmElsewhere(root, scratch, { stage: doc.stage, tracks: doc.tracks.map((t) => ({ clips: t.clips })) });
+        const probe = await open(scratch, { root });
+        try {
+          loaded = await probe.film.page.evaluate(() => /** @type {any} */ (window).__filmEditor.stage.clips().map((/** @type {any} */ c) => ({
+            id: c.id, at: c.at, end: c.end, from: c.span.from, to: c.span.to, speed: c.span.speed,
+            native: Number.isFinite(c.native) ? c.native : null, w: c.nw ?? null, h: c.nh ?? null,
+          })));
+        } finally {
+          await probe.close();
+        }
       }
       if (signal.aborted) throw new Error('cancelled');
       const byId = new Map(loaded.map((c) => [c.id, c]));
@@ -1307,13 +1327,6 @@ export function createExports({ onChange = () => {}, captions = subtitlesForExpo
       const badges = rowBadges(rows.map((row) => row.kind));
       const sourceRows = new Map(rows.flatMap((row, i) => row.clips.map((clip) => [clip.id, badges[i]])));
 
-      /* every source's facts, once */
-      /** @type {Map<string, import('./nle.mjs').SourceFacts>} */
-      const facts = new Map();
-      const factsOf = async (/** @type {string} */ path) => {
-        if (!facts.has(path)) facts.set(path, existsSync(path) ? await probeSource(path) : {});
-        return /** @type {import('./nle.mjs').SourceFacts} */ (facts.get(path));
-      };
       /** @type {import('./nle.mjs').NlePicture[]} */
       const pictures = [];
       /** @type {import('./nle.mjs').NleSound[]} */
@@ -1350,6 +1363,13 @@ export function createExports({ onChange = () => {}, captions = subtitlesForExpo
         }
       }
       if (!pictures.length && !sounds.length) throw new ExportError('the film is empty');
+      // Older structure drafts inherited the empty project's landscape canvas.
+      // Fix that default for ordinary portrait cuts without changing saved edits.
+      if (plain && doc.stage.w === 1920 && doc.stage.h === 1080 && pictures.length
+        && pictures.every(p => p.kind === 'video' && !p.box && p.src === pictures[0].src)) {
+        const f = pictures[0].facts;
+        if (f?.w && f.h && f.h > f.w) doc.stage = { w: f.w, h: f.h };
+      }
 
       await mkdir(join(staging, 'media'), { recursive: true });
       /* stems: each role's sound mixed (what is heard: muted tracks and silenced clips out) */
@@ -1371,7 +1391,7 @@ export function createExports({ onChange = () => {}, captions = subtitlesForExpo
 
       const timeline = planNleTimeline({ stage: doc.stage, duration: duration || 0.001, pictures, sounds },
         { title, fps, audio: mode, media: ask.media ?? 'copy', mediaDir: join(final, 'media'), stems: [...stems.keys()],
-          audioTracks: fcp ? 'source' : 'roles', alpha: prores ? 'prores4444' : 'png' });
+          audioTracks: fcp ? 'source' : 'roles', alpha: prores ? 'prores4444' : 'png', nativeSpeed: Boolean(app) });
       const staged = (/** @type {import('./nle.mjs').NleFile} */ f) => join(staging, 'media', basename(f.path));
 
       /* each web page (and each picture Basic Motion can't place) drawn alone, full frame, with alpha. Several are drawn at

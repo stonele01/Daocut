@@ -123,8 +123,15 @@ export function folderFiles(root, { inject = `<script>${HOST_FLAG}</script>`, ti
     if (stat.isDirectory()) { res.writeHead(302, { ...extraHeaders, location: `${path}/` }).end(); return true; }
     const type = TYPES[extname(file).toLowerCase()] ?? 'application/octet-stream';
     const headers = { ...extraHeaders, 'content-type': type, 'cache-control': 'no-store', 'accept-ranges': 'bytes' };
+    const media = type.startsWith('video/') || type.startsWith('audio/');
+    const etag = `"${stat.ino}-${stat.size}-${stat.mtimeMs}"`;
+    if (media) {
+      headers['cache-control'] = 'private, max-age=0, must-revalidate';
+      headers.etag = etag;
+      if (req.headers['if-none-match'] === etag && !req.headers.range) { res.writeHead(304, headers).end(); return true; }
+    }
     /* a HEAD has no body (the browser cancels one that brings it) */
-    if (req.method === 'HEAD') { res.writeHead(200, headers).end(); return true; }
+    if (req.method === 'HEAD') { res.writeHead(200, { ...headers, 'content-length': stat.size }).end(); return true; }
     if (type.startsWith('text/html') && query?.get('film-host') !== '0') {
       const html = readFileSync(file, 'utf8');
       /* the film itself: played by the timeline, and the host's driving of it (`timelineInject`) put in */
@@ -134,7 +141,7 @@ export function folderFiles(root, { inject = `<script>${HOST_FLAG}</script>`, ti
       return true;
     }
     /* A cancelled preview is normal: pipeline closes its file; its callback deliberately ignores the error. */
-    const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range ?? '');
+    const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers['if-range'] && req.headers['if-range'] !== etag ? '' : req.headers.range ?? '');
     if (range && (range[1] || range[2])) {
       /* `bytes=-500` is the last 500 bytes; an open end runs to the end of the file */
       const start = range[1] ? Number(range[1]) : Math.max(0, stat.size - Number(range[2]));

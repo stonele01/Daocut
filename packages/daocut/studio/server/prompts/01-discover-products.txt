@@ -14,6 +14,10 @@
 
 二、商品身份
 
+ASR 可能错字、漏字、把“它/他/我们”识别混淆。先通读上下文，结合介绍、用途、规格、报价和成交对象的连续关系判断；单次品牌名、同音近似、价格或“下一个”都不能独立认定商品或换品。不用常识修正品牌或补造产品信息。
+名称准确性和讲解归属分开：nameUncertain 只表示正式名称不确定，可以保留原话支持的品类名；连品类也不明确时用“商品A”等临时名。identityUncertain 表示身份/规格不足以跨段归并，不是禁止本段分析的开关。每个范围另给 scopeStatus：confirmed 表示上下文证据支持该段持续围绕同一主售商品；uncertain 表示对象混淆或矛盾未解。名称存疑不能自动推导范围已确认，也不能自动推导范围不明确；必须给范围原话证据和简短理由。
+“别人/以前买的/它”与“我们/这款”比较时分别追踪主售对象和对比对象。竞品举例可以出现在主售商品讲解中，不新建为正在售卖的商品；竞品销量、价格、成分、缺点不能当成本品信息。只有实际转入另一商品持续介绍和成交才认定换品。
+
 从原话证据确认商品名称、规格、套装及明确别名。不能凭名字相似就合并不同商品，也不能凭一句昵称就猜正式商品名。
 
 knownProducts 用于核对已有身份。复用已有 key 必须是同一商品、同一规格或套装；不同叫法的归并必须给出实际话术证据和简短原因。规格或归属不明时 identityUncertain=true，保留待确认，不强行合并。
@@ -53,7 +57,7 @@ knownProducts 用于核对已有身份。复用已有 key 必须是同一商品�
 
 只返回 JSON，不写报告、Markdown、完整原话或自编时间戳。保持当前程序字段：
 
-{"products":[{"key":"p1","name":"原话支持的商品名称","variant":"","aliases":[],"evidence":[0],"identityUncertain":false}],"ranges":[{"key":"p1","firstCue":0,"lastCue":1,"kind":"lecture","reason":"简短归属依据","evidence":[0]}],"issues":[]}
+{"products":[{"key":"p1","name":"原话支持的商品名称","variant":"","aliases":[],"evidence":[0],"identityUncertain":false,"nameUncertain":false}],"ranges":[{"key":"p1","firstCue":0,"lastCue":1,"kind":"lecture","scopeStatus":"confirmed","reason":"简短归属依据","evidence":[0]}],"issues":[]}
 
 示例索引只说明格式，不代表输入一定含这些内容。
 

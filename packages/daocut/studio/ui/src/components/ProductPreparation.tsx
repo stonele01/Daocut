@@ -8,10 +8,11 @@ import { ProductSharedVersions } from './ProductSharedVersions';
 
 const button = 'rounded border border-[var(--border)] px-2 py-1 text-[11px] transition duration-150 hover:bg-[var(--bg-hover)] active:scale-95 disabled:opacity-40';
 
-/** Completed ASR stays ready on reopen. Text discovery always requires its own approval. */
-export function ProductPreparation({ projectId, source, onReady, refreshKey = 0, onLocate }: {
-  projectId: string; source: ProductAnalysis['sources'][number]; onReady: () => Promise<void>; refreshKey?: number;
+/** One preparation confirmation covers whole-source transcription and product discovery. */
+export function ProductPreparation({ projectId, source, onReady, refreshKey = 0, reviewRequest = 0, onLocate, primaryAction = true }: {
+  projectId: string; source: ProductAnalysis['sources'][number]; onReady: () => Promise<void>; refreshKey?: number | string; reviewRequest?: number;
   onLocate: (sourceId: string, ms: number, candidateId?: string, play?: boolean) => void;
+  primaryAction?: boolean;
 }) {
   const [state, setState] = React.useState<ProductWorkflowStatus | null>(null);
   const [error, setError] = React.useState('');
@@ -38,7 +39,7 @@ export function ProductPreparation({ projectId, source, onReady, refreshKey = 0,
         const next = await api.productWorkflowStatus(projectId, source.id);
         if (cancelled) return;
         setState(next); setError('');
-        if (next.ready && !refreshed.current) { refreshed.current = true; await onReadyRef.current(); }
+        if (next.discoveryReady && !refreshed.current) { refreshed.current = true; await onReadyRef.current(); }
         if (!cancelled && (next.busy || next.shared?.mode === 'busy' || next.transcription.status === 'running' || next.discovery.status === 'running')) timer = setTimeout(load, next.shared?.mode === 'busy' ? 3000 : 1000);
       } catch (reason) { if (!cancelled) setError(String((reason as Error).message ?? reason)); }
     };
@@ -68,8 +69,8 @@ export function ProductPreparation({ projectId, source, onReady, refreshKey = 0,
     {state && <>
       {state.shared && <details open={!!(reviewBlocked || publishPending || recovery || state.shared.mode === 'busy')} aria-label="共享分析状态" className="space-y-1 rounded border border-[var(--border)] p-2 transition-all duration-150">
         <summary className="cursor-pointer text-[var(--text-muted)] transition-colors hover:text-[var(--accent)]">共享状态</summary>
-        <p>{reviewBlocked ? '分段已完成，接缝待原分析者核对' : state.shared.mode === 'local-review' ? '本机接缝已核对，可继续拆品；修正不共享' : state.shared.mode === 'busy' ? '同事正在分析，完成后可复用' : publishPending ? '分析已保存在本机，共享文件尚未保存完成' : state.shared.mode === 'reuse' ? '已有共享首版，可直接复用' : state.shared.mode === 'retry-required' ? '上次共享任务未完成，请核查记录后明确重试' : state.shared.mode === 'local-only' ? '本次修改和分析仅保存在本机' : '共享分析已启用'}</p>
-        {state.shared.reason && <p className="text-[var(--text-muted)]">{state.shared.reason}</p>}
+        <p>{reviewBlocked ? '分段已完成，接缝待原分析者核对' : state.shared.mode === 'local-review' ? '本机接缝已核对，可继续拆品；修正不共享' : state.shared.mode === 'busy' ? state.busy ? '正在处理，完成后自动保存' : '同事正在分析，完成后可复用' : publishPending ? '分析已保存在本机，共享文件尚未保存完成' : state.shared.mode === 'reuse' ? '已有共享首版，可直接复用' : state.shared.mode === 'retry-required' ? '上次共享任务未完成，请核查记录后明确重试' : state.shared.mode === 'local-only' ? '本次修改和分析仅保存在本机' : '共享分析已启用'}</p>
+        {state.shared.reason && state.shared.mode !== 'busy' && <p className="text-[var(--text-muted)]">{state.shared.reason}</p>}
         {publishPending && <button type="button" className={button} disabled={publishing} onClick={() => void publish()}>仅重试保存共享结果</button>}
         {publishPending && <p>只补存已完成的结果，不重新发送转写或模型请求。</p>}
         {recovery && <>
@@ -78,16 +79,16 @@ export function ProductPreparation({ projectId, source, onReady, refreshKey = 0,
         </>}
       </details>}
       {published && <p role="status">{published}</p>}
-      {!reviewBlocked && <p role="status">{state.ready && hasTranscript ? '商品段已准备好' : state.transcription.status === 'running' ? '正在转写' : state.discovery.status === 'running' ? '正在拆商品' : boundaryReview ? '转写分段已保存，边界待核对' : hasTranscript ? '转写已就绪' : '尚需转写'}</p>}
-      {!state.ready && !busy && !boundaryReview && !publishPending && !reviewBlocked && <p className="text-[var(--text-muted)]">{hasTranscript ? '单商品：在卡片选择整段后分析。多个商品：先拆商品。' : '先转写，再选择分析单商品或拆分整场。'}</p>}
+      {!reviewBlocked && <p role="status">{state.discoveryReady && hasTranscript ? '商品段已准备好' : state.needsReview ? '拆品结果已生成，请在下面核对并应用' : state.transcription.status === 'running' ? '正在转写' : state.discovery.status === 'running' ? '正在拆商品' : boundaryReview ? '转写分段已保存，边界待核对' : hasTranscript ? '转写已就绪' : '尚需转写'}</p>}
+      {primaryAction && !state.discoveryReady && !state.needsReview && !busy && !boundaryReview && !publishPending && !reviewBlocked && <p className="text-[var(--text-muted)]">{hasTranscript ? '已有转写会复用，继续识别商品。' : '先转写整条视频，再自动识别商品；一个品就生成一个品。'}</p>}
       {(state.transcription.error || state.discovery.error) && <p className="text-[var(--warn)]">{state.transcription.error || state.discovery.error}</p>}
       {boundaryReview && <p>已完成分段保留，请在下面核对字幕接缝，无需再次上传音频。</p>}
-      {state.binding ? <details open className="space-y-1"><summary>核对已有字幕来源</summary><p className="break-all">{state.binding.assetPath}</p><p>原片时长 {sourceTime(state.binding.durationMs)} · {state.binding.cueCount} 条字幕</p><p>字幕覆盖：{state.binding.coverage.map(([a, b]) => `${sourceTime(a)}–${sourceTime(b)}`).join('、')}</p><button type="button" className={button} disabled={binding} onClick={() => { setBinding(true); void api.bindProductTranscript(projectId, source.id, state.binding!.kind, state.binding!.identity).then(() => setTick(n => n + 1), reason => setError(String(reason.message ?? reason))).finally(() => setBinding(false)); }}>确认这些字幕属于此原片</button></details> : (!state.ready || !hasTranscript) && !busy && !boundaryReview && !publishPending && !recovery && !reviewBlocked && <button type="button" className={button} disabled={!!confirm} onClick={() => setConfirm({ sourceId: source.id, action: hasTranscript ? 'discovery' : 'transcription', retry: state.shared?.mode === 'retry-required' || (hasTranscript ? state.discovery.status === 'failed' : state.transcription.status === 'failed') })}>{(hasTranscript ? state.discovery.status : state.transcription.status) === 'failed' ? `核查后重试${hasTranscript ? '拆商品' : '转写'}` : hasTranscript ? '拆商品' : '转写'}</button>}
+      {state.binding ? <details open className="space-y-1"><summary>核对已有字幕来源</summary><p className="break-all">{state.binding.assetPath}</p><p>原片时长 {sourceTime(state.binding.durationMs)} · {state.binding.cueCount} 条字幕</p><p>字幕覆盖：{state.binding.coverage.map(([a, b]) => `${sourceTime(a)}–${sourceTime(b)}`).join('、')}</p><button type="button" className={button} disabled={binding} onClick={() => { setBinding(true); void api.bindProductTranscript(projectId, source.id, state.binding!.kind, state.binding!.identity).then(() => setTick(n => n + 1), reason => setError(String(reason.message ?? reason))).finally(() => setBinding(false)); }}>确认这些字幕属于此原片</button></details> : primaryAction && (!state.discoveryReady || !hasTranscript) && !state.needsReview && !busy && !boundaryReview && !publishPending && !recovery && !reviewBlocked && <button type="button" className={button} disabled={!!confirm} onClick={() => setConfirm({ sourceId: source.id, action: hasTranscript ? 'discovery' : 'transcription', prepare: true, retry: state.shared?.mode === 'retry-required' || (hasTranscript ? state.discovery.status === 'failed' : state.transcription.status === 'failed') })}>{(hasTranscript ? state.discovery.status : state.transcription.status) === 'failed' ? '继续转写拆品' : hasTranscript ? '继续拆品' : '转写并拆品'}</button>}
     </>}
     <ExistingAnalysisSharing key={`existing:${projectId}:${source.id}`} projectId={projectId} sourceId={source.id} sourcePath={source.assetPath} durationMs={source.durationMs} refreshKey={`${refreshKey}:${tick}`} onLocate={onLocate} onChanged={async () => { setTick(n => n + 1); await onReadyRef.current(); }} />
-    <TranscriptSeamReview key={`${projectId}:${source.id}`} projectId={projectId} sourceId={source.id} refreshKey={`${refreshKey}:${tick}:${state?.transcription.status ?? ''}`} onLocate={onLocate} onSaved={async () => { setTick(n => n + 1); await onReadyRef.current(); }} />
+    <TranscriptSeamReview key={`${projectId}:${source.id}`} projectId={projectId} sourceId={source.id} refreshKey={`${refreshKey}:${tick}:${state?.transcription.status ?? ''}`} openRequest={reviewRequest} onLocate={onLocate} onSaved={async () => { setTick(n => n + 1); await onReadyRef.current(); }} />
     <ProductSharedVersions key={`versions:${projectId}:${source.id}`} projectId={projectId} sourceId={source.id} refreshKey={`${refreshKey}:${tick}:${state?.transcription.status ?? ''}`} onChanged={async () => { setTick(n => n + 1); await onReadyRef.current(); }} />
-    {confirm && confirm.sourceId === source.id && <ProductWorkflowConfirmation key={`${projectId}:${JSON.stringify(confirm)}`} projectId={projectId} request={confirm} preparingProducts onClose={() => { setConfirm(null); setTick(n => n + 1); }} onDone={async () => { setTick(n => n + 1); }} />}
+    {confirm && confirm.sourceId === source.id && <ProductWorkflowConfirmation key={`${projectId}:${JSON.stringify(confirm)}`} projectId={projectId} request={confirm} preparingProducts onClose={() => { setConfirm(null); setTick(n => n + 1); }} onDone={async () => { setTick(n => n + 1); await onReadyRef.current(); }} />}
     {error && <p role="alert" className="text-red-400">{error} <button type="button" className={button} onClick={() => setTick(n => n + 1)}>重试读取素材状态</button></p>}
   </section>;
 }

@@ -39,7 +39,7 @@ test('legacy export shares only original segment snapshots, source-absolute time
   const f = await fixture(t), before = await readFile(f.loc.path, 'utf8'), artifact = await readExistingTranscriptArtifact(f.root, f.source);
   assert.equal(artifact.payload.kind, 'original-asr-segments'); assert.equal(artifact.payload.version, 1);
   assert.equal(artifact.payload.collectionStatus, 'complete'); assert.equal(artifact.summary.segmentCount, 2);
-  assert.equal(artifact.summary.rawCueCount, 6); assert.equal(artifact.summary.pendingSeams, 1);
+  assert.equal(artifact.summary.rawCueCount, 6); assert.equal(artifact.summary.pendingSeams, 0);
   assert.deepEqual(artifact.payload.segments[1].cues[0], cue('交界截断', 2800, 3200));
   assert.equal(artifact.provenance.legacyReview, 'agent-local-boundary-review');
   assert.equal(artifact.provenance.effectiveInput.origin, 'agent-local-boundary-review');
@@ -63,20 +63,20 @@ test('a clean first-product input is reconstructed from raw AI cues without the 
   const original = extractOriginalTranscriptScope(artifact.payload, scope), historical = await readHistoricalTranscriptInput(f.root, f.source, scope);
   assert.equal(original.origin, 'original-provider-segments'); assert.equal(historical.origin, 'agent-local-boundary-review');
   assert.equal(original.hash, historical.hash); assert.equal(original.cues.length, 2);
-  assert.throws(() => extractOriginalTranscriptScope(artifact.payload, { startMs: 2800, endMs: 3900 }), error => error.code === 'ASR_BOUNDARY_REVIEW');
+  assert.deepEqual(extractOriginalTranscriptScope(artifact.payload, { startMs: 2800, endMs: 3900 }).cues.map(cue => cue.text), ['交界截断', '因为后半句完整']);
   assert.throws(() => extractOriginalTranscriptScope(artifact.payload, { startMs: -1, endMs: 1000 }));
 });
 
-test('raw segments import into a different local source with review pending and no possible ASR resubmission', async t => {
+test('raw segments import into a different local source with automatic joining and no ASR resubmission', async t => {
   const a = await fixture(t), b = await blank(t), artifact = await readExistingTranscriptArtifact(a.root, a.source);
   const film = await readFile(join(b.root, 'film.html'), 'utf8');
   const result = await importExistingTranscriptArtifact(b.root, b.source, artifact.payload, ref);
-  assert.equal(result.collectionStatus, 'complete'); assert.equal(result.reviewRequired, true);
-  const review = await readTranscriptReview(b.root, b.source.id); assert.equal(review.pendingCount, 1);
+  assert.equal(result.collectionStatus, 'complete'); assert.equal(result.reviewRequired, false);
+  const review = await readTranscriptReview(b.root, b.source.id); assert.equal(review.pendingCount, 0);
   assert.deepEqual(review.seams[0].right[0], cue('交界截断', 2800, 3200));
-  await assert.rejects(readProductTranscript(b.root, b.source), error => error.code === 'ASR_BOUNDARY_REVIEW');
+  assert.ok((await readProductTranscript(b.root, b.source)).cues.length);
   let calls = 0; const forbidden = () => { calls++; throw Error('must never submit or read credentials'); };
-  for (const retryUncertain of [false, true]) await assert.rejects(transcribeProductSource(b.root, b.source, { retryUncertain, getKey: forbidden, runProvider: forbidden, readAudio: forbidden }), error => error.code === 'ASR_BOUNDARY_REVIEW');
+  for (const retryUncertain of [false, true]) assert.ok((await transcribeProductSource(b.root, b.source, { retryUncertain, getKey: forbidden, runProvider: forbidden, readAudio: forbidden })).cues.length);
   assert.equal(calls, 0); assert.equal(await readFile(join(b.root, 'film.html'), 'utf8'), film);
 });
 
@@ -132,7 +132,7 @@ test('partial local import retries only the cache commit and concurrent imports 
   await assert.rejects(transcribeProductSource(b.root, b.source, { retryUncertain: true, getKey: forbidden, runProvider: forbidden }), error => error.code === 'EXISTING_ASR_IMPORT_INCOMPLETE');
   assert.equal(paidCalls, 0);
   await Promise.all([importExistingTranscriptArtifact(b.root, b.source, artifact.payload, ref), importExistingTranscriptArtifact(b.root, b.source, artifact.payload, ref)]);
-  assert.equal(await readFile(b.loc.path + '.segments.json', 'utf8'), raw); assert.equal((await readTranscriptReview(b.root, b.source.id)).pendingCount, 1); assert.equal(attempts, 2);
+  assert.equal(await readFile(b.loc.path + '.segments.json', 'utf8'), raw); assert.equal((await readTranscriptReview(b.root, b.source.id)).pendingCount, 0); assert.equal(attempts, 2);
 });
 
 test('changed imported segment bytes cannot be accepted merely because the stored artifact hash field is unchanged', async t => {

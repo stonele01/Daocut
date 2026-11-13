@@ -19,7 +19,7 @@ export function createDesktopTextService({ roster, company = () => null, quota =
     const current = roster()?.analysisModel();
     if (!current || JSON.stringify(current) !== JSON.stringify(message.expectedConfig)) throw Object.assign(new Error('文字模型配置已变化，请重新确认'), { code: 'MODEL_INPUT_CHANGED' });
     let receipt = null;
-    const client = createDeepSeekTextClient({ fetch: fetchImpl, getPublicConfig: async () => roster()?.analysisModel(), getConfig: async () => {
+    const client = createDeepSeekTextClient({ fetch: fetchImpl, purpose: message.purpose, getPublicConfig: async () => roster()?.analysisModel(), getConfig: async () => {
       if (JSON.stringify(roster()?.analysisModel()) !== JSON.stringify(message.expectedConfig)) throw Object.assign(new Error('文字模型配置已变化'), { code: 'MODEL_INPUT_CHANGED' });
       return roster()?.analysisModel(true);
     } });

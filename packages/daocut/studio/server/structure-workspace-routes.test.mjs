@@ -7,6 +7,7 @@ import { startStudio } from './server.mjs';
 import { createSharedAnalysis, sharedHash } from './shared-analysis.mjs';
 import { importSharedProductTranscript } from './product-transcription.mjs';
 import { ensureStructureDraft } from './structure-drafts.mjs';
+import { AI_STRUCTURE_VERSION } from './ai-structure.mjs';
 
 const base = resolve(fileURLToPath(new URL('../../../..', import.meta.url)), '.tmp/structure-workspace-route-tests');
 async function fixture(t, { semantics = true } = {}) {
@@ -45,9 +46,9 @@ async function fixture(t, { semantics = true } = {}) {
   const start = () => startStudio({ port: 0, openBrowser() {}, sharedAnalysis: sharedOptions, liveAnalysis: {
     transcribe() { throw Error('No transcription'); }, modelIdentity: { provider: 'mock', model: 'simulated-structure', endpoint: 'https://mock.invalid' },
     modelClient(request) {
-      modelRequests.push(request); assert.match(request.system, /第三步/);
-      const tags = ['钩子', '痛点', '卖点', '行动指令'];
-      return { schema: 'ai-structure-plans-v2', plans: [[0, 2, 3], [0, 1, 2, 3]].map(row => row.map(unit => ({ unit, firstCue: unit, lastCue: unit, tags: [tags[unit]] }))), complete: true, issues: [] };
+      modelRequests.push(request); assert.match(request.system, /为openingIds各拼最多3条有实质区别的视频/);
+      const body = JSON.parse(request.input), ids = body.units.map(unit => unit.id);
+      return { schema: AI_STRUCTURE_VERSION, prices: body.units.filter(unit => unit.roles.includes('price')).map(unit => ({ id: unit.id, kind: unit.price.kind, evidence: unit.price.evidence.map(offset => unit.cueRange[0] + offset) })), plans: [[0, 2, 3], [0, 1, 2, 3], [1, 0, 2, 3], [2, 0, 3]].map(row => row.map(unit => ids[unit])).filter(row => body.openingIds.includes(row[0])) };
     },
   } });
   studio = await start();
@@ -79,7 +80,7 @@ async function fixture(t, { semantics = true } = {}) {
     const scope = { sourceId: source.id, productId: interval.productId, intervalId: interval.id, startMs: interval.startMs, endMs: interval.endMs };
     const descriptor = await store.prepare(root, source, { action: 'analysis', scope, data: { cues: cueIndices.map(index => cues[index]), cueIndices } });
     const attempt = await store.acquire(descriptor);
-    const semanticReview = { version: 1, entries: selected.map(candidate => ({ candidateId: candidate.id, status: 'confirmed', roles: [roles[candidate.cueRange[0]]], coreIds: roles[candidate.cueRange[0]] === 'core' ? ['primary-benefit'] : [], requires: [], excludes: [], conditions: {} })) };
+    const semanticReview = { version: 1, entries: selected.map(candidate => ({ candidateId: candidate.id, status: 'confirmed', openingPolicy: 'curated-openings-v1', ...(roles[candidate.cueRange[0]] !== 'purchase' ? { opening: { group: candidate.id, followup: candidate.text } } : {}), roles: roles[candidate.cueRange[0]] === 'core' ? ['core','intro','price'] : [roles[candidate.cueRange[0]]], ...(roles[candidate.cueRange[0]] === 'core' ? {price:{kind:'current',evidence:[0]}} : {}), coreIds: roles[candidate.cueRange[0]] === 'core' ? ['primary-benefit'] : [], requires: [], excludes: [], conditions: {} })) };
     await store.complete(root, descriptor, attempt.attemptId, { version: 'text-structure-v2', candidates: selected.map(c => ({ ...(semantics ? { id: c.id } : {}), cueRange: c.cueRange, tags: c.tags, details: c.details })), ...(semantics ? { semanticReview } : {}) });
   }
   const request = { sourceId: source.id, productId: 'product', intervalId: 'lecture-first' }, endpoint = `/api/projects/${project.id}`;
@@ -109,11 +110,14 @@ test('default Studio routes use the third AI prompt for one lecture, reuse publi
   const count = f.claims();
   await f.api(`${f.endpoint}/structure-plans/generate`, 'POST', f.request, 409); assert.equal(f.modelRequests.length, 0);
   const state = await f.generate();
-  assert.equal(state.status, 'complete'); assert.equal(state.allValidCombinationsEnumerated, false); assert.equal(state.plans.length, 2);
+  assert.equal(state.status, 'complete'); assert.equal(state.allValidCombinationsEnumerated, false); assert.equal(state.plans.length, 4);
+  assert.equal(state.coverage.covered, 3); assert.deepEqual(state.coverage.remainingIds, []);
+  assert.equal(state.version, AI_STRUCTURE_VERSION);
   assert.equal(state.generationMethod, 'ai'); assert.equal(f.claims(), count + 1); assert.equal(f.modelRequests.length, 1);
-  assert.deepEqual(state.plans.map(plan => plan.sourceDurationMs), [39000, 44000]);
+  assert.deepEqual(state.plans.map(plan => plan.sourceDurationMs), [39000, 44000, 44000, 39000]);
   assert.ok(state.plans.every(plan => plan.speed === 1.3 && plan.durationMs >= 30000 && plan.durationMs <= 40000));
-  const aiInput = JSON.parse(f.modelRequests[0].input); assert.equal(aiInput.units.length, 4); assert.equal(aiInput.transcript.length, 4);
+  const aiInput = JSON.parse(f.modelRequests[0].input); assert.equal(aiInput.units.length, 4); assert.equal(Object.hasOwn(aiInput, 'transcript'), true);
+  assert.ok(aiInput.units.every(unit => typeof unit.id === 'string' && typeof unit.text === 'string' && unit.durationMs > 0));
   assert.ok(!f.modelRequests[0].input.includes('返场'));
   assert.ok(state.plans.every(plan => plan.scope.intervalId === f.request.intervalId && plan.clips.every(c => c.endMs <= 60000 && !c.text.includes('返场'))));
   assert.deepEqual((await f.api(f.planPath(f.request))).plans, state.plans); assert.equal(f.claims(), count + 1);

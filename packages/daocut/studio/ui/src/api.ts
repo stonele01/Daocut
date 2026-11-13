@@ -103,7 +103,7 @@ const p = (id: string) => `projects/${encodeURIComponent(id)}`;
 
 export type LiveTask = { status: 'idle' | 'running' | 'complete' | 'failed'; error?: string; model?: string };
 export type LiveRangeAnalysis = LiveTask & { intervalId?: string; productId?: string; rangeStartMs?: number; rangeEndMs?: number; stale?: boolean; legacyEditable?: boolean; historicalEditable?: boolean; currentRunId?: string; coverage?: { sourceId: string; intervalId: string; asrRanges: [number, number][]; audioRanges: [number, number][]; videoRanges: [number, number][] }[]; issues?: string[]; mediaReview?: ProductMediaReview; mediaReviewStale?: boolean; visualReview?: ProductVisualReview; localVisualReview?: boolean; visualReviewStale?: boolean; progress?: { totalWindows: number; completedWindows: number; resumedWindows: number; currentWindow: number; requestAttempts: number; elapsedMs: number } };
-export type LiveAnalysisState = { transcription: LiveTask & { retryBlocked?: boolean; segments: { startMs: number; endMs: number; text: string }[] }; analysis: LiveRangeAnalysis; analyses?: Record<string, LiveRangeAnalysis>; canReviewMedia?: boolean };
+export type LiveAnalysisState = { transcription: LiveTask & { retryBlocked?: boolean; code?: string; boundaryReview?: boolean; segments: { startMs: number; endMs: number; text: string }[] }; analysis: LiveRangeAnalysis; analyses?: Record<string, LiveRangeAnalysis>; canReviewMedia?: boolean };
 export type ProductDiscoveryState = {
   sourceId: string; status: 'idle' | 'running' | 'complete' | 'failed'; error?: string; modelIdentity?: string; runId?: string; canRetry: boolean; enabled?: boolean; stale?: boolean;
   proposal?: { runId: string; sourceId: string; products: Product[]; intervals: ProductInterval[]; unassigned: UnassignedProductRange[]; issues: string[]; windows: number };
@@ -181,7 +181,8 @@ import type { ProductWorkflowPlan, ProductWorkflowRequest, SharedAnalysisState, 
 import type { ProjectBackupInspection, ProjectBackupRestoreInput } from './lib/project-backup-types';
 export type { ProductWorkflowPlan, ProductWorkflowRequest } from './lib/product-workflow-types';
 export type ProductWorkflowStatus = {
-  source: ProductAnalysis['sources'][number]; phase: 'transcription' | 'discovery' | 'ready'; ready: boolean; busy?: boolean; needsReview?: boolean;
+  preparation?: { status: 'running' | 'complete' | 'failed'; phase: string; error?: string };
+  source: ProductAnalysis['sources'][number]; phase: 'transcription' | 'discovery' | 'ready'; ready: boolean; discoveryReady: boolean; busy?: boolean; needsReview?: boolean;
   transcription: LiveAnalysisState['transcription'] & { code?: string; boundaryReview?: boolean };
   discovery: ProductDiscoveryState;
   binding?: { kind: 'vtt' | 'cache'; identity: string; assetPath: string; durationMs: number; cueCount: number; coverage: [number, number][] };

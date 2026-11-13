@@ -1,7 +1,24 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { groupStructurePlans, previewPosition, structureGroupLabel } from './structure-workspace.ts';
+import { groupStructurePlans, groupStructurePlansByOpening, isSavedStructurePlanUsable, needsStructureGeneration, previewPosition, structureGroupLabel, type StructurePlan, type StructurePlansState } from './structure-workspace.ts';
 import { registerDraftFlush, settleDraftWrites, trackDraftWrite } from './draft-save-barrier.ts';
+
+test('production actions never offer another generation pass for completed results or legacy seeds', () => {
+  const state: StructurePlansState = { status: 'idle', plans: [] };
+  assert.equal(needsStructureGeneration(state), true);
+  assert.equal(needsStructureGeneration(null), false);
+  Object.assign(state, { status: 'complete', complete: true, canContinue: true, requestCount: 9 });
+  assert.equal(needsStructureGeneration(state), false);
+  state.complete = false;
+  state.coverage = { total: 35, covered: 8, openingIds: ['a'], remainingIds: ['a'], excluded: [] };
+  assert.equal(needsStructureGeneration(state), true, 'a submitted unfinished job can resume');
+  state.requestCount = 0;
+  assert.equal(needsStructureGeneration(state), false, 'saved seed plans must not open a supplemental pass');
+  for (const status of ['running', 'failed', 'busy', 'publish-pending', 'unavailable'] as const) {
+    state.status = status; state.requestCount = 1;
+    assert.equal(needsStructureGeneration(state), false, 'recovery and publication have separate explicit controls');
+  }
+});
 
 test('preview clock follows a discontiguous source sequence without changing a plan or editor', () => {
   const plan = { clips: [{ startMs: 20000, endMs: 24000 }, { startMs: 1000, endMs: 6000 }] };
@@ -62,6 +79,29 @@ test('selling-point group names use confirmed labels in stable order without cha
 test('missing selling-point labels remain identifiable without inventing a name', () => {
   assert.equal(structureGroupLabel({ coreIds: ['capacity'] }), 'capacity');
   assert.equal(structureGroupLabel({ coreIds: ['one-hand', 'capacity'], coreLabels: { capacity: '500 毫升容量', 'one-hand': '  ' } }), '500 毫升容量＋one-hand');
+});
+
+test('opening groups retain all 70 saved IDs and merge later versions by the same source opening', () => {
+  const seed: StructurePlan[] = Array.from({ length: 70 }, (_, i) => ({ id: `saved-${i}`, version: 'ai-structure-plans-v4', scope: { sourceId: 's', productId: 'p', intervalId: 'i' }, speed: 1.3, durationMs: 35000, coreIds: ['c'], clips: [{ candidateId: `opening-${i}`, sourceId: 's', startMs: i * 1000, endMs: i * 1000 + 900, text: '同样的标题前缀', roles: ['hook'], coreIds: [] }] }));
+  const added = [1, 2].map(i => ({ ...seed[0]!, id: `added-${i}`, version: 'ai-structure-plans-v5' }));
+  const plans = [...seed, ...added], before = JSON.stringify(plans), groups = groupStructurePlansByOpening(plans);
+  assert.equal(groups.length, 70); assert.equal(groups[0]!.plans.length, 3);
+  assert.deepEqual(groups[0]!.plans.map(plan => plan.id), ['saved-0', 'added-1', 'added-2']);
+  assert.deepEqual(groups.map(group => group.plans[0]!.id), seed.map(plan => plan.id));
+  assert.equal(JSON.stringify(plans), before, 'grouping must never rewrite or renumber saved plans');
+});
+
+test('opening grouping keeps different source ranges and lectures apart, including legacy records without candidate IDs', () => {
+  const base = { id: 'first', scope: { sourceId: 's', productId: 'p', intervalId: 'i' }, clips: [{ sourceId: 's', startMs: 0, endMs: 900, text: '一样的原话', roles: ['hook'], coreIds: [] }] };
+  const plans = [base, { ...base, id: 'same-opening' }, { ...base, id: 'different-range', clips: [{ ...base.clips[0]!, startMs: 1000, endMs: 1900 }] }, { ...base, id: 'different-lecture', scope: { ...base.scope, intervalId: 'j' } }];
+  assert.deepEqual(groupStructurePlansByOpening(plans).map(group => group.plans.map(plan => plan.id)), [['first', 'same-opening'], ['different-range'], ['different-lecture']]);
+});
+
+test('v5 allows only persisted seed or added IDs while a later batch is unfinished', () => {
+  const state = { version: 'ai-structure-plans-v5', status: 'failed', plans: [{ id: 'seed', version: 'ai-structure-plans-v4' }, { id: 'pending', version: 'ai-structure-plans-v5' }], usablePlanIds: ['seed'] } as StructurePlansState;
+  assert.equal(isSavedStructurePlanUsable(state, 'seed'), true);
+  assert.equal(isSavedStructurePlanUsable(state, 'pending'), false);
+  assert.equal(isSavedStructurePlanUsable({ ...state, status: 'unavailable' }, 'seed'), false);
 });
 
 test('draft switching flushes debounced settings and waits for writes added during saving', async () => {

@@ -1,11 +1,11 @@
-/** Ordinary-project entry points. Planning is local; each external stage needs its own matching confirmation. */
-import { createHash } from 'node:crypto';
+/** Ordinary-project entry points. One preparation confirmation may cover sequential audio and product discovery. */
+import { createHash, randomUUID } from 'node:crypto';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { join, posix } from 'node:path';
 import { HttpError, json, readJson } from './http.mjs';
 import { probe } from './derived.mjs';
 import { readProductAnalysis, updateProductAnalysis } from './product-analysis.mjs';
-import { hasSavedProductResult } from './product-preparation.mjs';
+import { hasSavedProductResult, readProductPreparationState, writeProductPreparationState } from './product-preparation.mjs';
 import { confirmCachedProductTranscript, confirmProductTranscript, importSharedProductTranscript, productSourcePath, readProductTranscript } from './product-transcription.mjs';
 import { productTranscriptRange } from './product-transcript-range.mjs';
 import { AUDIO_SEGMENT_POLICY, planAudioSegments, validateTranscriptCues } from './transcription-segments.mjs';
@@ -25,7 +25,7 @@ const serviceIdentity = value => ({ provider: value.provider, model: value.model
 const noCost = basis => ({ estimate: null, currency: null, uncertain: true, basis });
 
 export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis, analysisServices = async () => ({}), readTranscript = readProductTranscript, probeSource = probe, audioPolicy = AUDIO_SEGMENT_POLICY, authorizeTask = async () => {} } = {}) {
-  const starting = new Map(), running = new Map(), adopting = new Set();
+  const starting = new Map(), running = new Map(), preparing = new Map(), adopting = new Set();
   const existingPublication = createExistingAnalysisPublication({ liveAnalysis, discovery, sharedAnalysis, importNormal: importDiscoveredShared });
   async function sourceFor(root, sourceId) {
     const { analysis } = await readProductAnalysis(root);
@@ -76,7 +76,10 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
     const { source, analysis } = await sourceFor(root, sourceId);
     const [live, split] = await Promise.all([liveAnalysis.view(root, sourceId), discovery.view(root, sourceId)]);
     const ready = analysis.intervals.some(item => item.sourceId === sourceId);
-    const unapplied = split.status === 'complete' && split.proposal && !(analysis.discoveryApplied ?? []).some(item => item.sourceId === sourceId && item.runId === split.runId);
+    const applied = !!split.runId && (analysis.discoveryApplied ?? []).some(item => item.sourceId === sourceId && item.runId === split.runId);
+    // A manually assigned range permits editing, but is not evidence that discovery ran.
+    const discoveryReady = ready && split.status === 'complete' && applied;
+    const unapplied = split.status === 'complete' && split.proposal && !applied;
     const needsReview = hasSavedProductResult(analysis, sourceId) && (!ready || !!unapplied);
     const binding = live.transcription.status !== 'complete' ? await bindingFor(root, source) : undefined;
     let shared = await sharedAnalysis?.status(root, sourceId);
@@ -87,7 +90,9 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
       } catch { /* Leave the durable uncertain status visible until input and company can be verified. */ }
     }
     if (shared?.mode === 'local-review' && live.transcription.status === 'complete') shared = { ...shared, mode: 'local-only', reason: '本机转写已核对，可继续本机拆品；人工接缝修正不共享，其他同事的转写仍需核对' };
-    return { source, ready, needsReview, busy: starting.has(`${root}\0${sourceId}`) || running.has(`${root}\0${sourceId}`), phase: ready ? 'ready' : live.transcription.status === 'complete' ? 'discovery' : 'transcription', transcription: live.transcription, discovery: split, ...(binding ? { binding } : {}), ...(shared ? { shared } : {}) };
+    const preparation = await readProductPreparationState(root, sourceId);
+    if (preparation?.status === 'running' && !preparing.has(`${root}\0${sourceId}`)) Object.assign(preparation, { status: 'failed', error: '转写拆品已中断，已完成的结果会复用，请点击继续。' });
+    return { source, ready, discoveryReady, needsReview, busy: starting.has(`${root}\0${sourceId}`) || running.has(`${root}\0${sourceId}`) || preparing.has(`${root}\0${sourceId}`), phase: discoveryReady ? 'ready' : live.transcription.status === 'complete' ? 'discovery' : 'transcription', transcription: live.transcription, discovery: split, ...(preparation ? { preparation } : {}), ...(binding ? { binding } : {}), ...(shared ? { shared } : {}) };
   }
   const sharedPublic = descriptor => descriptor ? Object.fromEntries(['mode', 'taskKey', 'status', 'reason', 'result', 'coordinationId', 'familyKey', 'newVersion', 'recoverCached'].filter(k => descriptor[k] !== undefined).map(k => [k, descriptor[k]])) : undefined;
   async function sharedFor(root, source, analysis, action, scope, rerun, newVersion = false) {
@@ -196,6 +201,9 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
     const retry = !rerun && (request.retry === true || request.retry === 'true');
     const publicServices = await analysisServices();
     const service = cleanService(action === 'transcription' ? publicServices.transcription : publicServices.text);
+    const prepare = request.prepare === true || request.prepare === 'true';
+    if (prepare && action === 'analysis') throw new HttpError(400, '转写拆品不包含商品话术分析');
+    const nextStage = prepare && action === 'transcription' ? { service: cleanService(publicServices.text), contractIdentity: hash(await discovery.sharedContract()) } : undefined;
     const sourceInput = await fingerprint(root, source);
     let cached = false, totalRequests = 0, reusedRequests = 0, transcriptSegments = 0, retryRequired = false, inputIdentity, generation, scope, audioSegments, windows, visual, error, localReviewRequired = false;
     if (action === 'transcription') {
@@ -255,14 +263,22 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
     if (shared?.mode === 'retry-required') retryRequired = true;
     if (shared?.mode === 'publish-pending') { cached = true; reusedRequests = totalRequests; retryRequired = false; error = undefined; }
     if (shared?.mode === 'local-review') { reusedRequests = totalRequests; localReviewRequired = true; error = shared.reason; }
+    if (nextStage) {
+      if (!nextStage.service.enabled) error = nextStage.service.error || '拆品服务尚未配置，未开始转写拆品';
+      const split = await discovery.view(root, sourceId);
+      if (split.status === 'running') error = '此视频正在拆品，请等待完成';
+      if (split.status === 'failed') retryRequired = true;
+    }
     if (visual && cached) visual = { ...visual, requestCount: 0 };
     const requestCount = Math.max(0, totalRequests - reusedRequests);
-    const cost = cached ? { estimate: 0, currency: null, uncertain: false, basis: shared?.mode === 'reuse' ? '复用首次共享结果，不发起新模型请求' : '复用工程内已有结果，不发起新服务请求' }
+    let cost = cached ? { estimate: 0, currency: null, uncertain: false, basis: shared?.mode === 'reuse' ? '复用首次共享结果，不发起新模型请求' : '复用工程内已有结果，不发起新服务请求' }
       : noCost(action === 'transcription' ? `按本次实际上传音频时长计费；音频采用 MP3、16kHz、单声道。未取得当前账号有效单价，无法可靠估价。含重叠的计划音频共 ${audioSegments.reduce((sum, item) => sum + item.endMs - item.startMs, 0) / 1000} 秒，已完成分段不重传。` : '按实际输入与输出 token 计费；当前没有可核验的账号有效单价与最终输出长度，无法可靠估价。请求次数按现有分窗计划计算。');
     if (!cached && visual?.requestCount) cost.basis += ` 另含 ${visual.requestCount} 次画面理解请求，最多发送 ${visual.maxImages} 张本次讲解抽帧拼图。`;
-    return { identity: hash({ action, sourceId, inputIdentity, generation, service: serviceIdentity(service), retry, rerun, newVersion, shared, ...(visual ? { visual } : {}) }), action, sourceId, source: { assetPath: source.assetPath, durationMs: source.durationMs }, ...(scope ? { scope, productId: scope.productId, intervalId: scope.intervalId } : {}), retry, rerun, newVersion, service, enabled: (cached || service.enabled) && !error && !localReviewRequired, cached, requestCount, totalRequests, reusedRequests, transcriptSegments, retryRequired, inputIdentity, ...(shared ? { shared } : {}), ...(audioSegments ? { audioSegments } : {}), ...(windows ? { windows } : {}), ...(visual ? { visual } : {}), cost, ...(error ? { error } : {}), ...(localReviewRequired ? { localReviewRequired } : {}) };
+    if (nextStage) cost = noCost('本次包含整条视频转写和随后商品识别，已完成结果会复用；新增音频与文字请求按服务实际用量计费。');
+    return { identity: hash({ action, sourceId, inputIdentity, generation, service: serviceIdentity(service), retry, rerun, newVersion, shared, ...(prepare ? { prepare, nextStage } : {}), ...(visual ? { visual } : {}) }), action, sourceId, source: { assetPath: source.assetPath, durationMs: source.durationMs }, ...(scope ? { scope, productId: scope.productId, intervalId: scope.intervalId } : {}), retry, rerun, newVersion, service, ...(prepare ? { prepare, nextStage } : {}), enabled: (cached || service.enabled) && !error && !localReviewRequired, cached, requestCount, totalRequests, reusedRequests, transcriptSegments, retryRequired, inputIdentity, ...(shared ? { shared } : {}), ...(audioSegments ? { audioSegments } : {}), ...(windows ? { windows } : {}), ...(visual ? { visual } : {}), cost, ...(error ? { error } : {}), ...(localReviewRequired ? { localReviewRequired } : {}) };
   }
   async function executeInner(root, body) {
+    if (body.plan?.prepare === true) return executePreparation(root, body);
     if (body?.confirmed !== true || !body.plan || typeof body.plan.identity !== 'string') throw new HttpError(400, '请确认本次服务、发送内容及请求费用');
     const requested = body.plan;
     const current = await plan(root, requested);
@@ -272,20 +288,20 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
     const { sourceId, action } = current;
     const { source, analysis } = await sourceFor(root, sourceId);
     const descriptor = await sharedFor(root, source, analysis, action, current.scope, current.rerun, current.newVersion);
-    if (current.shared?.recoverCached) { await publishResult(root, source, current, descriptor, descriptor.attemptId, true); return { plan: current, state: await status(root, sourceId) }; }
+    if (current.shared?.recoverCached) { await publishResult(root, source, current, descriptor, descriptor.attemptId, true); return { plan: current, accepted: true, sourceId }; }
     if (descriptor?.mode === 'publish-pending') return { plan: current, state: await publishShared(root, { sourceId, taskKey: descriptor.taskKey, confirmed: true }) };
     if (descriptor?.mode === 'reuse') {
       if (!current.newVersion) await importShared(root, source, descriptor, current.scope);
-      return { plan: current, state: await status(root, sourceId) };
+      return { plan: current, accepted: true, sourceId };
     }
-    if (current.cached && descriptor?.mode !== 'publish') return { plan: current, state: await status(root, sourceId) };
+    if (current.cached && descriptor?.mode !== 'publish') return { plan: current, accepted: true, sourceId };
     await authorizeTask();
     if ((await plan(root, requested)).identity !== current.identity) throw new HttpError(409, '素材或服务在确认后发生变化，未发送请求');
     const key = `${root}\0${sourceId}`;
     const sharedAttempt = descriptor && ['publish', 'retry-required'].includes(descriptor.mode) ? await sharedAnalysis.acquire(descriptor, { retryAcknowledged: body.retryAcknowledged === true }) : null;
     if (current.cached) {
       await publishResult(root, source, current, descriptor, sharedAttempt.attemptId);
-      return { plan: current, state: await status(root, sourceId) };
+      return { plan: current, accepted: true, sourceId };
     }
     let completion;
     try {
@@ -326,7 +342,49 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
     });
     const settled = Promise.resolve(completion).catch(() => {}).finally(() => { if (running.get(key)?.promise === settled) running.delete(key); });
     running.set(key, { identity: current.identity, promise: settled });
-    return { plan: current, state: await status(root, sourceId) };
+    return { plan: current, accepted: true, sourceId };
+  }
+  async function executePreparation(root, body) {
+    const current = await plan(root, body.plan);
+    if (current.identity !== body.plan.identity) throw new HttpError(409, '素材或服务配置已变化，请重新确认转写拆品');
+    if (!current.enabled) throw new HttpError(403, current.error || '转写拆品服务尚未配置');
+    if (current.retryRequired && (!current.retry || body.retryAcknowledged !== true)) throw new HttpError(409, '上次请求未完成，请明确重试');
+    const firstPlan = await plan(root, { ...current, prepare: false });
+    if (firstPlan.inputIdentity !== current.inputIdentity || hash(serviceIdentity(firstPlan.service)) !== hash(serviceIdentity(current.service))) throw new HttpError(409, '素材或服务配置已变化，请重新确认转写拆品');
+    const sourceId = current.sourceId, key = `${root}\0${sourceId}`;
+    const before = (await readProductAnalysis(root)).analysis;
+    const state = { version: 1, id: randomUUID(), sourceId, createdAt: new Date().toISOString(), status: 'running', phase: current.action };
+    const work = (async () => {
+      try {
+        await writeProductPreparationState(root, state);
+        const stage = async next => {
+          await executeInner(root, { confirmed: true, plan: next, retryAcknowledged: body.retryAcknowledged });
+          await running.get(key)?.promise;
+        };
+        await stage(firstPlan);
+        if (current.action === 'transcription') {
+          const live = await liveAnalysis.view(root, sourceId);
+          if (live.transcription.status !== 'complete') throw new HttpError(409, live.transcription.error || '转写未完成，拆品尚未开始');
+          const check = await plan(root, { sourceId, action: 'transcription' });
+          if (check.inputIdentity !== current.inputIdentity || hash(await discovery.sharedContract()) !== current.nextStage.contractIdentity) throw new HttpError(409, '素材或拆品服务配置已变化，已保存转写，请重新确认拆品');
+          state.phase = 'discovery'; await writeProductPreparationState(root, state);
+          const next = await plan(root, { sourceId, action: 'discovery', retry: current.retry });
+          if (hash(serviceIdentity(next.service)) !== hash(serviceIdentity(current.nextStage.service))) throw new HttpError(409, '拆品服务已变化，请重新确认');
+          await stage(next);
+        }
+        const split = await discovery.view(root, sourceId);
+        if (split.status !== 'complete' || split.stale !== false) throw new HttpError(409, split.error || '拆品未完成，已有结果保留');
+        await applyFirstDiscovery(root, sourceId, before);
+        state.status = 'complete'; state.phase = 'ready';
+      } catch (error) {
+        state.status = 'failed'; state.error = error instanceof HttpError ? error.message : '转写拆品未完成，已完成的结果保留，请查看任务状态后继续。';
+      }
+      state.finishedAt = new Date().toISOString();
+      await writeProductPreparationState(root, state);
+    })().finally(() => preparing.delete(key));
+    preparing.set(key, { identity: current.identity, promise: work });
+    void work.catch(() => {});
+    return { plan: current, accepted: true, sourceId };
   }
   async function execute(root, body) {
     if (body?.confirmed !== true || !actions.includes(body.plan?.action) || typeof body.plan?.sourceId !== 'string') throw new HttpError(400, '请先确认本阶段请求');
@@ -334,8 +392,10 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
     if (adopting.has(key)) throw new HttpError(409, '当前正在采用共享版本，请等待保存完成');
     const pending = starting.get(key);
     if (pending) { if (pending.identity !== identity) throw new HttpError(409, '此素材已有其他任务'); return pending.promise; }
+    const preparation = preparing.get(key);
+    if (preparation) { if (preparation.identity !== identity) throw new HttpError(409, '此素材正在转写拆品'); return { accepted: true, sourceId: body.plan.sourceId }; }
     const active = running.get(key);
-    if (active) { if (active.identity !== identity) throw new HttpError(409, '此素材已有其他任务'); return { state: await status(root, body.plan.sourceId) }; }
+    if (active) { if (active.identity !== identity) throw new HttpError(409, '此素材已有其他任务'); return { accepted: true, sourceId: body.plan.sourceId }; }
     const promise = executeInner(root, body).finally(() => starting.delete(key));
     starting.set(key, { identity, promise }); return promise;
   }
@@ -381,14 +441,14 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
   }
   async function adoptShared(root, body) {
     const key = `${root}\0${body?.sourceId}`;
-    if (adopting.has(key) || starting.has(key) || running.has(key)) throw new HttpError(409, '当前直播正在保存或分析，请稍后采用新版');
+    if (adopting.has(key) || starting.has(key) || running.has(key) || preparing.has(key)) throw new HttpError(409, '当前直播正在保存或分析，请稍后采用新版');
     adopting.add(key);
     try { return await adoptSharedReserved(root, body); } finally { adopting.delete(key); }
   }
   async function adoptSharedReserved(root, body) {
     if (body?.confirmed !== true || !sharedAnalysis || !actions.includes(body.action)) throw new HttpError(400, '请明确确认采用共享版本');
     const key = `${root}\0${body.sourceId}`;
-    if (starting.has(key) || running.has(key)) throw new HttpError(409, '当前直播任务未结束，请稍后采用新版');
+    if (starting.has(key) || running.has(key) || preparing.has(key)) throw new HttpError(409, '当前直播任务未结束，请稍后采用新版');
     const { source, analysis } = await sourceFor(root, body.sourceId);
     const catalog = await sharedVersions(root, source.id);
     const group = catalog.groups.find(g => g.action === body.action && (g.intervalId ?? null) === (body.intervalId ?? null));
@@ -448,5 +508,5 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
     }
     return false;
   };
-  return Object.assign(route, { openSharedProject: (root, input) => openNewSharedProject(root, input, { registerSource, publication: existingPublication, discovery }), refreshSharedProject: root => refreshEmptySharedProject(root, { registerSource, publication: existingPublication, discovery }), registerSource, status, plan, execute, bindTranscript, publishShared, sharedVersions, adoptShared, busy: root => [...starting.keys(), ...running.keys()].some(key => key.startsWith(`${root}\0`)), wait: async (root, sourceId) => { const key = `${root}\0${sourceId}`; await starting.get(key)?.promise; await running.get(key)?.promise; } });
+  return Object.assign(route, { openSharedProject: (root, input) => openNewSharedProject(root, input, { registerSource, publication: existingPublication, discovery }), refreshSharedProject: root => refreshEmptySharedProject(root, { registerSource, publication: existingPublication, discovery }), registerSource, status, plan, execute, bindTranscript, publishShared, sharedVersions, adoptShared, busy: root => [...starting.keys(), ...running.keys(), ...preparing.keys()].some(key => key.startsWith(`${root}\0`)), wait: async (root, sourceId) => { const key = `${root}\0${sourceId}`; await starting.get(key)?.promise; await preparing.get(key)?.promise; await running.get(key)?.promise; } });
 }
