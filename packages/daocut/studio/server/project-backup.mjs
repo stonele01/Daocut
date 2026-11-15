@@ -25,7 +25,7 @@ const safePath = (root, path) => {
 };
 const optionalJson = async path => { try { return JSON.parse(await readFile(path, 'utf8')); } catch (error) { if (error.code === 'ENOENT') return null; throw error; } };
 async function absent(path) { try { await lstat(path); throw new ProjectBackupError('目标目录已存在，请选择新的个人工程目录', 409); } catch (error) { if (error.code !== 'ENOENT') throw error; } }
-async function sha256(path) { const hash = createHash('sha256'); for await (const chunk of createReadStream(path)) hash.update(chunk); return hash.digest('hex'); }
+async function sha256(path) { const hash = createHash('sha256'); for await (const chunk of createReadStream(path, { highWaterMark: 1024 * 1024 })) hash.update(chunk); return hash.digest('hex'); }
 function noSecrets(value) {
   if (!value || typeof value !== 'object') return;
   for (const [key, child] of Object.entries(value)) {
