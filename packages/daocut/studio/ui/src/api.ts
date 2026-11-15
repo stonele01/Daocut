@@ -160,6 +160,11 @@ export type SharedLiveProject = {
   status: 'opened'; reused: boolean; project: Project; asset: string;
   source: Omit<SharedMediaSource, 'status'>; sharedRead?: SharedProjectOpen;
 } | { status: 'choose-project'; projects: Project[] };
+export type SharedLiveProgress = {
+  stage: 'checking-folder' | 'finding-project' | 'identifying-video' | 'opening-project' | 'reading-analysis' | 'complete' | 'error';
+  bytesRead?: number; totalBytes?: number; sourceBytes?: number; identityKind?: string; cached?: boolean;
+  startedAt?: number; updatedAt?: number; finished?: boolean;
+};
 /** Where the projects library is (src/locations.mjs): the folder, its default, whether the person chose it, the free space on its disk, how many projects are in it. */
 export interface StudioLocation { path: string; default: string; chosen: boolean; free: number | null; count: number }
 export interface StudioLocations { projects: StudioLocation }
@@ -286,6 +291,7 @@ export const api = {
   sharedMediaLibrary: (library: SharedMediaLibrary) => call<{ library: SharedMediaLibrary }>('shared-media/libraries', { method: 'POST', json: library }).then((r) => r.library),
   sharedLiveFolder: (folder: string, initialize = false) => call<SharedLiveFolder>('shared-media/live-folder', { method: 'POST', json: { folder, initialize } }),
   sharedLiveProject: (input: { folder: string; videoPath: string; requestId: string; projectId?: string; createNew?: boolean }) => call<SharedLiveProject>('shared-media/live-project', { method: 'POST', json: input }),
+  sharedLiveProgress: (requestId: string) => call<SharedLiveProgress>(`shared-media/live-project/${encodeURIComponent(requestId)}`),
   sharedMediaBrowse: (libraryId: string, folder: string) => call<SharedMediaFolder>('shared-media/browse', { method: 'POST', json: { libraryId, folder } }),
   sharedMediaProject: (libraryId: string, videoPath: string, requestId: string) => call<{ project: Project; asset: string; source: Omit<SharedMediaSource, 'status'>; sharedRead?: SharedProjectOpen }>('shared-media/projects', { method: 'POST', json: { libraryId, videoPath, requestId } }),
   sharedProjectOpen: (projectId: string) => call<{ sharedRead: SharedProjectOpen | null }>(`${p(projectId)}/product-workflow/shared-open`),

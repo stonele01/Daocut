@@ -4,7 +4,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { createReadStream } from 'node:fs';
-import { mkdir, readFile, writeFile, stat, realpath } from 'node:fs/promises';
+import { mkdir, open, readFile, writeFile, stat, realpath } from 'node:fs/promises';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { studioHomeDir } from './locations.mjs';
 import { readableLink } from './media-links.mjs';
@@ -22,6 +22,11 @@ const MEDIA=/\.(mp4|mov|mkv|avi|m4v|webm|wmv|flv|ts|mts|m2ts|wav|m4a|mp3|aac|ogg
 const hashes=new Map();
 /** @type {Map<string,Promise<string>>} */
 const pending=new Map();
+const listeners=new Map();
+export const SAMPLED_MEDIA_IDENTITY='sampled-sha256-v1';
+const BLOCK=1024*1024, SAMPLES=8;
+/** @typedef {{bytesRead:number,totalBytes:number,sourceBytes:number,cached:boolean,identityKind:string}} IdentityProgress */
+/** @typedef {{identityKind?:string,onProgress?:(value:IdentityProgress)=>void}} IdentityOptions */
 const fail=(/** @type {string} */ message)=>Object.assign(new Error(message),{status:409,code:'SHARED_MEDIA_REFERENCE'});
 const inside=(/** @type {string} */ root,/** @type {string} */ path)=>{const back=relative(root,path);return !isAbsolute(back)&&back!=='..'&&!back.startsWith(`..${sep}`);};
 /** @param {unknown} raw */
@@ -37,17 +42,27 @@ export function mediaReferences(root){
  const out={};for(const [asset,record]of Object.entries(/** @type {Record<string,any>} */(data?.items??{}))){
   if(!['reference','project-reference'].includes(record?.mode))continue;
   if(data.version!==1||safeRelative(asset)!==asset||!asset.startsWith('assets/')||!MEDIA.test(asset)||!record||!(/^[a-z0-9][a-z0-9._-]{7,79}$/i.test(record.libraryId))||!(/^[a-f0-9]{64}$/.test(record.sha256))||!Number.isFinite(record.size)||record.size<0||!Number.isFinite(record.mtimeMs)||record.mtimeMs<0)throw fail('Invalid logical media identity');
+  if(record.identityKind!==undefined&&record.identityKind!==SAMPLED_MEDIA_IDENTITY)throw fail('Unsupported media identity');
   safeRelative(record.relativePath);if(!MEDIA.test(record.relativePath))throw fail('Only registered media may be read from a library');
   if(record.mode==='project-reference'&&(!/^[\w-]{6,80}$/.test(record.parentProjectId??'')||safeRelative(record.parentAssetPath)!==record.parentAssetPath||record.parentAssetPath!==asset||record.relativePath!==asset||!MEDIA.test(record.parentAssetPath)))throw fail('Invalid parent-project media identity');
   out[asset]=record;
  }return out;
 }
 const version=(/** @type {string} */path,/** @type {import('node:fs').Stats} */info)=>JSON.stringify([path,info.size,info.mtimeMs,info.ctimeMs,info.ino]);
+const hashKey=(/** @type {string} */path,/** @type {import('node:fs').Stats} */info,/** @type {string|undefined} */kind)=>kind===SAMPLED_MEDIA_IDENTITY?`${kind}:${version(path,info)}`:version(path,info);
 function remember(/** @type {string} */key,/** @type {string} */hash){if(hashes.size>=256)hashes.delete(/** @type {string} */(hashes.keys().next().value));hashes.set(key,hash);}
 /** Keep verified identities across app restarts; changed file metadata invalidates the record.
- * @param {string} path */
-export async function mediaContentHash(path){
- const before=await stat(path),key=version(path,before),cached=hashes.get(key);if(cached)return cached;
+ * Full content verification remains the default. Sampled identities are explicitly marked and
+ * only identify editing sources; backups and verified copies still check every byte.
+ * @param {string} path @param {IdentityOptions} [options] */
+export async function mediaContentHash(path,{identityKind,onProgress}={}){
+ if(identityKind!==undefined&&identityKind!==SAMPLED_MEDIA_IDENTITY)throw fail('Unsupported media identity');
+ const before=await stat(path),key=hashKey(path,before,identityKind),cached=hashes.get(key);
+ const sampled=identityKind===SAMPLED_MEDIA_IDENTITY,totalBytes=sampled?Math.min(before.size,BLOCK*SAMPLES):before.size;
+ const progress=(/** @type {number} */bytesRead,cached=false)=>({bytesRead,totalBytes,sourceBytes:before.size,cached,identityKind:identityKind??'sha256'});
+ if(cached){onProgress?.(progress(totalBytes,true));return cached;}
+ if(onProgress){if(!listeners.has(key))listeners.set(key,new Set());listeners.get(key).add(onProgress);onProgress(progress(0));}
+ const report=(/** @type {number} */bytes,cached=false)=>{for(const callback of listeners.get(key)??[])callback(progress(bytes,cached));};
  let work=pending.get(key);
  if(!work){
   work=(async()=>{
@@ -56,18 +71,38 @@ export async function mediaContentHash(path){
    let saved;
    try{saved=JSON.parse(await readFile(file,'utf8'));}catch{/* Missing or incomplete cache falls back to a full read. */}
    if(saved?.version===1&&saved.key===key&&/^[a-f0-9]{64}$/.test(saved.sha256??'')){
-    if(version(path,await stat(path))!==key)throw fail('Shared media changed during identity verification');
-    remember(key,saved.sha256);return saved.sha256;
+    if(hashKey(path,await stat(path),identityKind)!==key)throw fail('Shared media changed during identity verification');
+    remember(key,saved.sha256);report(totalBytes,true);return saved.sha256;
    }
-   const h=createHash('sha256');for await(const part of createReadStream(path,{highWaterMark:1024*1024}))h.update(part);
-   if(version(path,await stat(path))!==key)throw fail('Shared media changed during identity verification');
+   const h=createHash('sha256');let bytes=0;
+   if(sampled){
+    h.update(`${SAMPLED_MEDIA_IDENTITY}\0${before.size}\0`);
+    const file=await open(path,'r');
+    try{
+     const count=before.size>BLOCK*SAMPLES?SAMPLES:1,length=count===1?before.size:BLOCK,buffer=Buffer.alloc(length);
+     for(let index=0;index<count;index++){
+      const position=count===1?0:Math.floor((before.size-BLOCK)*index/(count-1));
+      let offset=0;
+      while(offset<length){const result=await file.read(buffer,offset,length-offset,position+offset);if(!result.bytesRead)throw fail('Shared media changed during identity verification');offset+=result.bytesRead;}
+      h.update(buffer);bytes+=length;report(bytes);
+     }
+    }finally{await file.close();}
+   }else for await(const part of createReadStream(path,{highWaterMark:BLOCK})){h.update(part);bytes+=part.length;report(bytes);}
+   if(hashKey(path,await stat(path),identityKind)!==key)throw fail('Shared media changed during identity verification');
    const sha=h.digest('hex');remember(key,sha);
    try{await mkdir(directory,{recursive:true});await writeFile(file,JSON.stringify({version:1,key,sha256:sha}));}catch{/* A cache write failure must not prevent using the verified original. */}
    return sha;
   })();
   pending.set(key,work);void work.finally(()=>pending.delete(key)).catch(()=>{});
  }
- return work;
+ try{return await work;}finally{if(onProgress){listeners.get(key)?.delete(onProgress);if(!listeners.get(key)?.size)listeners.delete(key);}}
+}
+/** New editing references read at most eight MiB, independent of the original's size.
+ * Existing unmarked references retain their full SHA-256 identity and shared analysis keys.
+ * @param {string} path @param {IdentityOptions} [options] */
+export async function mediaEditingIdentity(path,options={}){
+ const identityKind=(await stat(path)).size>BLOCK*SAMPLES?SAMPLED_MEDIA_IDENTITY:undefined;
+ return {...(identityKind?{identityKind}:{}),sha256:await mediaContentHash(path,{...options,identityKind})};
 }
 /** Locate a registered reference without following unregistered paths.
  * @param {string} root @param {string} rel @returns {{path:string,info:import('node:fs').Stats,reference:any}|null} */
@@ -121,7 +156,7 @@ async function candidateAsync(/** @type {string} */ root,/** @type {string} */ r
  * @param {string} root @param {string} rel */
 export function resolveMediaReference(root,rel){
  const result=candidate(root,rel);if(!result)return null;
- const sha=hashes.get(version(result.path,result.info));
+ const sha=hashes.get(hashKey(result.path,result.info,result.reference.identityKind));
  if(!sha)throw Object.assign(fail('Shared media identity needs asynchronous verification'),{code:'SHARED_MEDIA_UNVERIFIED'});
  if(sha!==result.reference.sha256)throw fail('Shared media content changed and needs confirmation');
  return result;
@@ -138,7 +173,7 @@ export async function prepareMediaReferences(root,rel){
  for(const asset of rel===undefined?Object.keys(mediaReferences(root)):[rel]){
   const key=referenceKey(root,asset),cache=snapshots.getStore();if(cache?.has(key))continue;
   const result=await candidateAsync(root,asset);if(!result)continue;
-  if(await mediaContentHash(result.path)!==result.reference.sha256)throw fail('Shared media content changed and needs confirmation');
+  if(await mediaContentHash(result.path,{identityKind:result.reference.identityKind})!==result.reference.sha256)throw fail('Shared media content changed and needs confirmation');
   cache?.set(key,result);
  }
 }
