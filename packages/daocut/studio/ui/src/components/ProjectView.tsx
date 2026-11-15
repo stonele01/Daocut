@@ -3221,8 +3221,8 @@ export function ProjectView({ projectId, onProject, onLeave, structure }: {
                   onClick={() => {
                     if (structure?.batchExport) { setExportClipId(null); setExportOpen(true); }
                     else if (previewError) toast.showError(`${t('project.filmCannotExport')} ${previewError}`);
-                    else if (totalMs > 0) setExportOpen(true);
-                    else toast.show(t('project.filmNotReady'));
+                    // An empty parent timeline can still contain AI plans and private drafts to back up.
+                    else setExportOpen(true);
                   }}>
                   <Upload size={16} />
                   {structure?.batchExport && <span aria-label={`已选 ${structure.batchExport.ordinals.length} 条方案`} className="ml-1 text-[11px] tabular-nums text-[var(--accent)]">{structure.batchExport.ordinals.length}</span>}
