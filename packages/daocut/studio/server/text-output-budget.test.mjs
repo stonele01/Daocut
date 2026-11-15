@@ -4,7 +4,7 @@ import { createDeepSeekTextClient } from './text-structure.mjs';
 import { createDesktopAnalysisServices } from './desktop-analysis-services.mjs';
 
 const publicConfig = { id: 'synthetic', baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash' };
-test('a response exceeding the former ceiling completes in one request with JSON output and unchanged low reasoning', async t => {
+test('a response exceeding the former ceiling completes in one request with JSON output and the high default', async t => {
   let calls = 0, body, receipt;
   const waits = [], schedule = globalThis.setTimeout;
   t.mock.method(globalThis, 'setTimeout', (callback, delay, ...args) => { waits.push(delay); return schedule(callback, delay, ...args); });
@@ -16,12 +16,12 @@ test('a response exceeding the former ceiling completes in one request with JSON
   } });
   assert.deepEqual(await client({ system: 'Return synthetic JSON', input: '{}', onReceipt: value => { receipt = value; } }), { candidates: [], issues: [] });
   assert.equal(calls, 1);
-  assert.equal(body.max_output_tokens, 32768);
-  assert.deepEqual(body.reasoning, { effort: 'low' });
+  assert.equal(body.max_output_tokens, 65536);
+  assert.deepEqual(body.reasoning, { effort: 'high' });
   assert.deepEqual(body.text, { format: { type: 'json_object' } });
-  assert.equal(receipt.maxOutputTokens, 32768);
+  assert.equal(receipt.maxOutputTokens, 65536);
   assert.equal(receipt.outputFormat, 'json_object');
-  assert.ok(waits.includes(300000), 'allow the larger response to finish within the declared timeout');
+  assert.ok(waits.includes(600000), 'allow the larger response to finish within the declared timeout');
   const identity = await client.getCacheIdentity();
   const desktop = createDesktopAnalysisServices({ textBridge: async () => publicConfig });
   const { configurationId, ...bridgeIdentity } = await desktop.liveAnalysis.modelClient.getCacheIdentity();

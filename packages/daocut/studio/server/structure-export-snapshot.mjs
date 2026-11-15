@@ -10,6 +10,7 @@ import { listStructureDrafts, STRUCTURE_DRAFT_META } from './structure-drafts.mj
 import { FILM_SUBTITLE_DEFAULT } from './film-subtitle.mjs';
 import { frameRateOf } from './project-settings.mjs';
 import { transcriptPath, translationsOf } from './transcripts.mjs';
+import { savedStructureTranscriptVtt } from './structure-transcript.mjs';
 
 const SNAPSHOT = '.film/structure-export-snapshot.json';
 const STATIC_MEDIA = /\.(mp4|mov|mkv|avi|m4v|webm|wmv|flv|ts|mts|m2ts|wav|m4a|mp3|aac|ogg|flac|png|jpe?g|webp|gif|bmp|tiff?)$/i;
@@ -62,10 +63,11 @@ export async function captureStructureExport(project, { plan, itemRoot }) {
   if (draft) await small(sourceRoot, STRUCTURE_DRAFT_META, true);
   const filmBytes = await small(sourceRoot, 'film.html', true), parsed = readFilmFile(filmBytes.toString('utf8'));
   if (!parsed.doc || !parsed.value) fail('成片文件无法读取，未创建导出快照');
-  let film = filmBytes;
+  let film = filmBytes, analysis;
   if (!draft) {
     const analysisBytes = await small(parent, '.film/product-analysis.json', true);
-    film = Buffer.from(publicFilm(plan, JSON.parse(analysisBytes.toString('utf8')), parsed.value));
+    analysis = JSON.parse(analysisBytes.toString('utf8'));
+    film = Buffer.from(publicFilm(plan, analysis, parsed.value));
   }
   files.set('film.html', film);
   const chosen = readFilmFile(film.toString('utf8')).value;
@@ -79,7 +81,7 @@ export async function captureStructureExport(project, { plan, itemRoot }) {
   if (!files.has('.film/subtitles.json')) files.set('.film/subtitles.json', Buffer.from(JSON.stringify(FILM_SUBTITLE_DEFAULT)));
   const rawManifest = await small(sourceRoot, 'assets/.daocut-source-media.json');
   const manifest = rawManifest ? JSON.parse(rawManifest.toString('utf8')) : null;
-  const media = [], transcriptLists = new Map();
+  const media = [], transcriptLists = new Map(), derivedTranscripts = new Map();
   for (const assetPath of assets) {
     const reference = inspectMediaReference(sourceRoot, assetPath);
     const sourcePath = await fs.realpath(reference?.path ?? readable(sourceRoot, assetPath));
@@ -91,6 +93,14 @@ export async function captureStructureExport(project, { plan, itemRoot }) {
     const translations = (await translationsOf(sourceRoot, assetPath)).sort(); transcriptLists.set(assetPath, translations);
     for (const rel of [transcriptPath(assetPath), ...translations.map(language => transcriptPath(assetPath, language))]) {
       const bytes = await small(sourceRoot, rel); if (bytes) files.set(rel, bytes);
+    }
+    if (!draft && !files.has(transcriptPath(assetPath))) {
+      const source = analysis.sources.find(source => source.assetPath === assetPath);
+      if (source) {
+        const body = await savedStructureTranscriptVtt(parent, source);
+        derivedTranscripts.set(source, body);
+        if (body) files.set(transcriptPath(assetPath), Buffer.from(body));
+      }
     }
   }
   const fileList = [...files].map(([path, bytes]) => ({ path, sha256: hash(bytes), size: bytes.length })).sort((a, b) => a.path.localeCompare(b.path));
@@ -109,6 +119,7 @@ export async function captureStructureExport(project, { plan, itemRoot }) {
       if (!expected ? current !== null : !current || !current.isFile() || current.isSymbolicLink() || !sameIdentity(expected.identity, identity(current)) || hash(await fs.readFile(path)) !== expected.hash) fail('导出资料在准备期间发生变化，请保存完成后重新导出');
     }
     for (const [asset, expected] of transcriptLists) if (JSON.stringify((await translationsOf(sourceRoot, asset)).sort()) !== JSON.stringify(expected)) fail('字幕在准备期间发生变化，请重新导出');
+    for (const [source, body] of derivedTranscripts) if (await savedStructureTranscriptVtt(parent, source) !== body) fail('转写在准备期间发生变化，请重新导出');
     for (const source of media) if (!sameIdentity(identity(await fs.stat(source.sourcePath)), source.identity)) fail(`原片在准备期间发生变化：${source.assetPath}`);
     const currentDrafts = (await listStructureDrafts(parent)).filter(item => item.meta.planId === plan.id && item.meta.planVersion === (plan.version ?? 1));
     if (currentDrafts.length !== matches.length || currentDrafts[0]?.root !== draft?.root) fail('个人草稿在准备期间发生变化，请重新导出');

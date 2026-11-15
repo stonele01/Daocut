@@ -133,7 +133,7 @@ export async function importExistingTranscriptArtifact(root, source, value, shar
     const state = { version: 1, status: inspection.pendingCount ? 'pending' : 'complete', sourceId: source.id, assetPath: source.assetPath, durationMs: source.durationMs, fingerprint: loc.fingerprint,
       segmented: true, collectionStatus: 'complete', importedTranscriptArtifactHash: identity, sharedRef, provenance: { kind: 'original-provider-segments' } };
     if (!inspection.pendingCount) {
-      const cues = resolveAudioSeams(inspection, {}), words = payload.segments.flatMap(s => s.words.filter(w => (w.startMs + w.endMs) / 2 >= s.coreStartMs && (w.startMs + w.endMs) / 2 < s.coreEndMs));
+      const cues = resolveAudioSeams(inspection, {}), words = inspection.words;
       Object.assign(state, { cues, words, text: cues.map(c => c.text).join(' ') });
     }
     await mkdir(loc.dir, { recursive: true });

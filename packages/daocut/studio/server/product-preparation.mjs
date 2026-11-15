@@ -7,6 +7,16 @@ import { readProductAnalysis } from './product-analysis.mjs';
 
 const fileFor = (root, id) => join(root, '.film', 'product-preparation', `${createHash('sha256').update(id).digest('hex')}.json`);
 
+export async function readProductPreparationState(root, sourceId) {
+  try { return JSON.parse(await readFile(fileFor(root, sourceId), 'utf8')); }
+  catch (error) { if (error.code === 'ENOENT') return null; throw new HttpError(409, '素材准备状态无法读取，未覆盖已有记录'); }
+}
+export async function writeProductPreparationState(root, state) {
+  const file = fileFor(root, state.sourceId);
+  await mkdir(dirname(file), { recursive: true });
+  await writeAtomic(file, `${JSON.stringify(state)}\n`);
+}
+
 // A name-only import placeholder is not a reviewed product split. Everything
 // else must stay intact until the existing difference/replacement flow is used.
 export function hasSavedProductResult(analysis, sourceId) {

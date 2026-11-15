@@ -10,6 +10,7 @@ import { createDesktopAnalysisServices } from '../../../packages/daocut/studio/s
 import { createLiveAnalysis } from '../../../packages/daocut/studio/server/live-analysis.mjs';
 import { createProductWorkflow } from '../../../packages/daocut/studio/server/product-workflow.mjs';
 import { createProductMediaReview } from '../../../packages/daocut/studio/server/product-media-review.mjs';
+import { createProductVisualReview } from '../../../packages/daocut/studio/server/product-visual-review.mjs';
 import { readProductAnalysis, writeProductAnalysis } from '../../../packages/daocut/studio/server/product-analysis.mjs';
 import { importSharedProductTranscript } from '../../../packages/daocut/studio/server/product-transcription.mjs';
 import { sharedHash } from '../../../packages/daocut/studio/server/shared-analysis.mjs';
@@ -49,7 +50,35 @@ async function protectedFiles(root) {
   return Object.fromEntries(await Promise.all(['film.html', source.assetPath].map(async file => { const bytes = await readFile(join(root, file)), info = await stat(join(root, file)); return [file, { sha256: sha(bytes), size: info.size, mtimeMs: info.mtimeMs }]; })));
 }
 
-test('confirmed single-product workflow reaches real SDK image wire, persists semantic evidence and reuses it after reopen/share/compose', { timeout: 90000 }, async t => {
+test('normal desktop analysis only submits text and reopens saved results without an image task', { timeout: 30000 }, async t => {
+  await mkdir(base, { recursive: true });
+  const scratch = await mkdtemp(join(base, 'text-only-'));
+  t.mock.method(globalThis, 'fetch', () => assert.fail('No real model or network requests'));
+  const root = await project(scratch, 'origin'), before = await protectedFiles(root), calls = [];
+  const services = createDesktopAnalysisServices({ providersFile: join(scratch, 'no-provider-config.json'), env: {}, mediaReview: null, textBridge: async request => {
+    calls.push(request.operation);
+    if (request.operation === 'public-config') return textConfig;
+    assert.equal(request.operation, 'execute', 'no visual configuration or image request is allowed');
+    assert.equal(request.images, undefined);
+    return { value: compact };
+  } });
+  const live = createLiveAnalysis(services.liveAnalysis);
+  const workflow = createProductWorkflow({ liveAnalysis: live, discovery: { view: async () => ({ status: 'idle' }) }, analysisServices: services.analysisServices });
+  const plan = await workflow.plan(root, { action: 'analysis', ...scope });
+  assert.equal(plan.enabled, true); assert.equal(plan.requestCount, 1); assert.equal(plan.visual, undefined);
+  await workflow.execute(root, { confirmed: true, plan }); await workflow.wait(root, source.id);
+  const state = await live.view(root, source.id, scope.intervalId, scope.productId, scope);
+  assert.equal(state.analysis.status, 'complete'); assert.equal(state.canReviewVisual, false);
+  assert.equal(state.analysis.visualReview, undefined);
+  assert.equal((await readProductAnalysis(root)).analysis.candidates.length, 3);
+  const cached = await workflow.plan(root, { action: 'analysis', ...scope });
+  assert.equal(cached.cached, true); assert.equal(cached.requestCount, 0);
+  await workflow.execute(root, { confirmed: true, plan: cached }); await workflow.wait(root, source.id);
+  assert.equal(calls.filter(operation => operation === 'execute').length, 1);
+  assert.deepEqual(await protectedFiles(root), before);
+});
+
+test('legacy visual evidence remains reusable after separate image requests are removed from normal desktop analysis', { timeout: 90000 }, async t => {
   await mkdir(base, { recursive: true }); const scratch = await mkdtemp(join(base, 'case-'));
   t.mock.method(globalThis, 'fetch', () => assert.fail('No real model, ASR or network requests are allowed'));
   const root = await project(scratch, 'origin'), receiver = await project(scratch, 'receiver', join(root, source.assetPath));
@@ -60,7 +89,7 @@ test('confirmed single-product workflow reaches real SDK image wire, persists se
     const body = JSON.parse(options.body);
     if (String(url) === 'https://api.deepseek.com/responses') {
       textCalls++; const input = JSON.parse(body.input[1].content);
-      assert.deepEqual(input.cues, cues.slice(0, 3)); assert.equal(input.productId, scope.productId);
+      assert.deepEqual(input.cues, cues.slice(0, 3).map((cue, index) => ({ ...cue, index }))); assert.equal(input.productId, scope.productId);
       assert.deepEqual([input.rangeStartMs, input.rangeEndMs], [500, 4500]);
       return new Response(JSON.stringify({ id: 'mock-text-receipt', status: 'completed', usage: { input_tokens: 30, output_tokens: 10 }, output: [{ content: [{ type: 'output_text', text: JSON.stringify(compact) }] }] }));
     }
@@ -83,7 +112,15 @@ test('confirmed single-product workflow reaches real SDK image wire, persists se
     return new Response(chunks.map(chunk => `data: ${JSON.stringify(chunk)}\n\n`).join('') + 'data: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } });
   } });
   const localTools = createProductMediaReview();
-  const services = createDesktopAnalysisServices({ textBridge: bridge, providersFile: join(scratch, 'no-provider-config.json'), env: {}, mediaReview: async (...args) => { toolCalls++; return localTools(...args); } });
+  // Explicitly reconstruct an older caller to create historical evidence. The
+  // normal desktop does not wire this adapter anymore.
+  const legacyClient = async ({ system, input, images, onReceipt, expectedIdentity }) => {
+    const result = await bridge({ operation: 'execute-visual', system, input, images, expectedConfig: expectedIdentity });
+    if (result.receipt) await onReceipt?.(result.receipt);
+    return result.value;
+  };
+  legacyClient.getCacheIdentity = () => bridge({ operation: 'public-visual-config' });
+  const services = createDesktopAnalysisServices({ textBridge: bridge, providersFile: join(scratch, 'no-provider-config.json'), env: {}, mediaReview: async (...args) => { toolCalls++; return localTools(...args); }, visualReview: createProductVisualReview({ client: legacyClient }) });
   const create = liveOptions => {
     const live = createLiveAnalysis(liveOptions);
     const workflow = createProductWorkflow({ liveAnalysis: live, discovery: { view: async () => ({ status: 'idle' }) }, analysisServices: services.analysisServices });
@@ -112,8 +149,8 @@ test('confirmed single-product workflow reaches real SDK image wire, persists se
   const payload = await live.exportShared(root, source.id, scope.intervalId); assert.deepEqual(payload.visualReview, visual);
   assert.ok(!JSON.stringify(payload).includes('synthetic-visual-key')); assert.ok(!JSON.stringify(visual).includes(scratch));
   const noRequests = async () => assert.fail('reopen and shared reuse cannot request model or tools again');
-  const reopened = create({ ...services.liveAnalysis, modelClient: Object.assign(noRequests, { getCacheIdentity: services.liveAnalysis.modelClient.getCacheIdentity }), mediaReview: noRequests, visualReview: { identity: services.liveAnalysis.visualReview.identity, review: noRequests } });
-  const cachedPlan = await reopened.workflow.plan(root, { action: 'analysis', ...scope }); assert.equal(cachedPlan.requestCount, 0); assert.equal(cachedPlan.visual.requestCount, 0);
+  const reopened = create({ ...services.liveAnalysis, modelClient: Object.assign(noRequests, { getCacheIdentity: services.liveAnalysis.modelClient.getCacheIdentity }), mediaReview: noRequests, visualReview: undefined });
+  const cachedPlan = await reopened.workflow.plan(root, { action: 'analysis', ...scope }); assert.equal(cachedPlan.requestCount, 0); assert.equal(cachedPlan.visual, undefined);
   await reopened.workflow.execute(root, { confirmed: true, plan: cachedPlan }); await reopened.workflow.wait(root, source.id);
   assert.deepEqual((await reopened.live.view(root, source.id, scope.intervalId, scope.productId, scope)).analysis.visualReview, visual);
   const taskKey = 'f'.repeat(64), snapshot = { action: 'analysis', taskKey, sourceIdentity: media.sourceSha, scope: { startMs: 500, endMs: 4500 }, dataHash: sharedHash({ cues: cues.slice(0, 3), cueIndices: [0, 1, 2] }), payload };

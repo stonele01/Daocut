@@ -7,6 +7,7 @@
  *   <Toast toast={toast.current} />
  */
 import React from 'react';
+import { rememberFeedbackProblem, requestFeedback } from '@/lib/feedback-request';
 
 export type ToastMessage = { text: string; error?: boolean };
 
@@ -32,7 +33,7 @@ export function useToast(): ToastState {
     timer.current = message ? setTimeout(() => setCurrent(null), TOAST_MS) : null;
   }, []);
   const show = React.useCallback((text: string) => put({ text }), [put]);
-  const showError = React.useCallback((text: string) => put({ text, error: true }), [put]);
+  const showError = React.useCallback((text: string) => { rememberFeedbackProblem(text); put({ text, error: true }); }, [put]);
   const clear = React.useCallback(() => put(null), [put]);
   return React.useMemo(() => ({ current, show, showError, clear }), [current, show, showError, clear]);
 }
@@ -50,6 +51,7 @@ export function Toast({ toast }: { toast: ToastMessage | null }) {
       style={{ animation: 'daocut-rise 0.16s ease-out both' }}
     >
       {toast.text}
+      {toast.error && <button type="button" onClick={() => requestFeedback(toast.text)} className="pointer-events-auto ml-3 rounded px-2 py-0.5 text-[var(--accent)] transition duration-150 hover:bg-[var(--bg-hover)] active:scale-95">反馈问题</button>}
     </div>
   );
 }

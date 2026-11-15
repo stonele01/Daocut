@@ -26,7 +26,7 @@ import { createServer } from 'node:http';
 import { basename, dirname, isAbsolute, join, normalize, relative, sep } from 'node:path';
 import { HOST_FLAG, folderFiles } from '../../src/host.mjs';
 import { readableLink } from '../../src/media-links.mjs';
-import { prepareMediaReferences } from '../../src/shared-media-reference.mjs';
+import { prepareMediaReferences, withMediaReferenceSnapshot } from '../../src/shared-media-reference.mjs';
 import { clipKind } from '../../src/film-doc.mjs';
 import { readPrefs } from './prefs.mjs';
 import { readyProxy } from './proxies.mjs';
@@ -163,7 +163,7 @@ export async function startPages({ port, editorOrigin, secret, projects }) {
     return byToken.get(token);
   };
 
-  const server = createServer(async (req, res) => {
+  const server = createServer((req, res) => withMediaReferenceSnapshot(async () => {
     const headers = policy();
     if (!ownHost(req, /** @type {import('node:net').AddressInfo} */ (server.address()).port)) { res.writeHead(403, headers).end('not this address'); return; }
     const url = new URL(req.url ?? '/', 'http://pages');
@@ -176,9 +176,9 @@ export async function startPages({ port, editorOrigin, secret, projects }) {
        Windows stream, or a file out of the folder */
     let plain = path;
     try { plain = decodeURIComponent(path); } catch { /* folderFiles refuses it */ }
-    if (!servable(entry.root, plain)) { res.writeHead(404, headers).end('not found'); return; }
     try { await prepareMediaReferences(entry.root, plain.replace(/^\/+/, '')); }
     catch { res.writeHead(409, headers).end('Media identity unavailable or changed; check the material library.'); return; }
+    if (!servable(entry.root, plain)) { res.writeHead(404, headers).end('not found'); return; }
     if (url.searchParams.has('film-sound')) {
       /* waited for while it is made (a few seconds for a long recording): the mixer plays the film without it meanwhile */
       const file = await soundOf(entry.root, plain.replace(/^\/+/, '')).catch((/** @type {any} */ e) => (e?.status === 404 ? undefined : null));
@@ -201,7 +201,7 @@ export async function startPages({ port, editorOrigin, secret, projects }) {
       return;
     }
     if (!entry.files(req, res, path, url.searchParams)) res.writeHead(403, headers).end();
-  });
+  }));
   await new Promise((done, fail) => { server.once('error', fail); server.listen(port, '127.0.0.1', () => done(undefined)); });
   /* named `localhost`, not 127.0.0.1 as the editor is: another site to the browser, not only another origin, so it puts
      the film (footage decoding, pages drawing) in a process of its own, away from the editor's */

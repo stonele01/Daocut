@@ -6,7 +6,7 @@ import { probe } from './derived.mjs';
 import { HttpError, json, readJson } from './http.mjs';
 import { readProductAnalysis, recordProductEdit, updateProductAnalysis, validateProductAnalysis } from './product-analysis.mjs';
 import { productSourcePath, readProductTranscript } from './product-transcription.mjs';
-import { DISCOVERY_PROMPT, PREVIOUS_DISCOVERY_PROMPT, DISCOVERY_VERSION, discoverProducts, discoveryWindows, validateDiscoveryCues } from './product-discovery.mjs';
+import { DISCOVERY_PROMPT, PREVIOUS_CONTEXT_DISCOVERY_PROMPT, PREVIOUS_DISCOVERY_PROMPT, DISCOVERY_VERSION, discoverProducts, discoveryWindows, validateDiscoveryCues } from './product-discovery.mjs';
 import { textResultCacheIdentity } from './text-structure.mjs';
 
 const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).filter(key => value[key] !== undefined).sort().map(key => [key, canonical(value[key])])) : value;
@@ -17,7 +17,7 @@ const currentFor = (analysis, sourceId) => ({ products: analysis.products.filter
 const hasLocalResults = (analysis, sourceId) => analysis.intervals.some(i => i.sourceId === sourceId) || (analysis.manualEdits ?? []).some(edit => edit.action === 'manual-save' && edit.sourceIds.includes(sourceId));
 // Reuse completed, known older judgments without pretending that a new paid
 // request uses the same rules. Incomplete windows never cross prompt versions.
-const savedInputMatches = (run, input) => Boolean(run && run.inputHash === input.inputHash && (run.sharedRef || (input.contractHash && (run.contractHash === input.contractHash || (run.status === 'complete' && run.contractHash === input.previousContractHash)))));
+const savedInputMatches = (run, input) => Boolean(run && run.inputHash === input.inputHash && (run.sharedRef || (input.contractHash && (run.contractHash === input.contractHash || (run.status === 'complete' && input.previousContracts?.some(item => item.hash === run.contractHash))))));
 
 export function discoveryDifference(analysis, proposal) {
   const before = currentFor(analysis, proposal.sourceId);
@@ -77,7 +77,8 @@ export function createProductDiscovery({ modelClient, modelIdentity, readTranscr
     const publicModelHash = modelConfiguration ? hash(modelConfiguration) : null;
     const contract = prompt => publicModelHash ? hash({ publicModelHash: hash(textResultCacheIdentity(modelConfiguration)), promptHash: hash(prompt), algorithmVersion: DISCOVERY_VERSION, windowPolicy: { maxBytes, contextCues, knownProductBytes: 8000 } }) : null;
     const contractHash = contract(DISCOVERY_PROMPT), previousContractHash = contract(PREVIOUS_DISCOVERY_PROMPT);
-    return { analysis, source, durationMs, cues, fingerprint, modelConfiguration, publicModelHash, contractHash, previousContractHash, inputHash: hash({ fingerprint, durationMs, cues }) };
+    const previousContracts = [PREVIOUS_CONTEXT_DISCOVERY_PROMPT, PREVIOUS_DISCOVERY_PROMPT].map(prompt => ({ prompt, hash: contract(prompt) }));
+    return { analysis, source, durationMs, cues, fingerprint, modelConfiguration, publicModelHash, contractHash, previousContractHash, previousContracts, inputHash: hash({ fingerprint, durationMs, cues }) };
   }
   async function view(root, sourceId) {
     const { analysis } = await readProductAnalysis(root);
@@ -86,7 +87,7 @@ export function createProductDiscovery({ modelClient, modelIdentity, readTranscr
     const active = running.has(`${root}\0${sourceId}`);
     const interrupted = run?.status === 'running' && !active;
     let inputsMatch = false, previousIncomplete = false;
-    if (run) try { if (run.historicalRef) inputsMatch = await historicalFingerprint(root, sourceId) === run.fingerprint; else { const current = await inputFor(root, sourceId); inputsMatch = savedInputMatches(run, current); previousIncomplete = run.status !== 'complete' && Boolean(current.previousContractHash && run.contractHash === current.previousContractHash && run.contractHash !== current.contractHash); } } catch { /* Existing results remain inspectable while the source is unavailable. */ }
+    if (run) try { if (run.historicalRef) inputsMatch = await historicalFingerprint(root, sourceId) === run.fingerprint; else { const current = await inputFor(root, sourceId); inputsMatch = savedInputMatches(run, current); previousIncomplete = run.status !== 'complete' && Boolean(current.previousContracts.some(item => item.hash === run.contractHash) && run.contractHash !== current.contractHash); } } catch { /* Existing results remain inspectable while the source is unavailable. */ }
     const stale = Boolean(run && (!inputsMatch || (run.baseHash !== effectiveHash(analysis) && !state.applications?.some(a => a.runId === run.id && a.afterHash === effectiveHash(analysis)))));
     return { sourceId, status: interrupted ? 'failed' : run?.status ?? 'idle', modelIdentity: run?.modelIdentity ?? null, enabled: typeof modelClient === 'function', runId: run?.id, error: previousIncomplete ? '旧提示词下的拆品任务未完成；已完成窗口和原请求记录保留，不能混用新规则继续，请核查后明确发起新的拆品' : interrupted ? '任务已中断；已完成窗口保留，核查后可显式重试，重试可能计费' : run?.error, stale, canRetry: Boolean(run && !previousIncomplete && (run.status === 'failed' || interrupted)), proposal: run?.status === 'complete' ? run.proposal : undefined, difference: run?.proposal ? discoveryDifference(analysis, run.proposal) : undefined, runs: state.runs.map(({ id, status, createdAt, modelIdentity, windows, completed, error }) => ({ id, status, createdAt, modelIdentity, windows, completedWindows: completed?.length ?? 0, error })) };
   }
@@ -221,7 +222,7 @@ export function createProductDiscovery({ modelClient, modelIdentity, readTranscr
       if (!run || run.sharedRef || run.historicalRef) return null;
       const input = await inputFor(root, sourceId);
       const prompt = input.contractHash && run.contractHash === input.contractHash ? DISCOVERY_PROMPT
-        : input.previousContractHash && run.contractHash === input.previousContractHash ? PREVIOUS_DISCOVERY_PROMPT : null;
+        : input.previousContracts?.find(item => item.hash === run.contractHash)?.prompt ?? null;
       if (!prompt || input.inputHash !== run.inputHash) throw new HttpError(409, '原拆品请求的提示词契约、来源或转写无法确认；已有结果保留，请核查后再补存，不会重新请求模型');
       return { model: textResultCacheIdentity(input.modelConfiguration), prompt: hash(prompt), version: DISCOVERY_VERSION, maxBytes, contextCues };
     },

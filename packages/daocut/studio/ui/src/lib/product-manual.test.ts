@@ -115,3 +115,11 @@ test('moving a pending assignment outside its original time retains the untouche
   assert.notEqual(next.unassigned![0].id, next.intervals[0].id);
   assert.equal(next.unassigned![0].reason, original.unassigned[0].reason);
 });
+
+test('explicitly saving one product range confirms only that scope and preserves existing candidate text', () => {
+  const original = fixture(); original.intervals[0].scopeStatus = 'uncertain'; original.intervals[1].scopeStatus = 'uncertain';
+  const next = applyProductEdit(original, { type: 'range', id: 'a1', sourceId: 's', productId: 'a', startMs: 0, endMs: 3000 });
+  assert.equal(next.intervals[0].scopeStatus, 'confirmed');
+  assert.equal(next.intervals[1].scopeStatus, 'uncertain');
+  assert.deepEqual(next.candidates, original.candidates);
+});

@@ -1,17 +1,16 @@
 import * as React from 'react';
 import { createPortal } from 'react-dom';
-import { ArrowUpRight, ListVideo, Play, X } from 'lucide-react';
+import { ArrowUpRight, ChevronDown, ListVideo, Play, X } from 'lucide-react';
 import { api } from '@/api';
+import { requestFeedback } from '@/lib/feedback-request';
 import { useHostPanel } from '@/lib/host';
-import { groupStructurePlans, structureGroupLabel, structureRole, type StructurePlan, type StructurePlansState, type StructureScope, type StructureWorkspaceState } from '@/lib/structure-workspace';
+import { groupStructurePlansByOpening, isSavedStructurePlanUsable, needsStructureGeneration, structureRole, type StructurePlan, type StructurePlansState, type StructureScope, type StructureWorkspaceState } from '@/lib/structure-workspace';
 import { sourceTime } from '@/lib/product-analysis';
-import { planLetter, structureDraftLabel, structurePlanCard } from '@/lib/structure-plan-card';
+import { structureDraftLabel, structurePlanCard } from '@/lib/structure-plan-card';
 import { ProjectView } from './ProjectView';
 import { VirtualList } from './VirtualList';
 import { StructureExportBatches } from './StructureExportBatches';
 import { selectedStructurePlanIds, toggleStructurePlan, type StructureBatchExportSelection, type StructureBatchExportOptions } from '@/lib/structure-export-selection';
-import { mediaReviewPresentation } from '@/lib/product-media-review';
-import { ProductVisualReviewDetails } from './ProductVisualReview';
 
 export interface StructureEditorBridge {
   ownerId: string; scope: StructureScope | null; rightWidth: number; preview: StructurePlan | null; previewFolder: string;
@@ -19,13 +18,14 @@ export interface StructureEditorBridge {
   onScope: (scope: StructureScope | null) => void; onCompose: (scope: StructureScope) => void;
   onClosePreview: () => void; onShowPlans: () => void; registerSave: (save: () => Promise<void>) => () => void;
   onReturnToProject: () => void;
+  onAnalysisUpdated?: () => void;
   draftLabel?: string;
   batchExport?: StructureBatchExportSelection;
 }
 const button = 'rounded border border-[var(--border)] px-2 py-1 text-[12px] transition duration-150 hover:bg-[var(--bg-hover)] active:scale-95 disabled:opacity-40';
 const scopeKey = (scope: StructureScope | null) => scope ? `${scope.sourceId}:${scope.productId}:${scope.intervalId}:${scope.startMs ?? ''}:${scope.endMs ?? ''}` : '';
 
-function StructureComposeConfirmation({ scope, plan, onConfirm, onClose }: { scope: StructureScope; plan: NonNullable<StructurePlansState['confirmation']>; onConfirm: () => void; onClose: () => void }) {
+function StructureComposeConfirmation({ plan, onConfirm, onClose }: { plan: NonNullable<StructurePlansState['confirmation']>; onConfirm: () => void; onClose: () => void }) {
   const dialog = React.useRef<HTMLDivElement>(null), cancel = React.useRef<HTMLButtonElement>(null);
   React.useEffect(() => { const previous = document.activeElement as HTMLElement | null; cancel.current?.focus(); return () => previous?.focus?.(); }, []);
   return createPortal(<div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 p-4 animate-in fade-in duration-150" onClick={onClose}>
@@ -33,14 +33,10 @@ function StructureComposeConfirmation({ scope, plan, onConfirm, onClose }: { sco
       if (event.key === 'Escape') { event.preventDefault(); onClose(); }
       if (event.key === 'Tab') { const buttons = dialog.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'); if (!buttons?.length) return; const first = buttons[0]!, last = buttons[buttons.length - 1]!; if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); } else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); } }
     }}>
-      <strong className="text-[14px]">{plan.continuation ? '继续 AI 拼结构' : 'AI 拼结构'}</strong>
-      <p className="mt-3">仅使用当前这一次商品讲解{scope.startMs != null ? `：${sourceTime(scope.startMs)}–${sourceTime(scope.endMs ?? 0)}` : ''}</p>
-      <p className="mt-2">发送已有话术、转写文字和已保存的核查记录，由 AI 选择片段与顺序。</p>
-      {plan.rulesVersion === 'ai-structure-plans-v2' && <p className="mt-2">复用已有转写和分析，从长话术中选取保留必要上下文的完整小段，按 1.3 倍速组成 30～40 秒视频。旧方案和个人草稿保留。</p>}
-      <p className="mt-2">新增 1 次文字模型请求，可能计费；{plan.continuation ? '已保存方案保留，本次继续补充。' : '已有分析直接复用。'}</p>
-      <p className="mt-2">模型：{plan.service?.model || '未配置'}</p>
-      <p className="mt-2">{plan.visibility === 'shared' ? '结果保存为公共方案，供同事复用。' : '结果保存在本机工程。'}个人草稿分别保存。</p>
-      <details className="mt-3 text-[var(--text-muted)]"><summary className="cursor-pointer">请求详情</summary><div className="mt-2 space-y-1 break-all animate-in fade-in duration-150"><p>发送至：{plan.service?.endpoint || '未配置'}</p><p>话术 {plan.candidateCount ?? 0} 段 · 转写 {plan.transcriptSegments ?? 0} 条</p></div></details>
+      <strong className="text-[14px]">拼结构</strong>
+      <p className="mt-3">根据当前商品的话术生成视频方案，完成后可预览和导出。</p>
+      {plan.openingCount != null && <p className="mt-2">本次处理 {plan.openingCount} 个开头。</p>}
+      <p className="mt-2 text-[var(--text-muted)]">本次最多调用模型 {plan.requestCount ?? 1} 次，可能产生费用。完成后自动保存。</p>
       {!plan.enabled && <p role="alert" className="mt-3 text-[var(--warn)]">{plan.message}</p>}
       <div className="mt-4 flex gap-2"><button className={`${button} min-h-9 flex-1 bg-[var(--accent)] text-[var(--accent-text,#fff)]`} disabled={!plan.enabled || !plan.id} onClick={onConfirm}>确认 AI 拼结构</button><button ref={cancel} className={`${button} min-h-9 px-4`} onClick={onClose}>取消</button></div>
     </div>
@@ -63,14 +59,15 @@ export function StructureWorkspace({ projectId, onProject, onLeave }: { projectI
   const closePreview = React.useCallback(() => setPreview(null), []);
   const acceptPlans = (next: StructurePlansState, requestedVersion?: string) => {
     const version = next.version ?? requestedVersion;
-    if (currentRules.current !== version) { setPreview(null); setGroup(''); }
+    if (currentRules.current !== version) { setPreview(null); setOpeningTypeFilter(''); }
     currentRules.current = version; setRulesVersion(version); setPlans(next);
   };
   const [folder, setFolder] = React.useState('');
   const [projectTitle, setProjectTitle] = React.useState('结构视频');
   const [error, setError] = React.useState(''), [working, setWorking] = React.useState(false), [switching, setSwitching] = React.useState(false);
   const [plansOpen, setPlansOpen] = React.useState(true);
-  const [group, setGroup] = React.useState('');
+  const [openingTypeFilter, setOpeningTypeFilter] = React.useState('');
+  const [expandedOpenings, setExpandedOpenings] = React.useState<Set<string>>(() => new Set());
   const [selectedPlans, setSelectedPlans] = React.useState<Set<string>>(() => new Set());
   const [batchRevision, setBatchRevision] = React.useState(0);
   const [batchPreparing, setBatchPreparing] = React.useState(false);
@@ -125,10 +122,10 @@ export function StructureWorkspace({ projectId, onProject, onLeave }: { projectI
     catch (e) { if (token === request.current) setError(e instanceof Error ? e.message : String(e)); }
   };
   React.useEffect(() => {
-    const token = ++request.current; generation.current += 1; setWorking(false); setPlans(null); setPreview(null); setGroup(''); setConfirmation(null); currentRules.current = undefined; setRulesVersion(undefined);
+    const token = ++request.current; generation.current += 1; setWorking(false); setPlans(null); setPreview(null); setOpeningTypeFilter(''); setConfirmation(null); currentRules.current = undefined; setRulesVersion(undefined);
     if (!scope) return;
     const composeOnLoad = composeAfterSelection.current === scopeKey(scope); composeAfterSelection.current = '';
-    void api.structurePlans(projectId, scope).then(value => { if (request.current !== token) return; acceptPlans(value); if (composeOnLoad && value.confirmation && (value.status === 'idle' || value.canContinue)) setConfirmation({ scope, plan: value.confirmation }); }, e => { if (request.current === token) setError(String(e.message ?? e)); });
+    void api.structurePlans(projectId, scope).then(value => { if (request.current !== token) return; acceptPlans(value); if (composeOnLoad && value.confirmation && needsStructureGeneration(value)) setConfirmation({ scope, plan: value.confirmation }); }, e => { if (request.current === token) setError(String(e.message ?? e)); });
   }, [projectId, scopeKey(scope)]);
   // Once submitted, polling and reopening only read progress; they never resubmit AI work.
   React.useEffect(() => {
@@ -140,27 +137,19 @@ export function StructureWorkspace({ projectId, onProject, onLeave }: { projectI
     };
     timer = setTimeout(poll, 1000); return () => { alive = false; clearTimeout(timer); };
   }, [projectId, scopeKey(scope), plans?.status, rulesVersion]);
-  const compose = async (selected: StructureScope, version = currentRules.current, preserveUntilConfirmed = false) => {
+  const compose = async (selected: StructureScope) => {
     showPlans(); setError('');
     // A card click carries the exact lecture even if React has not yet applied its selection.
     if (scopeKey(currentScope.current) !== scopeKey(selected)) { composeAfterSelection.current = scopeKey(selected); onScope(selected); return; }
     const token = ++generation.current; request.current += 1; setWorking(true);
     try {
-      const next = await api.structurePlans(projectId, selected, version);
+      const next = await api.structurePlans(projectId, selected);
       if (generation.current !== token) return;
-      const needsConfirmation = (next.status === 'idle' || (!preserveUntilConfirmed && next.canContinue)) && next.confirmation;
-      // Looking at a new request is read-only. Cancelling keeps the old list;
-      // already saved colleague results can be displayed immediately.
-      if (!preserveUntilConfirmed || !needsConfirmation) acceptPlans(next, version);
+      const needsConfirmation = needsStructureGeneration(next) && next.confirmation;
+      // Read current analysis/results without submitting another generation.
+      acceptPlans(next);
       if (needsConfirmation) setConfirmation({ scope: selected, plan: next.confirmation! });
     } catch (e) { if (generation.current === token) setError(e instanceof Error ? e.message : String(e)); }
-    finally { if (generation.current === token) setWorking(false); }
-  };
-  const selectRules = async (version: string) => {
-    const selected = currentScope.current; if (!selected) return;
-    const token = ++generation.current; request.current += 1; setWorking(true); setError(''); setConfirmation(null);
-    try { const next = await api.structurePlans(projectId, selected, version); if (generation.current === token) acceptPlans(next, version); }
-    catch (e) { if (generation.current === token) setError(e instanceof Error ? e.message : String(e)); }
     finally { if (generation.current === token) setWorking(false); }
   };
   const confirmComposition = async () => {
@@ -179,7 +168,7 @@ export function StructureWorkspace({ projectId, onProject, onLeave }: { projectI
     finally { switchLock.current = false; setSwitching(false); }
   };
   const edit = async (plan: StructurePlan) => {
-    if (!scope || !plans?.taskKey || switchLock.current) return; switchLock.current = true; setSwitching(true); setError('');
+    if (!scope || !plans?.taskKey || !isSavedStructurePlanUsable(plans, plan.id) || switchLock.current) return; switchLock.current = true; setSwitching(true); setError('');
     try {
       await save.current();
       const draft = await api.editStructurePlan(projectId, scope, plans.taskKey, plan.id);
@@ -188,15 +177,24 @@ export function StructureWorkspace({ projectId, onProject, onLeave }: { projectI
     } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
     finally { switchLock.current = false; setSwitching(false); }
   };
-  const groups = React.useMemo(() => groupStructurePlans(plans?.plans ?? []), [plans?.plans]);
-  const mediaReview = React.useMemo(() => mediaReviewPresentation(plans?.mediaReview, plans?.mediaReviewOrigin), [plans?.mediaReview, plans?.mediaReviewOrigin]);
+  const groups = React.useMemo(() => groupStructurePlansByOpening(plans?.plans ?? []), [plans?.plans]);
+  React.useEffect(() => { setExpandedOpenings(new Set(groups[0] ? [groups[0].key] : [])); }, [plans?.taskKey, groups[0]?.key]);
+  const openingTypes = [...new Set(groups.map(group => structurePlanCard(group.plans[0]!).openingType))];
+  const shownGroups = openingTypeFilter ? groups.filter(group => structurePlanCard(group.plans[0]!).openingType === openingTypeFilter) : groups;
   const localPlans = plans?.context?.visibility === 'local';
   const planTitle = localPlans ? '本机方案' : '公共方案';
-  const detailIssues = (plans?.issues ?? []).slice(plans?.status === 'unavailable' ? 1 : 0);
-  const shown = group ? groups.find(item => item.key === group)?.plans ?? [] : plans?.plans ?? [];
-  const selectedIds = selectedStructurePlanIds(plans?.plans ?? [], selectedPlans);
+  const shown = shownGroups.flatMap(group => group.plans);
+  type OpeningGroup = typeof groups[number];
+  type PlanRow = { kind: 'opening'; key: string; group: OpeningGroup } | { kind: 'plan'; key: string; plan: StructurePlan };
+  const rows: PlanRow[] = shownGroups.flatMap(group => [
+    { kind: 'opening' as const, key: `opening:${group.key}`, group },
+    ...(expandedOpenings.has(group.key) ? group.plans.map(plan => ({ kind: 'plan' as const, key: `plan:${plan.id}`, plan })) : []),
+  ]);
+  const usablePlans = (plans?.plans ?? []).filter(plan => isSavedStructurePlanUsable(plans, plan.id));
+  const usableShown = shown.filter(plan => isSavedStructurePlanUsable(plans, plan.id));
+  const selectedIds = selectedStructurePlanIds(usablePlans, selectedPlans);
   const exportSelected = async (options: StructureBatchExportOptions) => {
-    if (!scope || !plans?.taskKey || plans.status !== 'complete' || !selectedIds.length || switchLock.current) throw new Error('请等待保存完成后，重新勾选已保存的方案');
+    if (!scope || !plans?.taskKey || !selectedIds.length || selectedIds.some(id => !isSavedStructurePlanUsable(plans, id)) || switchLock.current) throw new Error('请等待保存完成后，重新勾选已保存的方案');
     switchLock.current = true; setSwitching(true); setBatchPreparing(true); setError('');
     const selection = { scope: { ...scope }, taskKey: plans.taskKey, planIds: [...selectedIds] };
     const signature = JSON.stringify({ ...selection, ...options });
@@ -210,85 +208,70 @@ export function StructureWorkspace({ projectId, onProject, onLeave }: { projectI
     finally { setBatchRevision(value => value + 1); switchLock.current = false; setSwitching(false); setBatchPreparing(false); }
   };
   const activeDraft = workspace?.drafts.find(item => item.projectId === active);
-  const ruleOptions = [...new Set([...(plans?.savedVersions ?? []).map(item => item.version), ...(rulesVersion ? [rulesVersion] : [])])];
   const draftLabel = activeDraft ? structureDraftLabel(activeDraft.planId, plans?.plans ?? []) : undefined;
-  const bridge: StructureEditorBridge = { ownerId: projectId, scope, rightWidth: plansVisible ? 350 : 0, preview, previewRequest, previewFolder: folder, onScope, onCompose: selected => void compose(selected), onClosePreview: closePreview, onShowPlans: showPlans, registerSave, onReturnToProject: () => void switchTo(null), draftLabel,
-    batchExport: selectedIds.length ? { projectId, title: projectTitle, ordinals: (plans?.plans ?? []).flatMap((plan, index) => selectedPlans.has(plan.id) ? [index + 1] : []), onExport: exportSelected } : undefined };
+  const bridge: StructureEditorBridge = { ownerId: projectId, scope, rightWidth: plansVisible ? 350 : 0, preview, previewRequest, previewFolder: folder, onScope, onCompose: selected => void compose(selected), onClosePreview: closePreview, onShowPlans: showPlans, registerSave, onReturnToProject: () => void switchTo(null), onAnalysisUpdated: () => { const selected = currentScope.current; if (selected) void refreshPlans(selected); }, draftLabel,
+    batchExport: selectedIds.length ? { projectId, title: projectTitle, ordinals: (plans?.plans ?? []).flatMap((plan, index) => selectedIds.includes(plan.id) ? [index + 1] : []), onExport: exportSelected } : undefined };
   return <div data-active-structure-draft={active} inert={!!confirmation}>
     {workspace && <div inert={switching} aria-busy={switching}><ProjectView key={active} projectId={active} onProject={onProject} onLeave={onLeave} structure={bridge} /></div>}
     {!workspace && <div className="p-6 text-[13px]">正在读取工程与个人草稿…</div>}
     <aside aria-label={localPlans ? '本机结构方案' : '公共结构方案'} className={`fixed z-40 flex flex-col rounded-xl border border-[var(--border)] bg-[var(--dock-pane)] text-[var(--text)] shadow-lg transition-all duration-200 ${plansVisible ? 'opacity-100' : 'pointer-events-none translate-x-4 opacity-0'}`} style={{ top: 40, right: 8, bottom: 8, width: 334 }} aria-hidden={!plansVisible} inert={!plansVisible}>
       <div className="flex items-center gap-2 border-b border-[var(--border)] p-3"><ListVideo size={16} /><strong className="flex-1 text-[13px]">{planTitle}</strong><button aria-label="收起方案" className={button} onClick={() => setPlansOpen(false)}><X size={14} /></button></div>
       <div className="border-b border-[var(--border)] p-3 text-[12px]">
-        <p>{draftLabel ? `下方编辑：${draftLabel}` : '下方编辑：已有成片'}</p>
-        {workspace && workspace.drafts.length > 0 && <div className="mt-2 flex gap-1"><select aria-label="我的独立草稿" className="min-w-0 flex-1 rounded bg-[var(--surface)] p-1" value={active} disabled={switching} onChange={e => void switchTo(e.target.value)}><option value={projectId}>已有成片</option>{workspace.drafts.map(draft => <option key={draft.projectId} value={draft.projectId}>{structureDraftLabel(draft.planId, plans?.plans ?? [])}</option>)}</select>{activeDraft && <button className={button} disabled={switching} onClick={() => void switchTo(null)}>返回已有成片</button>}</div>}
-        <p className="mt-2 text-[11px] text-[var(--text-muted)]">预览不改成片 · 编辑副本打开自己的独立草稿</p>
+        {workspace && workspace.drafts.length > 0 ? <div className="flex items-center gap-1"><span className="shrink-0 text-[11px] text-[var(--text-muted)]">当前编辑</span><select aria-label="我的独立草稿" className="min-w-0 flex-1 rounded bg-[var(--surface)] p-1" value={active} disabled={switching} onChange={e => void switchTo(e.target.value)}><option value={projectId}>已有成片</option>{workspace.drafts.map(draft => <option key={draft.projectId} value={draft.projectId}>{structureDraftLabel(draft.planId, plans?.plans ?? [])}</option>)}</select>{activeDraft && <button className={button} disabled={switching} onClick={() => void switchTo(null)}>返回已有成片</button>}</div> : <p className="text-[11px] text-[var(--text-muted)]">当前编辑：已有成片</p>}
       </div>
       <div className="p-3 text-[12px]">
         {!scope ? <p>先在左侧选择一次商品讲解</p> : <>
-          <p className="text-[var(--text-muted)]">本次讲解 {scope.startMs != null ? `${sourceTime(scope.startMs)}–${sourceTime(scope.endMs ?? 0)}` : ''}</p>
-          {localPlans && <p className="mt-1 text-[11px] text-[var(--text-muted)]">复用已保存的本机分析 · 方案仅保存在本工程，尚未共享</p>}
           {plans?.status === 'unavailable' && <p role="alert" className="mt-2 text-[var(--warn)]">暂时不能拼结构：{plans.issues?.[0]?.message ?? '当前话术信息不足，请核对已有分析'}</p>}
-          <p className="mt-1">{plans?.generationMethod === 'ai' ? `AI 方案 ${plans.plans.length} 条${plans.canContinue ? ' · 本轮尚未梳理完' : ''}` : `已保存 ${plans?.plans.length ?? 0} 条方案`}</p>
-          <p className="mt-1 text-[11px] text-[var(--text-muted)]">{plans?.plans.length && plans.plans.every(plan => plan.speed === 1) ? '30～50 秒供参考，按原速保留完整表达；请预览检查衔接' : '1.3 倍速成片 30～40 秒，保留完整表达；请预览检查衔接'}</p>
-          {plans && <details className="mt-1 text-[11px] text-[var(--text-muted)]" aria-label="方案复用的音画核查"><summary className="cursor-pointer transition-colors hover:text-[var(--accent)]">{mediaReview.summary}</summary><div className="mt-1 max-h-36 overflow-auto animate-in fade-in slide-in-from-top-1 duration-150">
-            {mediaReview.originLabel && <p>{mediaReview.originLabel}</p>}{mediaReview.range && <p>{mediaReview.rangeLabel}：{mediaReview.range}</p>}<p>{mediaReview.note}</p>
-            {mediaReview.segments.map((segment, index) => <div key={index} className="mt-2"><p>{segment.range}</p><p>{segment.visual}</p><p>{segment.audio}</p>{segment.issues.map((issue, i) => <p key={i} className="text-[var(--warn)]">{issue}</p>)}</div>)}
-            {mediaReview.issues.map((issue, index) => <p key={index} className="mt-1 text-[var(--warn)]">{issue}</p>)}
-          </div></details>}
-          {plans && <ProductVisualReviewDetails review={plans.visualReview} origin={plans.visualReviewOrigin ?? 'shared'} stale={plans.visualReviewStale} label="方案复用的 AI 看图核查" />}
-          {ruleOptions.length > 1 && <label className="mt-2 flex items-center gap-2 text-[11px]">方案版本<select aria-label="方案版本" className="min-w-0 flex-1 rounded bg-[var(--surface)] p-1 transition" value={rulesVersion ?? ''} disabled={working || switching} onChange={event => void selectRules(event.target.value)}>{ruleOptions.map(version => <option key={version} value={version}>{version === 'ai-structure-plans-v2' ? '新版 · 完整小段 · 1.3倍' : version === 'ai-structure-plans-v1' ? '旧版 · 完整话术 · 原速' : version}</option>)}</select></label>}
-          {plans?.status === 'complete' && rulesVersion && plans.currentRulesVersion && rulesVersion !== plans.currentRulesVersion && <button className={`${button} mt-2`} disabled={working || switching} onClick={() => void compose(scope, plans.currentRulesVersion, true)}>按新版规则拼一版</button>}
-          {(plans?.status === 'idle' || plans?.canContinue) && <button className={`${button} mt-2`} disabled={working} onClick={() => void compose(scope)}>{working ? '正在读取…' : plans.canContinue ? '继续 AI 拼结构' : '拼结构'}</button>}
+          <p className="font-medium">{groups.length} 个开头 · {plans?.plans.length ?? 0} 条方案</p>
+          {plans?.coverage && <div role="status" aria-label="开头覆盖进度" className="mt-1 text-[11px] text-[var(--text-muted)] animate-in fade-in duration-150">{['ai-structure-plans-v5', 'ai-structure-plans-v6', 'ai-structure-plans-v7', 'ai-structure-plans-v8'].includes(plans.version ?? '') ? <><p>本轮已处理 {plans.coverage.total - plans.coverage.remainingIds.length}/{plans.coverage.total} 个开头</p>{!!plans.coverage.remainingIds.length && <p className="mt-1">待补充 {plans.coverage.remainingIds.length} 个开头</p>}{plans.coverage.openingCovered != null && plans.coverage.openingCovered < plans.coverage.total && <p className="mt-1">其中 {plans.coverage.total - plans.coverage.openingCovered} 个开头暂未生成可用方案</p>}</> : <><p>开头已覆盖 {plans.coverage.covered}/{plans.coverage.total}</p>{plans.coverage.remainingIds.length > 0 ? <p className="mt-1">还有 {plans.coverage.remainingIds.length} 个开头未生成有效方案</p> : plans.coverage.total > 0 && <p className="mt-1">全部可用开头已有有效方案</p>}</>}</div>}
+          {needsStructureGeneration(plans) && <button className={`${button} mt-2 w-full border-transparent bg-[var(--accent)] text-[var(--accent-text,#fff)] hover:brightness-110`} disabled={working || switching} onClick={() => void compose(scope)}>{working ? '正在读取…' : plans?.status === 'idle' ? '拼结构' : '继续拼结构'}</button>}
           {plans?.status === 'busy' && <p className="mt-2">公共任务正在处理或等待恢复，未重复生成</p>}
           {plans?.status === 'running' && <p className="mt-2 text-[var(--text-muted)]">AI 正在拼结构，返回后自动保存；切换或重开只读取进度，不重复发送</p>}
-          {plans?.generationMethod === 'ai' && plans.complete && <p className="mt-1 text-[11px] text-[var(--text-muted)]">已保存 AI 返回的有效方案，未宣称穷尽所有组合</p>}
-          {plans?.status === 'failed' && <p role="alert" className="mt-2 text-[var(--warn)]">本次请求未完成，请核查下方原因；没有自动重发</p>}
+          {plans?.status === 'failed' && <p role="alert" className="mt-2 text-[var(--warn)]">本次生成失败，已有方案已保留</p>}
           {plans?.status === 'failed' && plans.recoverable && <button className={`${button} mt-2`} disabled={working} onClick={async () => { const selected = scope, version = currentRules.current, token = ++generation.current; setWorking(true); try { const next = await api.recoverStructurePlans(projectId, selected, version); if (token === generation.current) acceptPlans(next, version); } catch (e) { if (token === generation.current) setError(String(e)); } finally { if (token === generation.current) setWorking(false); } }}>恢复已保存返回</button>}
           {plans?.status === 'publish-pending' && <p className="mt-2 text-[var(--warn)]">本机结果已保留，公共保存尚未完成；补存只保存已有结果</p>}
           {plans?.status === 'publish-pending' && <button className={`${button} mt-2`} disabled={working} onClick={async () => { const selected = scope, token = ++generation.current; setWorking(true); try { await api.publishStructurePlans(projectId, selected.sourceId, plans.taskKey!); if (token === generation.current) await refreshPlans(selected); } catch (e) { if (token === generation.current) setError(String(e)); } finally { if (token === generation.current) setWorking(false); } }}>补存已有公共结果</button>}
-          <button className={`${button} ml-2 mt-2`} disabled={working} onClick={() => void refreshPlans(scope)}>刷新读取</button>
         </>}
-        {detailIssues.length ? <details className="mt-2" open={!plans?.plans.length}><summary className="cursor-pointer">需核对 {detailIssues.length} 项</summary><div className="max-h-44 overflow-auto">{detailIssues.map((issue, index) => <p key={index} className="mt-1 text-[var(--warn)]">{issue.startMs != null ? `${sourceTime(issue.startMs)}–${sourceTime(issue.endMs ?? issue.startMs)} ` : ''}{issue.message}{issue.text && <span className="block text-[var(--text-muted)]">原话：{issue.text}</span>}</p>)}</div><p className="mt-2 text-[var(--text-muted)]">沿用已有话术记录；缺信息不会自动重新分析</p></details> : null}
         {error && <p role="alert" className="mt-2 text-[var(--warn)]">{error}</p>}
-        {groups.length > 1 && <select aria-label="按核心卖点分组" className="mt-2 w-full rounded bg-[var(--surface)] p-1" value={group} onChange={e => setGroup(e.target.value)}><option value="">全部方案 · {plans?.plans.length} 条</option>{groups.map(item => <option key={item.key} value={item.key}>{structureGroupLabel(item.plans[0]!)} · {item.plans.length} 条</option>)}</select>}
+        {(error || ['failed', 'unavailable', 'publish-pending'].includes(plans?.status ?? '')) && <button className={`${button} mt-2`} onClick={() => requestFeedback([error || '结构方案未完成', ...(plans?.issues ?? []).map(issue => issue.message)].join('\n'), 'structure')}>反馈问题</button>}
+        {scope && <div className="mt-2 flex items-center justify-between gap-2 text-[11px] text-[var(--text-muted)]">
+          <span>{plans?.plans.length && plans.plans.every(plan => plan.speed === 1) ? '原速 · 保留完整表达' : '1.3 倍速 · 30～40 秒'}</span>
+          <button className={button} disabled={working} onClick={() => void refreshPlans(scope)}>刷新读取</button>
+        </div>}
+        {openingTypes.length > 1 && <select aria-label="按开头类型筛选" className="mt-2 w-full rounded bg-[var(--surface)] p-1 transition" value={openingTypeFilter} onChange={event => setOpeningTypeFilter(event.target.value)}><option value="">全部开头 · {groups.length} 组</option>{openingTypes.map(type => <option key={type} value={type}>{type} · {groups.filter(group => structurePlanCard(group.plans[0]!).openingType === type).length} 组</option>)}</select>}
       </div>
       {!!plans?.plans.length && <div className="flex shrink-0 items-center gap-2 px-3 pb-2 text-[11px]">
-        <button className={button} disabled={switching || plans.status !== 'complete'} onClick={() => setSelectedPlans(new Set(plans.plans.map(plan => plan.id)))}>全选全部方案</button>
-        {group && <button className={button} disabled={switching || plans.status !== 'complete'} onClick={() => setSelectedPlans(previous => new Set([...previous, ...shown.map(plan => plan.id)]))}>全选当前分组</button>}
+        <button className={button} disabled={switching || !usablePlans.length} onClick={() => setSelectedPlans(new Set(usablePlans.map(plan => plan.id)))}>全选全部方案</button>
+        {openingTypeFilter && <button className={button} disabled={switching || !usableShown.length} onClick={() => setSelectedPlans(previous => new Set([...previous, ...usableShown.map(plan => plan.id)]))}>全选筛选结果</button>}
         <button className={button} disabled={switching || !selectedIds.length} onClick={() => setSelectedPlans(new Set())}>清空选择</button>
       </div>}
       <div ref={listContainer} className="min-h-0 flex-1 px-3 pb-3">
-        <VirtualList label="结构方案列表" items={shown} itemKey={plan => plan.id} estimateHeight={() => 264} gap={10} maxHeight={listHeight} renderItem={plan => {
+        <VirtualList label="结构方案列表" items={rows} itemKey={row => row.key} estimateHeight={row => row.kind === 'opening' ? 62 : 190} gap={8} maxHeight={listHeight} renderItem={row => {
+          if (row.kind === 'opening') {
+            const group = row.group, card = structurePlanCard(group.plans[0]!), expanded = expandedOpenings.has(group.key);
+            const distinctCount = plans?.coverage?.perOpening?.find(item => item.openingId === group.openingId)?.distinctCount;
+            return <button type="button" data-opening-group={group.openingId ?? group.key} aria-label={`${expanded ? '收起' : '展开'}开头 ${card.title}`} aria-expanded={expanded} title={card.fullHook} className="flex w-full items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--bg-hover)] p-2.5 text-left transition duration-150 hover:border-[var(--accent)] active:scale-[0.99] animate-in fade-in slide-in-from-top-1" onClick={() => setExpandedOpenings(previous => { const next = new Set(previous); if (next.has(group.key)) next.delete(group.key); else next.add(group.key); return next; })}><ChevronDown size={14} className={`shrink-0 transition-transform duration-150 ${expanded ? '' : '-rotate-90'}`} /><strong className="min-w-0 flex-1 line-clamp-2 text-[12px] leading-4">{card.title}</strong><span className="shrink-0 text-[11px] tabular-nums text-[var(--text-muted)]">{distinctCount != null ? `${distinctCount} 种结构` : `${group.plans.length} 条`}</span></button>;
+          }
+          const plan = row.plan;
           const number = (plans?.plans.findIndex(item => item.id === plan.id) ?? 0) + 1;
           const card = structurePlanCard(plan), selected = preview?.id === plan.id;
-          const chip = 'rounded-sm border border-[var(--border)] px-1 py-0.5 text-[9px] leading-none text-[var(--text-muted)]';
-          return <article data-structure-plan={plan.id} className={`flex min-h-[228px] flex-col rounded-lg border p-3 transition-all duration-200 animate-in fade-in slide-in-from-bottom-1 ${selected ? 'border-[var(--accent)]' : 'border-[var(--border)] hover:border-[var(--text-dim)]'}`} style={{ background: selected ? 'color-mix(in srgb, var(--accent) 12%, var(--dock-pane))' : 'var(--surface)' }}>
+          return <article data-structure-plan={plan.id} className={`ml-3 flex min-h-[176px] flex-col rounded-lg border p-2.5 transition-all duration-200 animate-in fade-in slide-in-from-top-1 ${selected ? 'border-[var(--accent)]' : 'border-[var(--border)] hover:border-[var(--text-dim)]'}`} style={{ background: selected ? 'color-mix(in srgb, var(--accent) 12%, var(--dock-pane))' : 'var(--surface)' }}>
             <label className="mb-2 flex cursor-pointer items-center gap-2 text-[11px]">
-              <input type="checkbox" aria-label={`选择方案 ${number} 导出`} checked={selectedPlans.has(plan.id)} disabled={switching || plans?.status !== 'complete'} onChange={() => setSelectedPlans(previous => toggleStructurePlan(previous, plan.id))} className="h-3.5 w-3.5 accent-[var(--accent)] transition" />
-              选择导出 · 方案 {String(number).padStart(3, '0')}
+              <input type="checkbox" aria-label={`选择方案 ${number} 导出`} checked={selectedIds.includes(plan.id)} disabled={switching || !isSavedStructurePlanUsable(plans, plan.id)} onChange={() => setSelectedPlans(previous => toggleStructurePlan(previous, plan.id))} className="h-3.5 w-3.5 accent-[var(--accent)] transition" />
+              <span className="flex-1">方案 {String(number).padStart(3, '0')}</span><span className="font-semibold tabular-nums">{card.durationLabel}</span>
             </label>
-            <button aria-label={`查看方案 ${planLetter(number - 1)} 预览`} aria-pressed={selected} className="w-full rounded text-left transition duration-150 active:scale-[0.99]" onClick={() => openPreview(plan)}>
-              <div className="flex items-center gap-2">
-                <span className={`flex h-5 min-w-5 items-center justify-center rounded border px-1 text-[10px] ${selected ? 'border-[var(--accent)] bg-[var(--bg-hover)] text-[var(--accent)]' : 'border-[var(--border)] text-[var(--text-muted)]'}`}>{planLetter(number - 1)}</span>
-                <strong className="min-w-0 flex-1 line-clamp-2 text-[12px] leading-4" title={card.title}>{card.title}</strong>
-                <span className="shrink-0 text-[11px] font-semibold tabular-nums">{card.durationLabel}</span>
-              </div>
-              <p className="mt-1.5 line-clamp-2 text-[10px] leading-4 text-[var(--text-muted)]" title={card.fullCoreQuotes}>{card.subtitle}</p>
-              <p className="mt-1 truncate text-[10px] leading-4 text-[var(--text-muted)]" title={card.fullHook}>{card.hook}</p>
-            </button>
+            <p className="line-clamp-2 text-[11px] leading-4 text-[var(--text-muted)]" title={card.fullCoreQuotes}>{card.subtitle}</p>
             <div aria-label="方案结构" className="mt-2.5 flex gap-1 overflow-x-auto pb-0.5">
               {card.blocks.map((block, index) => <button type="button" key={index} aria-label={`预览方案 ${number} 第 ${index + 1} 段 ${block.fullLabel}`} title={`点击预览 · ${block.fullLabel} · ${(block.durationMs / 1000).toFixed(1)}秒`} onClick={() => openPreview(plan, index)} className="flex h-6 min-w-[40px] items-center justify-center rounded-sm px-1 text-[9px] text-[var(--text-muted)] transition duration-150 hover:brightness-125 active:scale-95 focus-visible:outline-2 focus-visible:outline-[var(--accent)]" style={{ flexGrow: block.durationMs, flexBasis: 0, background: `color-mix(in srgb, ${block.color} 23%, transparent)` }}>{block.label}</button>)}
             </div>
-            <p className="mt-2 line-clamp-2 min-h-8 text-[10px] leading-4 text-[var(--text-muted)]" title={card.summary}>{card.summary}</p>
-            <div className="mt-2 flex flex-wrap items-center gap-1"><span className={chip}>{card.coreCount}个卖点</span><span className={chip}>{card.speedLabel}</span><span className={chip} style={!card.durationInRange ? { color: 'var(--warn)' } : undefined}>{card.durationHint}</span></div>
+            {!card.durationInRange && <p className="mt-1 text-[10px] text-[var(--warn)]">{card.durationHint}</p>}
             <details className="group mt-1.5 text-[10px] text-[var(--text-muted)]">
               <summary className="cursor-pointer rounded py-0.5 transition hover:text-[var(--text)]">完整原话与来源 · {plan.clips.length}段</summary>
-              <div className="mt-1 max-h-60 overflow-auto border-t border-[var(--border)] pb-1 animate-in fade-in slide-in-from-top-1 duration-150">{plan.clips.map((clip, index) => <button type="button" key={index} aria-label={`预览原话 ${number} 第 ${index + 1} 段`} title="点击跳到这段原片" onClick={() => openPreview(plan, index)} className="mt-2 block w-full rounded text-left text-[11px] leading-relaxed transition duration-150 hover:bg-[var(--bg-hover)] active:scale-[0.99] focus-visible:outline-2 focus-visible:outline-[var(--accent)]"><span className="mb-0.5 block text-[var(--text-dim)]">{clip.roles.map(structureRole).join('/')} · {sourceTime(clip.startMs)}–{sourceTime(clip.endMs)}{clip.assetPath ? ` · ${clip.assetPath}` : ''}</span>{clip.text}</button>)}</div>
+              <div className="mt-1 max-h-60 overflow-auto border-t border-[var(--border)] pb-1 animate-in fade-in slide-in-from-top-1 duration-150"><p className="mt-1">{card.coreCount} 个卖点 · {card.speedLabel} · {card.summary}</p>{plan.clips.map((clip, index) => <button type="button" key={index} aria-label={`预览原话 ${number} 第 ${index + 1} 段`} title="点击跳到这段原片" onClick={() => openPreview(plan, index)} className="mt-2 block w-full rounded text-left text-[11px] leading-relaxed transition duration-150 hover:bg-[var(--bg-hover)] active:scale-[0.99] focus-visible:outline-2 focus-visible:outline-[var(--accent)]"><span className="mb-0.5 block text-[var(--text-dim)]">{clip.roles.map(structureRole).join('/')} · {sourceTime(clip.startMs)}–{sourceTime(clip.endMs)}{clip.assetPath ? ` · ${clip.assetPath}` : ''}</span>{clip.text}</button>)}</div>
             </details>
             <div className="mt-auto grid grid-cols-2 gap-2 pt-2">
               <button aria-label={`预览方案 ${number}`} aria-pressed={selected} className={`${button} flex h-7 items-center justify-center gap-1 text-[10px]`} onClick={() => openPreview(plan)}>{selected ? <><span className="h-1 w-1 rounded-full bg-[var(--accent)]" />正在预览</> : <><Play size={11} />预览方案</>}</button>
-              <button className={`${button} flex h-7 items-center justify-center gap-1 border-transparent bg-[var(--accent)] text-[10px] font-medium text-[var(--accent-text,#fff)] hover:brightness-110`} disabled={switching || plans?.status !== 'complete'} onClick={() => void edit(plan)}>编辑副本<ArrowUpRight size={11} /></button>
+              <button className={`${button} flex h-7 items-center justify-center gap-1 border-transparent bg-[var(--accent)] text-[10px] font-medium text-[var(--accent-text,#fff)] hover:brightness-110`} disabled={switching || !isSavedStructurePlanUsable(plans, plan.id)} onClick={() => void edit(plan)}>编辑副本<ArrowUpRight size={11} /></button>
             </div>
           </article>;
         }} />

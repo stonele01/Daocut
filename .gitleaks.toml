@@ -11,3 +11,10 @@ condition = "AND"
 paths = ['''(^|/)packages/daocut/studio/server/(providers/)?[\w-]+\.test\.mjs$''']
 regexTarget = "secret"
 regexes = ['''0123456789|12345678|123456|abcdef1234|ABCDEFGH9876''', '''^dGhlIHNhbXBsZSBub25jZQ==$''']
+
+[[allowlists]]
+description = "exact synthetic key used to assert that desktop feedback strips credentials; never a provider credential"
+condition = "AND"
+paths = ['''(^|/)apps/desktop/src/company-client\.test\.mjs$''']
+regexTarget = "secret"
+regexes = ['''^sk-syntheticSecret0123456789012345$''']

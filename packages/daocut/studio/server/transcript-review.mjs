@@ -92,10 +92,8 @@ function materialize(loc, data, current) {
   const resolutions = Object.fromEntries(Object.entries(data.saved.resolutions).map(([id, value]) => [id, value.cues]));
   const cues = resolveAudioSeams(data.inspection, resolutions);
   const unalignedRanges = current.seams.filter(seam => seam.status === 'confirmed').map(({ startMs, endMs }) => ({ startMs, endMs }));
-  const words = data.manifest.segments.flatMap(segment => (segment.words ?? []).map(word => ({ text: word.token, startMs: Math.round(word.start * 1000) + segment.startMs, endMs: Math.round(word.end * 1000) + segment.startMs }))
-    .filter(word => (word.startMs + word.endMs) / 2 >= segment.coreStartMs && (word.startMs + word.endMs) / 2 < segment.coreEndMs))
-    .filter(word => !unalignedRanges.some(range => overlap(word, range)));
-  return { sourceId: loc.sourceId, text: cues.map(cue => cue.text).join(' '), cues, words, unalignedRanges, cached: true, localReconciled: true, reviewRevision: data.saved.revision };
+  const words = data.inspection.words.filter(word => !unalignedRanges.some(range => overlap(word, range)));
+  return { sourceId: loc.sourceId, text: cues.map(cue => cue.text).join(' '), cues, words, unalignedRanges, cached: true, localReconciled: unalignedRanges.length > 0, reviewRevision: data.saved.revision };
 }
 
 export async function saveTranscriptReview(root, body) {

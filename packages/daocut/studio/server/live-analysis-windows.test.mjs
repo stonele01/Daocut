@@ -46,6 +46,78 @@ const modelOutput = input => ({ candidates: JSON.parse(input).cues.flatMap((cue,
   ...(cue.text.startsWith('1') ? [{ firstCue: i, lastCue: i, tags: ['痛点'], details }] : []),
 ]), issues: [] });
 
+test('indexed input migration preserves the unnumbered paid receipt and its exact old request', async t => {
+  const c = await setup(t); let calls = 0;
+  const client = createDeepSeekTextClient({ getConfig: async () => ({ baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', apiKey: 'synthetic' }), fetch: async (_url, options) => {
+    calls++;
+    const input = JSON.parse(options.body).input[1].content;
+    assert.equal(JSON.parse(input).cueIndexing, undefined);
+    assert.ok(JSON.parse(input).cues.every(cue => cue.index === undefined));
+    return { ok: true, status: 200, json: async () => ({ id: 'legacy-receipt', status: 'completed', output: [{ content: [{ type: 'output_text', text: JSON.stringify(modelOutput(input)) }] }] }) };
+  } });
+  const options = { ...c.options, structureWindowPolicy: { maxInputBytes: 100000, contextCues: 0 } };
+  const old = createLiveAnalysis({ ...options, structureCueEncoding: textStructureModule.LEGACY_TEXT_CUE_ENCODING, modelClient: async req => { await client(req); throw Object.assign(Error('saved before interruption'), { code: 'MODEL_NETWORK' }); } });
+  await request(old, c.root, 'POST'); const failed = await finish(old, c.root);
+  const journal = join(c.root, '.film/live-analysis', `${createHash('sha256').update('s').digest('hex')}.json`);
+  const saved = JSON.parse(await readFile(journal, 'utf8'));
+  delete saved.attempts[failed.analysis.attemptId].cueEncoding; // Actual pre-fix journals lack this field.
+  await writeFile(journal, JSON.stringify(saved));
+  const receiptBefore = saved.attempts[failed.analysis.attemptId].windows[0].receipt;
+  const reopened = createLiveAnalysis({ ...options, modelClient: () => assert.fail('migration must recover the paid reply offline') });
+  await request(reopened, c.root, 'POST'); const done = await finish(reopened, c.root);
+  assert.equal(done.analysis.status, 'complete'); assert.equal(calls, 1);
+  assert.equal(done.analysis.cacheIdentity, failed.analysis.cacheIdentity);
+  assert.deepEqual(JSON.parse(await readFile(journal, 'utf8')).attempts[done.analysis.attemptId].windows[0].receipt, receiptBefore);
+  const contract = await reopened.existingSharedContract(c.root, 's', { intervalId: 'a1', productId: 'a' });
+  assert.equal(contract.cueEncoding, undefined, 'old publication keeps its original identity');
+  assert.equal((await reopened.sharedContract()).cueEncoding, textStructureModule.TEXT_CUE_ENCODING);
+  let newInput;
+  const fresh = createLiveAnalysis({ ...options, modelClient: async ({ input }) => { newInput = JSON.parse(input); return modelOutput(input); } });
+  await request(fresh, c.root, 'POST', { rerun: true }); const newRun = await finish(fresh, c.root);
+  assert.equal(newRun.analysis.status, 'complete');
+  assert.notEqual(newRun.analysis.cacheIdentity, done.analysis.cacheIdentity);
+  assert.deepEqual(newInput.cues.map(cue => cue.index), cues.map((_, index) => index));
+  assert.equal(newInput.cueIndexing.base, 0);
+});
+
+test('a reviewed first-window checkpoint resumes without repeating its request or claiming the missing window is complete', async t => {
+  const c = await setup(t), legacy = textStructureModule.LEGACY_TEXT_CUE_ENCODING;
+  const legacyArgs = { ...args, cueEncoding: legacy }, windows = textStructureWindows(legacyArgs);
+  assert.ok(windows.length > 1);
+  const old = createLiveAnalysis({ ...c.options, structureCueEncoding: legacy, modelClient: async () => { throw Object.assign(Error('rejected saved response fixture'), { code: 'MODEL_CONSTRAINT' }); } });
+  await request(old, c.root, 'POST'); const failed = await finish(old, c.root);
+  const journal = join(c.root, '.film/live-analysis', `${createHash('sha256').update('s').digest('hex')}.json`);
+  const saved = JSON.parse(await readFile(journal, 'utf8')), entry = saved.attempts[failed.analysis.attemptId].windows[0];
+  delete saved.attempts[failed.analysis.attemptId].cueEncoding;
+  const windowArgs = { ...legacyArgs, cues: windows[0].cues };
+  const req = textStructureModule.textStructureRequest(windowArgs);
+  const original = { schema: 'complete-speech-v1', candidates: [{ firstCue: 1, lastCue: windows[0].cues.length, tags: ['卖点'] }], issues: [] };
+  const rawText = JSON.stringify(original);
+  entry.receipt = { provider: 'deepseek', status: 'completed', httpStatus: 200, responseVersion: 'deepseek-text-receipt-v1', rawText,
+    rawTextSha256: createHash('sha256').update(rawText).digest('hex'), inputSha256: createHash('sha256').update(JSON.stringify([req.system, req.input])).digest('hex') };
+  const recovered = textStructureModule.recoverDeepSeekTextResponse(entry.receipt, req);
+  const corrected = { ...recovered, candidates: recovered.candidates.map(candidate => ({ ...candidate, firstCue: candidate.firstCue - 1, lastCue: candidate.lastCue - 1 })) };
+  entry.output = await textStructureModule.analyzeTextStructure({ ...windowArgs, client: async () => corrected });
+  for (const candidate of entry.output.candidates) candidate.cueRange = candidate.cueRange.map(index => index + 1);
+  entry.status = 'complete'; delete entry.error;
+  entry.indexCorrection = { offset: -1, reviewed: true, rawTextSha256: entry.receipt.rawTextSha256 };
+  await writeFile(journal, JSON.stringify(saved));
+  let missingCalls = 0;
+  const reopened = createLiveAnalysis({ ...c.options, modelClient: async ({ input }) => {
+    missingCalls++;
+    assert.equal(JSON.parse(input).cues[0].text, windows[1].cues[0].text, 'only the previously unrequested window may reach the model');
+    throw Object.assign(Error('synthetic stop at the missing window'), { code: 'MODEL_NETWORK' });
+  } });
+  await request(reopened, c.root); assert.equal(missingCalls, 0, 'reading a recovered checkpoint sends nothing');
+  await request(reopened, c.root, 'POST'); const pending = await finish(reopened, c.root);
+  assert.equal(missingCalls, 1); assert.equal(pending.analysis.status, 'failed');
+  assert.equal(pending.analysis.progress.completedWindows, 1);
+  assert.equal((await readProductAnalysis(c.root)).analysis.candidates.length, 0, 'partial recovery is not published as full analysis');
+  const final = JSON.parse(await readFile(journal, 'utf8')).attempts[failed.analysis.attemptId].windows[0];
+  assert.equal(final.requests, 1); assert.equal(final.receipt.rawText, rawText);
+  assert.deepEqual(final.indexCorrection, entry.indexCorrection);
+});
+
 test('structure windows use complete cue boundaries, bounded bytes and overlapping context', () => {
   const windows = textStructureWindows(args);
   assert.ok(windows.length > 1);
@@ -279,8 +351,8 @@ test('approved full prompt resumes old windows with their previous compatible pr
   assert.equal(await readFile(join(c.root, 'film.html'), 'utf8'), 'untouched film fixture');
 });
 
-test('full prompt migration recovers a completed previous-prompt receipt without any additional request', async t => {
-  const c = await setup(t), previous = textStructureModule.PREVIOUS_TEXT_STRUCTURE_PROMPT;
+for (const promptName of ['PREVIOUS_TEXT_STRUCTURE_PROMPT', 'PREVIOUS_FULL_TEXT_STRUCTURE_PROMPT']) test(`prompt migration recovers ${promptName} receipt without any additional request`, async t => {
+  const c = await setup(t), previous = textStructureModule[promptName];
   assert.equal(typeof previous, 'string'); assert.notEqual(previous, TEXT_STRUCTURE_PROMPT);
   let calls = 0;
   const client = createDeepSeekTextClient({ getConfig: async () => ({ baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', apiKey: 'synthetic' }), fetch: async (_url, options) => {

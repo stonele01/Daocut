@@ -6,8 +6,8 @@ import { join, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { filmHtml, readFilmFile } from '../../src/film-doc.mjs';
 import { createAiStructurePlans } from './ai-structure-plans.mjs';
-import { AI_STRUCTURE_VERSION, PREVIOUS_AI_STRUCTURE_VERSION, PREVIOUS_AI_STRUCTURE_PROMPT,
-  createAiStructureRequest, validateAiStructureResponse } from './ai-structure.mjs';
+import { AI_STRUCTURE_VERSION, PREVIOUS_AI_STRUCTURE_VERSION,
+  aiStructurePrompt, createAiStructureRequest, validateAiStructureResponse } from './ai-structure.mjs';
 import { inspectAiCompositionInput } from './structure-composition.mjs';
 import { sharedHash } from './shared-analysis.mjs';
 import { createStructureWorkspace } from './structure-workspace.mjs';
@@ -19,7 +19,7 @@ const readJson = async file => JSON.parse(await readFile(file, 'utf8'));
 const register = async path => ({ path, id: (await readFile(join(path, '.film/id'), 'utf8')).trim() });
 const filmClips = html => readFilmFile(html).value.tracks.flatMap(track => track.clips);
 
-async function fixture(t) {
+async function fixture(t, oldVersion = PREVIOUS_AI_STRUCTURE_VERSION) {
   await mkdir(base, { recursive: true });
   const dir = await mkdtemp(join(base, 'case-')), root = join(dir, 'project'), output = join(dir, 'exports');
   await mkdir(join(root, '.film'), { recursive: true }); await mkdir(join(root, 'assets'));
@@ -29,7 +29,7 @@ async function fixture(t) {
   const roles = ['pain', 'core', 'purchase'], tags = ['痛点', '卖点', '行动指令'];
   const cues = texts.map((text, i) => ({ text, startMs: i * 15000, endMs: i * 15000 + 13000 }));
   const candidates = cues.map((cue, i) => ({ ...scope, ...cue, id: `candidate-${i}`, cueRange: [i, i], tags: [tags[i]],
-    details: { composition: { contract: 'complete-speech-v1', status: 'confirmed', roles: [roles[i]], requires: [], excludes: [], conditions: {} } } }));
+    details: { composition: { contract: 'complete-speech-v1', status: 'confirmed', openingPolicy: 'curated-openings-v1', ...(roles[i] !== 'purchase' ? { opening: { group: String(i), followup: texts[i] } } : {}), roles: roles[i] === 'core' ? ['core','intro','price'] : [roles[i]], ...(roles[i] === 'core' ? {price:{kind:'current',evidence:[0]}} : {}), requires: [], excludes: [], conditions: {} } } }));
   const source = { id: 's', assetPath: 'assets/synthetic.mp4', durationMs: scope.endMs };
   const material = { source, context: scope, scope, visibility: 'local', analysisVersion: 'saved-analysis', semanticVersion: 'saved-complete-speech',
     engineInput: { scope, sourceIdentity: 'synthetic-source', candidates, cues }, issues: [] };
@@ -40,21 +40,24 @@ async function fixture(t) {
   await writeFile(join(root, 'film.html'), filmHtml({ stage: { w: 720, h: 1280 }, tracks: [{ clips: [{ id: 'existing-finished-film', src: source.assetPath, time: [0, 5], speed: 1 }] }] }));
   await writeFile(join(root, '.film/product-analysis.json'), JSON.stringify({ version: 1, sources: [source],
     products: [{ id: 'p', name: '模拟商品', sourceIds: ['s'] }], intervals: [{ ...scope, id: scope.intervalId }], candidates }));
-  const oldKey = sharedHash({ kind: PREVIOUS_AI_STRUCTURE_VERSION, prompt: PREVIOUS_AI_STRUCTURE_PROMPT,
-    analysis: material.analysisVersion, semantic: material.semanticVersion, input: inspectAiCompositionInput(material.engineInput).inputHash, visibility: material.visibility });
-  const response = { schema: PREVIOUS_AI_STRUCTURE_VERSION, plans: [[0, 1, 2]], complete: true, issues: [] };
-  const result = validateAiStructureResponse(material, response, { expectedVersion: PREVIOUS_AI_STRUCTURE_VERSION });
+  const oldInputHash = inspectAiCompositionInput(material.engineInput).inputHash;
+  const oldKey = sharedHash({ kind: oldVersion, prompt: aiStructurePrompt(oldVersion),
+    analysis: material.analysisVersion, semantic: material.semanticVersion,
+    input: oldVersion === PREVIOUS_AI_STRUCTURE_VERSION ? oldInputHash : sharedHash([oldVersion, 1.3, oldInputHash]), visibility: material.visibility });
+  const response = { schema: oldVersion, plans: oldVersion === PREVIOUS_AI_STRUCTURE_VERSION ? [[0, 1, 2]]
+    : [[0, 1, 2].map(unit => ({ unit, firstCue: unit, lastCue: unit, tags: [tags[unit]] }))], complete: true, issues: [] };
+  const result = validateAiStructureResponse(material, response, { expectedVersion: oldVersion });
   assert.equal(result.plans.length, 1);
   const oldPath = join(root, '.film/ai-structure-plans', `${oldKey}.json`);
   await mkdir(join(root, '.film/ai-structure-plans'));
-  await writeFile(oldPath, JSON.stringify({ version: PREVIOUS_AI_STRUCTURE_VERSION, key: oldKey, sourceId: 's',
-    rounds: [{ status: 'complete', submitted: true, request: createAiStructureRequest(material, { version: PREVIOUS_AI_STRUCTURE_VERSION }), response, result }] }));
+  await writeFile(oldPath, JSON.stringify({ version: oldVersion, key: oldKey, sourceId: 's',
+    rounds: [{ status: 'complete', submitted: true, request: createAiStructureRequest(material, { version: oldVersion }), response, result }] }));
   const services = [], managers = [], calls = [];
   const service = () => {
     const value = createAiStructurePlans({ readInput: async () => structuredClone(material),
       modelIdentity: async () => ({ provider: 'mock', model: 'synthetic', endpoint: 'https://mock.invalid' }),
-      modelClient: async request => { calls.push(request); return { schema: AI_STRUCTURE_VERSION,
-        plans: [[0, 1, 2].map(unit => ({ unit, firstCue: unit, lastCue: unit, tags: [tags[unit]] }))], complete: true, issues: [] }; } });
+      modelClient: async request => { calls.push(request); const body = JSON.parse(request.input); return { schema: AI_STRUCTURE_VERSION, prices: body.units.filter(unit => unit.roles.includes('price')).map(unit => ({ id: unit.id, kind: unit.price.kind, evidence: unit.price.evidence.map(offset => unit.cueRange[0] + offset) })),
+        plans: [['candidate-0', 'candidate-1', 'candidate-2'], ['candidate-1', 'candidate-0', 'candidate-2']].filter(row => body.openingIds.includes(row[0])) }; } });
     services.push(value); return value;
   };
   const jobs = [], sent = []; let released = false;
@@ -80,14 +83,15 @@ async function fixture(t) {
     release: () => { released = true; jobs.forEach(job => { job.status = 'done'; job.progress = 1; }); } };
 }
 
-test('saved v1 and explicitly generated v2 keep separate edited drafts after reopen and batch-export their selected frozen version', async t => {
-  const f = await fixture(t), protectedBefore = await f.protectedState(), oldRecord = await readFile(f.oldPath, 'utf8');
+for (const oldVersion of [PREVIOUS_AI_STRUCTURE_VERSION, 'ai-structure-plans-v2', 'ai-structure-plans-v3']) test(`saved ${oldVersion} and current rules keep separate edited drafts after reopen and batch-export their selected frozen version`, async t => {
+  const f = await fixture(t, oldVersion), protectedBefore = await f.protectedState(), oldRecord = await readFile(f.oldPath, 'utf8');
+  const oldSpeed = f.oldPlan.speed;
   const plans = f.service(), workspace = createStructureWorkspace({ plans, register });
   const oldRequest = { ...f.scope, taskKey: f.oldKey, planId: f.oldPlan.id };
   const oldDraft = await workspace.edit(f.project, oldRequest);
   const oldFilm = filmHtml({ stage: { w: 800, h: 800 }, tracks: [{ clips: [
-    { id: 'old-edited-core', src: 'assets/synthetic.mp4', time: [16, 27], speed: 1, volume: 0.4 },
-    { id: 'old-edited-hook', src: 'assets/synthetic.mp4', at: 11, time: [1, 12], speed: 1 },
+    { id: 'old-edited-core', src: 'assets/synthetic.mp4', time: [16, 27], speed: oldSpeed, volume: 0.4 },
+    { id: 'old-edited-hook', src: 'assets/synthetic.mp4', at: 11 / oldSpeed, time: [1, 12], speed: oldSpeed },
   ] }] });
   await writeFile(join(oldDraft.project.path, 'film.html'), oldFilm);
   await writeFile(join(oldDraft.project.path, '.film/settings.json'), JSON.stringify({ fps: 25 }));
@@ -97,7 +101,8 @@ test('saved v1 and explicitly generated v2 keep separate edited drafts after reo
   assert.equal(preview.status, 'idle'); assert.equal(f.calls.length, 0);
   await plans.generate(f.root, { ...selection, confirmed: true, confirmationId: preview.confirmation.id }); await plans.wait();
   const current = await plans.status(f.root, selection), newPlan = current.plans[0];
-  assert.equal(current.status, 'complete'); assert.notEqual(current.taskKey, f.oldKey); assert.equal(f.calls.length, 1);
+  assert.equal(current.status, 'complete'); assert.equal(current.version, AI_STRUCTURE_VERSION); assert.notEqual(current.taskKey, f.oldKey); assert.equal(f.calls.length, 1);
+  assert.equal(current.coverage.covered, 2); assert.deepEqual(current.coverage.remainingIds, []);
   assert.equal(newPlan.speed, 1.3); assert.equal(newPlan.durationMs, 30000);
   assert.equal((await plans.status(f.root, f.scope)).taskKey, current.taskKey, 'ordinary opening now defaults to the new saved version');
   const newRequest = { ...f.scope, taskKey: current.taskKey, planId: newPlan.id };
@@ -136,9 +141,9 @@ test('saved v1 and explicitly generated v2 keep separate edited drafts after reo
   assert.equal((await batches.wait(f.project, oldBatch.id)).status, 'complete');
   assert.equal((await batches.wait(f.project, newBatch.id)).status, 'complete');
   assert.equal(f.sent.length, 2);
-  for (const [index, expected] of [[oldDraft, oldFilm, '旧方案私人字幕', 1, 25], [newDraft, newFilm, '新版私人字幕', 1.3, 60]].entries()) {
+  for (const [index, expected] of [[oldDraft, oldFilm, '旧方案私人字幕', oldSpeed, 25], [newDraft, newFilm, '新版私人字幕', 1.3, 60]].entries()) {
     const sent = f.sent[index]; assert.equal(sent.snapshot.sourceProjectId, expected[0].project.id);
-    assert.equal(sent.snapshot.planVersion, index ? AI_STRUCTURE_VERSION : PREVIOUS_AI_STRUCTURE_VERSION);
+    assert.equal(sent.snapshot.planVersion, index ? AI_STRUCTURE_VERSION : oldVersion);
     assert.equal(sent.film, expected[1]); assert.match(sent.captions, new RegExp(expected[2]));
     assert.ok(filmClips(sent.film).every(clip => (clip.speed ?? 1) === expected[3])); assert.equal(sent.request.fps, expected[4]);
     assert.equal(sent.request.kind, 'nle'); assert.equal(sent.request.format, 'jianying');

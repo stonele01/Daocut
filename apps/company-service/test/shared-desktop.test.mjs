@@ -97,7 +97,11 @@ test('real isolated company HTTP and desktop bridge admit one shared analysis an
   const historical = { action: 'analysis', scope: { startMs: 120, endMs: 19000 }, count: 40, provenance: { kind: 'historical-ai-output', inputHashKind: 'whole-transcript-with-words-v1', inputStatus: 'historical-unverified', scopeInputHash: null, originalAsrMatch: null }, payload: { version: 1, kind: 'historical-ai-structure', candidates: Array.from({ length: 40 }, (_, n) => ({ text: `saved ${n}`, startMs: n * 400 + 120, endMs: n * 400 + 350 })) } };
   const historicalPlan = await stores[0].prepareExisting(roots[0], sources[0], historical), historicalClaim = await stores[0].acquire(historicalPlan);
   await stores[0].complete(roots[0], historicalPlan, historicalClaim.attemptId, historical.payload);
-  const catalogue = await stores[1].history(roots[1], sources[1]); assert.equal(catalogue.results.length, 1); assert.equal(catalogue.results[0].catalog.count, 40);
-  const item = catalogue.results[0], selected = await stores[1].historicalArtifact(roots[1], sources[1], item.taskKey, item.result.sha256); assert.equal(selected.snapshot.payload.candidates.length, 40); assert.equal(modelCalls, 1);
+  const catalogue = await stores[1].history(roots[1], sources[1]);
+  assert.deepEqual(catalogue.results.map(item => item.taskKey).sort(), [reused.taskKey, historicalPlan.taskKey].sort(), 'both completed discovery and historical analysis remain available');
+  assert.equal(catalogue.results.find(item => item.taskKey === reused.taskKey)?.catalog.action, 'discovery');
+  const item = catalogue.results.find(item => item.taskKey === historicalPlan.taskKey);
+  assert.ok(item); assert.equal(item.catalog.action, 'analysis'); assert.equal(item.catalog.count, 40);
+  const selected = await stores[1].historicalArtifact(roots[1], sources[1], item.taskKey, item.result.sha256); assert.equal(selected.snapshot.payload.candidates.length, 40); assert.equal(modelCalls, 1);
   await assert.rejects(clients[0].sharedAnalysis('claim', { taskKey: '8'.repeat(64), inputHash: '9'.repeat(64), clientAttemptId: 'bad-catalog', catalog: { ...item.catalog, provenance: { kind: { apiKey: 'forbidden-private-config' } } } }));
 });

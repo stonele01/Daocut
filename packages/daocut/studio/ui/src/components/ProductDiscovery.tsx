@@ -7,10 +7,10 @@ import { SharedAnalysisSettings } from './SharedAnalysisSettings';
 import type { WorkspaceResource } from '@/lib/workspace-resources';
 
 const button = 'rounded border border-[var(--border)] px-2 py-1 text-[11px] transition duration-150 hover:bg-[var(--bg-hover)] active:scale-95 disabled:opacity-40';
-type Props = { files: readonly WorkspaceResource[]; currentSourcePath?: string; projectId: string; analysis: ProductAnalysis; dailyEntry?: boolean; onApplied: () => Promise<void>; onLocate: (sourceId: string, ms: number, candidateId?: string, play?: boolean) => void };
+type Props = { primaryAction?: boolean; refreshKey?: number; files: readonly WorkspaceResource[]; currentSourcePath?: string; projectId: string; analysis: ProductAnalysis; dailyEntry?: boolean; transcriptReviewRequest?: { sourceId: string; id: number; kind?: 'transcript' | 'discovery' }; onApplied: () => Promise<void>; onLocate: (sourceId: string, ms: number, candidateId?: string, play?: boolean) => void };
 
-export function ProductDiscovery({ projectId, analysis, onApplied, onLocate, files, currentSourcePath, dailyEntry = false }: Props) {
-  const [open, setOpen] = React.useState(!analysis.intervals.length);
+export function ProductDiscovery({ projectId, analysis, onApplied, onLocate, files, currentSourcePath, dailyEntry = false, transcriptReviewRequest, refreshKey = 0, primaryAction = true }: Props) {
+  const [open, setOpen] = React.useState(primaryAction && !analysis.intervals.length);
   const videos = files.filter(file => file.kind === 'video' && !file.link?.missing && (!file.link?.source || file.link.source.status === 'available'));
   const [pickedPath, setPickedPath] = React.useState('');
   const videoPath = videos.some(file => file.path === pickedPath) ? pickedPath : videos.some(file => file.path === currentSourcePath) ? currentSourcePath! : videos[0]?.path ?? '';
@@ -42,6 +42,12 @@ export function ProductDiscovery({ projectId, analysis, onApplied, onLocate, fil
   const alreadyApplied = (analysis.discoveryApplied ?? []).some(i => i.sourceId === sourceId && i.runId === proposal?.runId);
   React.useEffect(() => { if (!analysis.sources.some(s => s.id === sourceId)) setSourceId(analysis.sources[0]?.id ?? ''); }, [analysis.sources, sourceId]);
   React.useEffect(() => {
+    if (!transcriptReviewRequest) return;
+    setSourceId(transcriptReviewRequest.sourceId);
+    setOpen(true);
+    setObserving(true);
+  }, [transcriptReviewRequest]);
+  React.useEffect(() => {
     if (!observing || !sourceId) return;
     let cancelled = false, timer: ReturnType<typeof setTimeout> | undefined;
     const load = async () => {
@@ -71,12 +77,12 @@ export function ProductDiscovery({ projectId, analysis, onApplied, onLocate, fil
     <select aria-label="拆品来源视频" className="mt-2 w-full rounded bg-[var(--dock-pane)] p-1" value={sourceId} disabled={busy || !!confirm} onChange={e => setSourceId(e.target.value)}>{analysis.sources.map(s => <option key={s.id} value={s.id}>{s.assetPath}</option>)}</select>
   </>;
   return <details open={open} onToggle={event => { setOpen(event.currentTarget.open); if (event.currentTarget.open) setObserving(true); }} className="mb-3 rounded border border-[var(--border)] p-2.5 transition-all" aria-label="直播拆品设置">
-    <summary className="cursor-pointer text-[var(--text-muted)] transition-colors hover:text-[var(--accent)]">{analysis.intervals.length ? '素材与拆品记录' : '准备素材'}</summary>
+    <summary className="cursor-pointer text-[var(--text-muted)] transition-colors hover:text-[var(--accent)]">{!primaryAction || analysis.intervals.length ? '素材与拆品记录' : '准备素材'}</summary>
     {!dailyEntry && setup}
     {!source && <p className="mt-2 text-[var(--text-muted)]">请先接入来源视频</p>}
-    {source && <ProductPreparation key={`${projectId}:${sourceId}`} projectId={projectId} source={source} refreshKey={tick} onLocate={onLocate} onReady={async () => { await onApplied(); setTick(n => n + 1); }} />}
+    {source && <ProductPreparation primaryAction={primaryAction} key={`${projectId}:${sourceId}`} projectId={projectId} source={source} refreshKey={`${tick}:${refreshKey}`} reviewRequest={transcriptReviewRequest?.sourceId === sourceId && transcriptReviewRequest.kind !== 'discovery' ? transcriptReviewRequest.id : 0} onLocate={onLocate} onReady={async () => { await onApplied(); setTick(n => n + 1); }} />}
     {dailyEntry && <details className="mt-2 text-[11px] text-[var(--text-muted)]" aria-label="素材与共享设置"><summary className="cursor-pointer transition hover:text-[var(--accent)]">素材与共享设置</summary>{setup}</details>}
-    <details className="mt-2" aria-label="拆品高级操作"><summary className="cursor-pointer text-[10.5px] text-[var(--text-muted)]">重新拆品与原始记录</summary>
+    <details open={transcriptReviewRequest?.sourceId === sourceId && transcriptReviewRequest.kind === 'discovery' ? true : undefined} className="mt-2" aria-label="拆品高级操作"><summary className="cursor-pointer text-[10.5px] text-[var(--text-muted)]">重新拆品与原始记录</summary>
     <p className="mt-2 text-[10.5px] text-[var(--text-muted)]">已有范围和人工修正不会自动替换，重新拆品后可核对差异。</p>
     {source && !state && !error && <p className="mt-2">正在读取任务状态…</p>}
     {state && <>

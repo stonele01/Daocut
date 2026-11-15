@@ -246,6 +246,40 @@ const videosNow = (film) => film.page.evaluate(() => [...document.querySelectorA
   id: v.id, file: v.hasAttribute('src'), shown: v.style.visibility === 'visible', ready: v.readyState >= 2, time: v.currentTime,
 })));
 
+test('a cold paused scrub holds the old picture until the target video loads at the requested frame', { skip: !hasFfmpeg && 'no ffmpeg', timeout: 60_000 }, async () => {
+  const dir = footage('of-cold-scrub-');
+  writeFileSync(join(dir, 'film.html'), filmHtml({ stage: { w: 320, h: 180 }, tracks: [{ clips: [
+    { id: 'old', src: 'a.mp4', time: [0, 3] }, { id: 'next', src: 'b.mp4', at: 20, time: [2, 5] },
+  ] }] }));
+  const s = await open(dir);
+  try {
+    await s.film.page.evaluate(() => window.__filmEditor.watch(0.5));
+    await s.film.page.route('**/b.mp4', async (route) => {
+      await new Promise((done) => setTimeout(done, 800));
+      await route.continue();
+    });
+    await s.film.page.evaluate(() => {
+      const v = document.getElementById('next');
+      window.firstDecoded = [];
+      v.addEventListener('loadeddata', () => window.firstDecoded.push(v.currentTime));
+      window.seekDone = false;
+      void window.__filmEditor.watch(21).then(() => { window.seekDone = true; });
+    });
+    await s.film.page.waitForTimeout(400); // past the 250 ms idle-buffer cleanup
+    const during = await videosNow(s.film);
+    assert.ok(during.find((v) => v.id === 'old').shown && during.find((v) => v.id === 'old').ready, 'keep the old picture while the cold target is loading');
+    assert.equal(during.find((v) => v.id === 'next').shown, false, 'do not cover the old picture with an empty decoder');
+    await s.film.page.waitForFunction(() => window.seekDone);
+    const after = await videosNow(s.film);
+    assert.equal(after.find((v) => v.id === 'old').shown, false);
+    assert.equal(after.find((v) => v.id === 'old').file, false, 'the outgoing decoder is released after the handoff');
+    const next = after.find((v) => v.id === 'next');
+    assert.ok(next.shown && next.ready && Math.abs(next.time - 3) < 0.01, JSON.stringify(next));
+    const decoded = await s.film.page.evaluate(() => window.firstDecoded);
+    assert.ok(decoded.length > 0 && decoded.every((t) => Math.abs(t - 3) < 0.01), 'load the target frame directly, without decoding the recording opening');
+  } finally { await s.close(); }
+});
+
 test('a film of many video clips is ready without loading their pictures; a frame loads the videos near it, nearest first', { skip: !hasFfmpeg && 'no ffmpeg', timeout: 120_000 }, async () => {
   const dir = footage('of-lazy-');
   writeFileSync(join(dir, 'film.html'), filmHtml(manyCuts()));

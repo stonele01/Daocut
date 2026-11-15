@@ -60,6 +60,7 @@ export function applyProductEdit(data: ProductAnalysis, action: ProductEdit): Pr
     const startMs = Math.round(action.startMs), endMs = Math.round(action.endMs);
     if (startMs >= endMs) throw new Error('讲解范围无效，请检查原片起止时间');
     const range = withManualBounds<ProductInterval>({ ...(existing ?? { origin: 'manual' }), id: action.id, sourceId: action.sourceId, productId: action.productId, startMs: existing?.startMs ?? pending?.startMs ?? startMs, endMs: existing?.endMs ?? pending?.endMs ?? endMs, ...(pending ? { evidence: pending.evidence, review: pending.review } : {}) }, startMs, endMs);
+    range.scopeStatus = 'confirmed';
     next.intervals = existing ? next.intervals.map(i => i.id === action.id ? range : i) : [...next.intervals, range];
     next.unassigned = next.unassigned!.flatMap(item => {
       if (item.sourceId !== range.sourceId || item.endMs <= startMs || item.startMs >= endMs) return [item.id === range.id ? { ...item, id: productId() } : item];

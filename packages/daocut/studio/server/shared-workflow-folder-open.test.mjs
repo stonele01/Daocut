@@ -130,13 +130,13 @@ test('folder-pinned company identity is checked before first task lookup and bef
   assert.equal(f.calls.find(c => c.op === 'status').body.expectedCoordinatorId, 'b'.repeat(64));
 });
 
-test('completed original ASR segments are automatically shared while ambiguous seams stay private review work', async t => {
+test('older completed original ASR segments are shared and automatically joined on a colleague computer', async t => {
   const f = await fixture(t, { seams: true }); await f.run(0, 'transcription');
   const result = await f.open(1);
-  assert.equal(result.status, 'review-required'); assert.equal(result.imported.transcription, 4);
-  assert.match(result.warnings.join(' '), /接缝|核对/);
+  assert.equal(result.status, 'ready'); assert.equal(result.imported.transcription, 4);
+  assert.equal(result.warnings.length, 0);
   const source = (await readProductAnalysis(f.roots[1])).analysis.sources[0];
-  await assert.rejects(readProductTranscript(f.roots[1], source), error => error.code === 'ASR_BOUNDARY_REVIEW');
+  assert.ok((await readProductTranscript(f.roots[1], source)).cues.length);
   const plan = await f.workflows[1].plan(f.roots[1], { sourceId: source.id, action: 'transcription', retry: true });
   assert.equal(plan.requestCount, 0); assert.deepEqual(f.counts(), { asr: 1, text: 0 });
   const saved = [...f.tasks.values()].find(task => task.status === 'complete');

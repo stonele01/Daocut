@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
-import { DISCOVER_PRODUCTS_PROMPT } from './approved-prompts.mjs';
+import { DISCOVER_PRODUCTS_PROMPT, PREVIOUS_DISCOVER_PRODUCTS_PROMPT } from './approved-prompts.mjs';
 
 export const DISCOVERY_VERSION = 'product-discovery-v1';
 export const PREVIOUS_DISCOVERY_PROMPT = `你只检查直播转写，没有检查原音或画面。识别完整商品讲解，不将简短提及、闲聊、过渡、混讲当作完整讲解。相同商品返场保留独立范围，不包住中间其他商品。不同规格或套装、证据不足的别名不能强行合并。时间由程序按原片 cue 恢复，只输出输入中的全局 cue 索引。跨窗口可以引用上下文，不能臆造窗口外索引。已知商品只供核对：复用 key 必须同名同规格；不同叫法合并必须给 matchKey、matchEvidence 和 matchReason，规格不明则 identityUncertain:true。所有 evidence 是输入中的 cue 索引。输出 JSON {products:[{key,name,variant:"",aliases:[{name,evidence:[0]}],evidence:[0],identityUncertain:false,matchKey?,matchEvidence?:[0],matchReason?:""}],ranges:[{key:"商品key或null",firstCue:0,lastCue:1,kind:"lecture|mixed|mention|uncertain|transition",reason:"依据",evidence:[0]}],issues:["问题"]}。lecture 才可关联商品，其他内容 key 必须 null。每个范围至少有一句证据。名称不明确或身份存疑可保留待确认商品，但必须说明。不得声称看到了画面或确认了画面内容。`;
+export const PREVIOUS_CONTEXT_DISCOVERY_PROMPT = PREVIOUS_DISCOVER_PRODUCTS_PROMPT;
 export const DISCOVERY_PROMPT = DISCOVER_PRODUCTS_PROMPT;
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const id = (kind, value) => `${kind}-${hash(value).slice(0, 24)}`;
@@ -49,6 +50,14 @@ export function combineDiscoveryWindows({ sourceId, runId, durationMs, cues, win
   if (!text(sourceId) || !text(runId) || !Array.isArray(results) || results.length !== windows.length) invalid('拆品批次不完整');
   const products = [], ranges = [], unassigned = [], issues = [];
   const known = new Map();
+  // A short acknowledgement omitted at a transport boundary is not a product
+  // change. Never bridge substantive text, a long silence or an assigned range.
+  const continuous = (last, first) => {
+    if (first <= last) return true;
+    const gap = cues.slice(last + 1, first);
+    return first - last <= 4 && cues[first].startMs - cues[last].endMs <= 2000
+      && gap.every(cue => /^(?:嗯+|啊+|哦+|呃+|对|对的|是|是的|好的|好|没错)[。！!，,？?\s]*$/u.test(cue.text.trim()));
+  };
   const evidenceFor = (indices, window) => {
     if (!Array.isArray(indices) || !indices.length || indices.some(n => !Number.isInteger(n) || n < window.firstCue || n > window.lastCue)) invalid('拆品证据不属于当前转写窗口');
     return [...new Set(indices)].map(n => ({ cue: n, text: cues[n].text, startMs: cues[n].startMs, endMs: cues[n].endMs }));
@@ -59,6 +68,7 @@ export function combineDiscoveryWindows({ sourceId, runId, durationMs, cues, win
     const local = new Map();
     for (const item of result.products) {
       if (!text(item?.key) || !text(item.name) || typeof item.variant !== 'string' || local.has(item.key) || !Array.isArray(item.aliases) || (item.identityUncertain !== undefined && typeof item.identityUncertain !== 'boolean')) invalid('商品身份或别名格式无效');
+      if (item.nameUncertain !== undefined && typeof item.nameUncertain !== 'boolean') invalid('名称状态无效');
       const evidence = evidenceFor(item.evidence, window);
       const aliases = item.aliases.map(alias => {
         if (!text(alias?.name)) invalid('商品别名无效');
@@ -68,7 +78,15 @@ export function combineDiscoveryWindows({ sourceId, runId, durationMs, cues, win
       const sameName = previous && norm(previous.name) === norm(item.name) && norm(previous.variant) === norm(item.variant);
       const explicit = previous && item.matchKey && text(item.matchReason) && Array.isArray(item.matchEvidence) && item.matchEvidence.length;
       if (explicit) evidenceFor(item.matchEvidence, window);
-      const merge = previous && !item.identityUncertain && !previous.identityUncertain && norm(previous.variant) === norm(item.variant) && (sameName || explicit);
+      // The model can keep the same sale across a transport window even when its
+      // formal product name is unknown. This is not evidence for merging a later return.
+      const continuation = previous && item.key === previous.key && norm(previous.variant) === norm(item.variant)
+        && ranges.some(old => old.productId === previous.id && old.scopeStatus === 'confirmed' && old.windowIndices.at(-1) === w - 1
+          && continuous(old.lastCue, windows[w - 1].coreLast + 1)
+          && result.ranges.some(next => next.key === item.key && next.kind === 'lecture' && next.scopeStatus === 'confirmed'
+            && continuous(old.lastCue, next.firstCue) && next.lastCue >= window.coreFirst
+            && ![...unassigned, ...result.ranges.filter(other => other !== next)].some(other => other.firstCue > old.lastCue && other.firstCue < next.firstCue)));
+      const merge = continuation || (previous && !item.nameUncertain && !previous.nameUncertain && !item.identityUncertain && !previous.identityUncertain && norm(previous.variant) === norm(item.variant) && (sameName || explicit));
       if (merge) {
         if (norm(previous.name) !== norm(item.name)) aliases.push({ name: item.name, evidence, reason: item.matchReason });
         previous.aliases.push(...aliases.filter(alias => !previous.aliases.some(old => norm(old.name) === norm(alias.name))));
@@ -77,7 +95,7 @@ export function combineDiscoveryWindows({ sourceId, runId, durationMs, cues, win
         known.set(item.key, previous);
       } else {
         const collision = Boolean(previous);
-        previous = { id: id('product', [sourceId, item.key, collision ? w : '', item.name, item.variant]), key: collision ? `${item.key}@${w}` : item.key, name: item.name, variant: item.variant, sourceIds: [sourceId], aliases, evidence, mergeEvidence: [], identityUncertain: Boolean(item.identityUncertain || collision), review: ['仅依据转写，画面待核实', ...(item.identityUncertain || collision ? ['商品身份或规格待确认，未自动归并'] : [])], origin: 'ai-discovery', discoveryRunId: runId };
+        previous = { id: id('product', [sourceId, item.key, collision ? w : '', item.name, item.variant]), key: collision ? `${item.key}@${w}` : item.key, name: item.name, variant: item.variant, sourceIds: [sourceId], aliases, evidence, mergeEvidence: [], identityUncertain: Boolean(item.identityUncertain || collision), ...(item.nameUncertain !== undefined ? { nameUncertain: item.nameUncertain } : {}), review: ['仅依据转写，画面待核实', ...(item.identityUncertain || collision ? ['商品身份或规格待确认，未自动归并'] : [])], origin: 'ai-discovery', discoveryRunId: runId };
         products.push(previous);
         known.set(previous.key, previous);
       }
@@ -87,7 +105,8 @@ export function combineDiscoveryWindows({ sourceId, runId, durationMs, cues, win
       if (!range || !Number.isInteger(range.firstCue) || !Number.isInteger(range.lastCue) || range.firstCue < window.firstCue || range.lastCue > window.lastCue || range.lastCue < range.firstCue || !['lecture', 'mixed', 'mention', 'uncertain', 'transition'].includes(range.kind) || !text(range.reason)) invalid('讲解范围或时间索引无效');
       const evidence = evidenceFor(range.evidence, window);
       if (range.lastCue < window.coreFirst || range.firstCue > window.coreLast) continue;
-      const base = { sourceId, startMs: cues[range.firstCue].startMs, endMs: Math.max(...cues.slice(range.firstCue, range.lastCue + 1).map(c => c.endMs)), firstCue: range.firstCue, lastCue: range.lastCue, windowIndices: [w], evidence, reason: range.reason, review: ['仅依据转写，画面待核实'], origin: 'ai-discovery', discoveryRunId: runId };
+      if (range.scopeStatus !== undefined && !['confirmed', 'uncertain'].includes(range.scopeStatus)) invalid('商品讲解归属状态无效');
+      const base = { ...(range.scopeStatus ? { scopeStatus: range.scopeStatus } : {}), sourceId, startMs: cues[range.firstCue].startMs, endMs: Math.max(...cues.slice(range.firstCue, range.lastCue + 1).map(c => c.endMs)), firstCue: range.firstCue, lastCue: range.lastCue, windowIndices: [w], evidence, reason: range.reason, review: ['仅依据转写，画面待核实'], origin: 'ai-discovery', discoveryRunId: runId };
       if (range.kind === 'lecture') {
         const product = local.get(range.key);
         if (!product) invalid('讲解引用无效商品');
@@ -111,8 +130,8 @@ export function combineDiscoveryWindows({ sourceId, runId, durationMs, cues, win
   }).sort((a, b) => a.firstCue - b.firstCue || a.lastCue - b.lastCue);
   const merged = [];
   for (const range of accepted) {
-    const prev = merged.findLast(old => old.productId === range.productId && range.firstCue <= old.lastCue && !unassigned.some(u => u.firstCue <= range.firstCue && u.lastCue >= old.lastCue));
-    if (prev) { prev.lastCue = Math.max(prev.lastCue, range.lastCue); prev.endMs = Math.max(prev.endMs, range.endMs); prev.windowIndices = [...new Set([...prev.windowIndices, ...range.windowIndices])]; prev.evidence.push(...range.evidence); }
+    const prev = merged.findLast(old => old.productId === range.productId && (range.firstCue <= old.lastCue || continuous(old.lastCue, range.firstCue) && old.windowIndices.at(-1) + 1 === range.windowIndices[0] && old.scopeStatus === 'confirmed' && range.scopeStatus === 'confirmed') && !unassigned.some(u => u.firstCue <= range.firstCue && u.lastCue >= old.lastCue));
+    if (prev) { prev.lastCue = Math.max(prev.lastCue, range.lastCue); prev.endMs = Math.max(prev.endMs, range.endMs); prev.windowIndices = [...new Set([...prev.windowIndices, ...range.windowIndices])]; prev.evidence.push(...range.evidence); if (prev.scopeStatus === 'uncertain' || range.scopeStatus === 'uncertain') prev.scopeStatus = 'uncertain'; else if (prev.scopeStatus !== range.scopeStatus) delete prev.scopeStatus; }
     else merged.push({ ...range });
   }
   const intervalIds = new Set();
@@ -141,8 +160,8 @@ export async function discoverProducts({ sourceId, runId, durationMs, cues: inpu
     const window = windows[n];
     const knownProducts = [];
     const validatedProducts = results.length ? combineDiscoveryWindows({ sourceId, runId, durationMs, cues, windows: windows.slice(0, n), results }).products : [];
-    for (const { key, name, variant } of validatedProducts) {
-      const entry = { key, name, variant };
+    for (const { key, name, variant, nameUncertain, identityUncertain } of validatedProducts) {
+      const entry = { key, name, variant, ...(nameUncertain !== undefined ? { nameUncertain } : {}), identityUncertain };
       // Keep prior identity context bounded separately from the cue payload budget.
       if (Buffer.byteLength(JSON.stringify([...knownProducts, entry]), 'utf8') > 8000) break;
       knownProducts.push(entry);

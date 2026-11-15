@@ -79,7 +79,7 @@ function AssetFields({ file }: { file: WorkspaceResource }) {
     rows.push({
       label: t('assets.propProxy'),
       value: state === 'making' ? t('media.proxyMaking').replace('{p}', String(Math.round((ratio ?? 0) * 100)))
-        : state === 'waiting' ? t('media.proxyWaiting') : state === 'failed' ? t('media.proxyFailed') : t('media.proxyReady'),
+        : state === 'waiting' ? t('media.proxyWaiting') : state === 'failed' ? file.proxy.message ?? t('media.proxyFailed') : t('media.proxyReady'),
     });
   }
   /* a link to media kept elsewhere (a NAS): where it is, or that it cannot be reached now */

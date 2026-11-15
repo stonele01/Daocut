@@ -9,8 +9,8 @@ const draftsOf = (cues: TranscriptCue[]): Draft[] => cues.map(cue => ({ text: cu
 const seamVersion = (seam?: TranscriptSeam) => JSON.stringify(seam && { status: seam.status, cues: seam.resolved ?? seam.proposed });
 
 /** Local review only: neither opening, seeking nor saving submits an ASR/model task. */
-export function TranscriptSeamReview({ projectId, sourceId, refreshKey, onLocate, onSaved }: {
-  projectId: string; sourceId: string; refreshKey: string;
+export function TranscriptSeamReview({ projectId, sourceId, refreshKey, openRequest = 0, onLocate, onSaved }: {
+  projectId: string; sourceId: string; refreshKey: string; openRequest?: number;
   onLocate: (sourceId: string, ms: number, candidateId?: string, play?: boolean) => void;
   onSaved: () => Promise<void>;
 }) {
@@ -26,6 +26,16 @@ export function TranscriptSeamReview({ projectId, sourceId, refreshKey, onLocate
   const [conflict, setConflict] = React.useState(false);
   const [tick, setTick] = React.useState(0);
   const saving = React.useRef(false);
+  const toggle = React.useRef<HTMLButtonElement>(null);
+  React.useEffect(() => {
+    if (!openRequest || !state?.available) return;
+    setOpen(true);
+    const frame = requestAnimationFrame(() => {
+      toggle.current?.focus({ preventScroll: true });
+      toggle.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [openRequest, state?.available]);
   React.useEffect(() => {
     let active = true;
     void api.transcriptReview(projectId, sourceId).then(value => {
@@ -70,8 +80,8 @@ export function TranscriptSeamReview({ projectId, sourceId, refreshKey, onLocate
   if (!state?.available) return error ? <p role="alert" className="text-[11px] text-[var(--warn)]">字幕接缝状态暂不可读：{error} <button type="button" className={button} onClick={reload}>重新读取接缝</button></p> : null;
   const raw = (cues: TranscriptCue[], label: string) => <div className="space-y-1 rounded border border-[var(--border)] p-2"><strong>{label}识别</strong>{cues.length ? cues.map((cue, index) => <button type="button" key={index} aria-label={`定位${label}字幕 ${index + 1}`} onClick={() => onLocate(sourceId, cue.startMs)} className="block w-full rounded p-1 text-left transition hover:bg-[var(--bg-hover)] active:scale-[.99]"><span className="block tabular-nums text-[var(--accent)]">{sourceTime(cue.startMs)} – {sourceTime(cue.endMs)}</span><span className="block whitespace-pre-wrap break-words">{cue.text}</span></button>) : <p className="text-[var(--text-muted)]">此段没有对应识别文字</p>}</div>;
   return <div className="border-t border-[var(--border)] pt-2 text-[11px]">
-    <button type="button" className={button} aria-expanded={open} onClick={() => setOpen(value => !value)}>{open ? '收起接缝核对' : '核对字幕接缝'}</button>
-    <span className="ml-2 text-[var(--text-muted)]">待核对 {state.pendingCount} 处</span>
+    <button ref={toggle} type="button" className={button} aria-expanded={open} onClick={() => setOpen(value => !value)}>{open ? '收起衔接记录' : '字幕衔接记录'}</button>
+    <span className="ml-2 text-[var(--text-muted)]">{state.pendingCount ? `待处理 ${state.pendingCount} 处` : '已自动衔接'}</span>
     <div className={`grid transition-[grid-template-rows,opacity] duration-200 ${open ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'}`} inert={!open} aria-hidden={!open}>
       <div className="min-h-0 overflow-hidden"><section aria-label="字幕接缝核对" className="space-y-2 pt-2">
         <p>两边原始识别保留。这里只核对字幕，不重新上传音频。</p>

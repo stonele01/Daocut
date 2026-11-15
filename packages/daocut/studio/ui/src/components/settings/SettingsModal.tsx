@@ -25,6 +25,7 @@ import { ShortcutsSection } from './ShortcutsSection';
 import { SettingsButton, SettingsGroup, SettingsItem, SettingsPage, SettingsSegmented, SettingsSwitch } from './ui';
 import { useThemeMode, type ThemeMode } from './theme';
 import { StorageGroup } from './StorageGroup';
+import { FEEDBACK_REQUEST } from '@/lib/feedback-request';
 
 export type SettingsSection = 'feedback' | 'company' | 'general' | 'agents' | 'providers' | 'models' | 'developer' | 'shortcuts' | 'advanced';
 
@@ -82,6 +83,11 @@ export function SettingsModal({ open, onClose, section: opening }: SettingsModal
   close.current = onClose;
 
   React.useEffect(() => { if (open) { setSection(opening ?? 'general'); setQuery(''); } }, [open, opening]);
+  React.useEffect(() => {
+    const showFeedback = () => { setSection('feedback'); setQuery(''); };
+    window.addEventListener(FEEDBACK_REQUEST, showFeedback);
+    return () => window.removeEventListener(FEEDBACK_REQUEST, showFeedback);
+  }, []);
 
   /* the sections a search finds: by their names and by every phrase on them */
   const words = React.useMemo(() => Object.fromEntries((Object.keys(SECTION_WORDS) as SettingsSection[]).map((id) => [

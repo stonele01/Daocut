@@ -12,8 +12,8 @@ test('incomplete analysis saves returned text, stop reason and reasoning usage b
   const client = createDeepSeekTextClient({ getConfig: config, fetch: async (_url, options) => {
     calls++;
     const sent = JSON.parse(options.body);
-    assert.equal(sent.max_output_tokens, 32768, 'use the declared finite output budget');
-    assert.deepEqual(sent.reasoning, { effort: 'low' }, 'do not silently change the analysis mode');
+    assert.equal(sent.max_output_tokens, 65536, 'use the declared finite output budget');
+    assert.deepEqual(sent.reasoning, { effort: 'high' }, 'new requests use the explicitly chosen high default');
     return { ok: true, status: 200, json: async () => ({ id: 'synthetic-limit', status: 'incomplete', incomplete_details: { reason: 'max_output_tokens', private: 'do-not-copy' },
       usage: { input_tokens: 8213, output_tokens: 32768, output_tokens_details: { reasoning_tokens: 32740, private: 'do-not-copy' } },
       output: [{ type: 'reasoning', content: [{ type: 'reasoning_text', text: 'synthetic internal reasoning' }] }, ...output('{"candidates":[')] }) };
@@ -22,7 +22,7 @@ test('incomplete analysis saves returned text, stop reason and reasoning usage b
   assert.equal(calls, 1);
   assert.equal(saved.incompleteReason, 'max_output_tokens');
   assert.equal(saved.rawText, '{"candidates":[');
-  assert.equal(saved.maxOutputTokens, 32768);
+  assert.equal(saved.maxOutputTokens, 65536);
   assert.equal(saved.usage.output_tokens_details.reasoning_tokens, 32740);
   assert.ok(!JSON.stringify(saved).includes('synthetic-secret'));
   assert.ok(!JSON.stringify(saved).includes('do-not-copy'));

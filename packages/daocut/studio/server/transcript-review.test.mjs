@@ -18,14 +18,14 @@ const segments = () => [
   { ...ranges[2], cues: [cue('规格乙', 300, 900), cue('后文', 1500, 2000)] },
 ];
 
-test('all ambiguous seams retain both original sides and absolute offsets, including one-to-many sentences', () => {
+test('automatic seams retain both original sides and absolute offsets, including one-to-many sentences', () => {
   const input = segments(), before = JSON.stringify(input);
   const result = inspectAudioSeams(input, 6000);
-  assert.equal(result.seams.length, 2); assert.equal(result.pendingCount, 2);
+  assert.equal(result.seams.length, 2); assert.equal(result.pendingCount, 0);
   assert.deepEqual(result.seams[0].right.slice(0, 2).map(c => [c.startMs, c.endMs]), [[1800, 2200], [2200, 2800]]);
   assert.equal(result.seams[0].left[0].text, '前段截断因为');
   assert.equal(JSON.stringify(input), before);
-  assert.throws(() => resolveAudioSeams(result, {}), error => error.code === 'ASR_BOUNDARY_REVIEW');
+  assert.deepEqual(resolveAudioSeams(result, {}).map(cue => cue.text), ['前文', '前段截断', '因为完整内容', '规格乙', '后文']);
 });
 
 test('exact overlapping duplicate is automatic but normal repeated speech outside overlap is retained', () => {
@@ -38,13 +38,13 @@ test('exact overlapping duplicate is automatic but normal repeated speech outsid
   assert.deepEqual(resolveAudioSeams(result, {}).map(c => c.text), ['再说一次', '相同价格12%', '再说一次']);
 });
 
-test('nearby repeated text without overlapping timestamps and numeric differences require review', () => {
+test('nearby repeated text and numeric differences do not interrupt automatic preparation', () => {
   for (const [left, right] of [
     [cue('同一句', 1700, 1900), cue('同一句', 450, 700)],
     [cue('1.2升12%', 1800, 2200), cue('12升12', 300, 700)],
   ]) {
     const result = inspectAudioSeams([{ ...ranges[0], cues: [left] }, { ...ranges[1], cues: [right] }], 4500);
-    assert.equal(result.pendingCount, 1);
+    assert.equal(result.pendingCount, 0);
   }
 });
 
@@ -54,7 +54,8 @@ test('a tiny timestamp intersection cannot silently remove genuinely repeated sh
     { ...ranges[1], cues: [cue('对', 499, 800)] },
   ];
   const result = inspectAudioSeams(input, 4500);
-  assert.equal(result.pendingCount, 1); assert.equal(result.seams[0].left.length, 1); assert.equal(result.seams[0].right.length, 1);
+  assert.equal(result.pendingCount, 0); assert.equal(result.seams[0].left.length, 1); assert.equal(result.seams[0].right.length, 1);
+  assert.equal(resolveAudioSeams(result, {}).length, 2);
 });
 
 test('a complete sentence may cross the core cut and manual resolutions cannot escape their seam or invent invalid time', () => {
@@ -83,7 +84,7 @@ async function fixture(t) {
     await ctx.onResponse?.({ provider: 'doubao', requestId: args.requestId, httpStatus: 200, serviceStatus: '20000000', body: { result: row } });
     return { index: [row] };
   } };
-  await assert.rejects(transcribeProductSource(root, source, options), error => error.code === 'ASR_BOUNDARY_REVIEW');
+  assert.ok((await transcribeProductSource(root, source, options)).cues.length);
   const cache = join(root, '.film/product-transcripts', createHash('sha256').update(source.id).digest('hex') + '.json');
   const raw = await readFile(cache + '.segments.json', 'utf8');
   return { root, source, cache, raw, options, probe, calls: () => calls };
@@ -93,10 +94,10 @@ const save = (f, state, seam, cues = seam.right, extra = {}) => saveTranscriptRe
 test('per-seam confirmation survives reopen and produces source-absolute reviewed transcript without provider calls', async t => {
   const f = await fixture(t); const before = await readFile(join(f.root, '.film/product-analysis.json'), 'utf8');
   let state = await readTranscriptReview(f.root, f.source.id);
-  assert.equal(state.pendingCount, 2); assert.equal(state.impact.ranges[0].productName, '人工名称');
-  await assert.rejects(readProductTranscript(f.root, f.source), error => error.code === 'ASR_BOUNDARY_REVIEW');
-  state = await save(f, state, state.seams[0]); assert.equal(state.pendingCount, 1);
-  await assert.rejects(readProductTranscript(f.root, f.source), error => error.code === 'ASR_BOUNDARY_REVIEW');
+  assert.equal(state.pendingCount, 0); assert.equal(state.impact.ranges[0].productName, '人工名称');
+  assert.ok((await readProductTranscript(f.root, f.source)).cues.length);
+  state = await save(f, state, state.seams[0]); assert.equal(state.pendingCount, 0);
+  assert.equal((await readProductTranscript(f.root, f.source)).localReconciled, true);
   state = await readTranscriptReview(f.root, f.source.id); assert.equal(state.revision, 1);
   state = await save(f, state, state.seams[1]); assert.equal(state.pendingCount, 0);
   const transcript = await readProductTranscript(f.root, f.source);

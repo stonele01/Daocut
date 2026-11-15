@@ -250,14 +250,21 @@ const START_LAG = 0.08;   // s: how long play() takes to get a video going
 /** Keep a playing video at `want` as the film plays at `rate`: its pace nudged when it drifts, sought when far off. */
 function roll(c, want, rate) {
   const v = c.el;
+  const now = performance.now();
+  // A pending seek must finish before another correction. Otherwise a slow source is
+  // asked to decode from its key frame again on every tick and never presents a frame.
+  if (v.seeking || v.readyState < 2) { c.settleUntil = now + 1000; c.lastWant = want; return; }
   const drift = v.currentTime - want;
-  if (Math.abs(drift) > ROLL_SEEK || v.ended) { v.currentTime = want; c.steer = 0; c.off = 0; }
+  if ((Math.abs(drift) > ROLL_SEEK || v.ended) && now >= (c.settleUntil ?? 0)) { v.currentTime = want; c.settleUntil = now + 1000; c.steer = 0; c.off = 0; }
   else if (Math.abs(drift) > ROLL_STEER) { c.off = (c.off ?? 0) + 1; if (c.off >= 2) c.steer = drift > 0 ? -1 : 1; }
   else { c.off = 0; if (Math.abs(drift) < ROLL_SETTLE) c.steer = 0; }
   /* the pace is written only when it changes: each write is work for the media pipeline */
   const pace = (c.span.speed ?? 1) * rate * (1 + (c.steer ?? 0) * ROLL_NUDGE);
   if (Math.abs(v.playbackRate - pace) > 1e-4) v.playbackRate = pace;
-  if (v.paused) v.play().catch((e) => { if (e?.name === 'NotAllowedError') c.held = true; });
+  if (v.paused && !c.starting) {
+    c.starting = true;
+    v.play().catch((e) => { if (e?.name === 'NotAllowedError') c.held = true; }).finally(() => { c.starting = false; });
+  }
   c.lastWant = want;
 }
 /**
@@ -369,6 +376,7 @@ function stopRolling() {
     if (c.kind !== 'video') continue;
     if (!c.el.paused) c.el.pause();
     c.steer = 0; c.off = 0;
+    c.settleUntil = 0;
   }
   stopPageFootage();
 }
@@ -597,8 +605,8 @@ function wake(c, from = null) {
   v.preload = 'auto';
   /* without the fragment: which seconds play is the film's to keep (a browser would stop the video at its end) */
   v.src = url(c.row.src).href;
-  /* an exact frame's video loads at that frame: one sought at once after loading can stay on its first frame
-     (Chromium). Not while a person watches: a start set before loading stalls the whole picture for a moment */
+  /* An exact frame or paused scrub loads at its target, without first decoding the recording's opening.
+     Playing videos are still woken ahead without a seek, then cued by getReady. */
   if (from > 0) v.currentTime = from;
   c.awake = new Promise((done) => {
     v.addEventListener('loadeddata', () => done(), { once: true });
@@ -692,13 +700,13 @@ function restPage(c) {
 /**
  * Wake the videos and pages near t (those on at t always), and let those far from it rest. `only`: wake only those on
  * at t, and let none rest unless far too many are awake (a scrub: the rest is done once it stops, see draw). `exact`:
- * for an exact frame (an export's), each video woken at the frame it is wanted at.
+ * each video woken at the frame it is wanted at. `holdShown`: keep the outgoing picture during a paused seek.
  */
-function near(t, { only = false, exact = false } = {}) {
-  nearOf('video', AWAKE_MAX, t, only, exact);
-  nearOf('page', PAGES_AWAKE, t, only, exact);
+function near(t, { only = false, exact = false, holdShown = false } = {}) {
+  nearOf('video', AWAKE_MAX, t, only, exact, holdShown);
+  nearOf('page', PAGES_AWAKE, t, only, exact, holdShown);
 }
-function nearOf(kind, max, t, only, exact) {
+function nearOf(kind, max, t, only, exact, holdShown) {
   const off = (c) => (t < c.at ? c.at - t : t >= c.end ? t - c.end : 0);
   const all = clips.filter((c) => c.kind === kind);
   const wanted = all
@@ -713,8 +721,8 @@ function nearOf(kind, max, t, only, exact) {
   const awake = all.filter((c) => c.awake && !keep.has(c)).sort((a, b) => off(b) - off(a));
   let over = keep.size + awake.length - most;
   for (const c of awake) {
-    /* one an edit is putting on screen (see cue) stays awake, wherever it is now */
-    if (cueing.has(c)) continue;
+    /* An edit's incoming clip, or the last picture during a paused seek, stays awake until its handoff. */
+    if (cueing.has(c) || (holdShown && c.el.style.visibility === 'visible')) continue;
     if ((kind === 'video' && !only && (c.hidden || off(c) > KEEP)) || over > 0) { rest(c); over--; }
   }
 }
@@ -894,7 +902,10 @@ async function draw(t, live, play = null) {
   const playing = live && play != null;
   if (!playing) stopRolling();
   clearTimeout(settleNear);
-  if (live && !playing) { near(t, { only: true }); settleNear = setTimeout(() => near(t), 250); } else near(t, { exact: !live });
+  if (live && !playing) {
+    near(t, { only: true, exact: true, holdShown: true });
+    settleNear = setTimeout(() => near(t, { holdShown: true }), 250);
+  } else near(t, { exact: !live });
   /* watched, a page coming on shows once its frame is drawn, and the pictures going off stay until then: shown first,
      it showed what it held before (its own first state, or the frame it drew the last time it was on) for as long as
      its frame took, a flash at the cut. An exact frame is taken when all of it is drawn, so it shows each at once. */
@@ -918,17 +929,20 @@ async function draw(t, live, play = null) {
     if (live && turn === watched) {
       for (const c of going) if (!c.shown) c.el.style.visibility = 'hidden';
       for (const c of coming) if (c.shown) c.el.style.visibility = 'visible';
+      // A paused seek keeps the outgoing picture's file until the replacement is decoded.
+      // Now the handoff is complete, far-away videos can release their buffers.
+      if (!playing) near(t);
     }
   }
 }
 
-/** One clip's part of a frame (see draw): a page coming on while watched is put in `coming`, a picture going off in `going`. */
+/** One clip's part of a frame: pages and paused videos enter `coming`; the outgoing picture stays in `going` until ready. */
 async function drawClip(c, t, live, play, turn, coming, going) {
   if (c.kind === 'sound') return;
   const on = !c.hidden && !c.missing && t >= c.at && t < c.end;
   c.shown = on;
   const appears = on && c.el.style.visibility !== 'visible';
-  if (live && appears && c.kind === 'page') { c.coming = turn; coming.push(c); }
+  if (live && appears && (c.kind === 'page' || (c.kind === 'video' && !play))) { c.coming = turn; coming.push(c); }
   else if (live && !on && c.el.style.visibility === 'visible') going.push(c);
   else c.el.style.visibility = on ? 'visible' : 'hidden';
   if (on) fadeAt(c, t);

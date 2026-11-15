@@ -52,7 +52,7 @@ test('ordinary existing video uses separately confirmed mock ASR, product discov
       modelClient: async ({ input }) => {
         calls.structure++;
         const parsed = JSON.parse(input); structureInputs.push(parsed);
-        return { candidates: [{ firstCue: 0, lastCue: parsed.cues.length - 1, tags: ['卖点'], details: { subtypes: [], reason: '合成测试：连续三句话构成一个完整片段', evidence: ['ASR'], context: '', repetition: '', review: ['合成测试，画面待核实'] } }], issues: [] };
+        return { candidates: [{ firstCue: parsed.cues[0].index, lastCue: parsed.cues.at(-1).index, tags: ['卖点'], details: { subtypes: [], reason: '合成测试：连续三句话构成一个完整片段', evidence: ['ASR'], context: '', repetition: '', review: ['合成测试，画面待核实'] } }], issues: [] };
       },
     },
     productDiscovery: {
@@ -106,30 +106,30 @@ test('ordinary existing video uses separately confirmed mock ASR, product discov
     const sourceId = analysis.sources[0].id;
     assert.deepEqual(calls, { asr: 0, discovery: 0, structure: 0 });
     step = 'cancel audio request plan without calling services';
-    await preparation.getByRole('button', { name: '拆商品', exact: true }).click();
+    await preparation.getByRole('button', { name: '转写', exact: true }).click();
     let confirm = page.getByRole('dialog');
     await confirm.waitFor();
-    await confirm.getByText(/预计新增请求/).waitFor();
+    await confirm.getByText(/新增请求/).waitFor();
     assert.match(await confirm.innerText(), /音频/);
     assert.match(await confirm.innerText(), /请求|次数/);
-    assert.match(await confirm.innerText(), /费用|估算/);
+    assert.match(await confirm.innerText(), /费用|计费/);
     await confirm.getByRole('button', { name: '取消', exact: true }).click();
     assert.deepEqual(calls, { asr: 0, discovery: 0, structure: 0 });
     step = 'confirm audio only, then wait for separate text approval';
-    await preparation.getByRole('button', { name: '拆商品', exact: true }).click();
+    await preparation.getByRole('button', { name: '转写', exact: true }).click();
     await page.getByRole('dialog').getByRole('button', { name: '确认转写', exact: true }).click();
-    await preparation.getByRole('button', { name: '继续拆商品', exact: true }).waitFor();
+    await preparation.getByRole('button', { name: '拆商品', exact: true }).waitFor();
     assert.deepEqual(calls, { asr: 1, discovery: 0, structure: 0 }, 'audio approval never authorizes text');
     step = 'separate product discovery confirmation saves A/B/A';
-    await preparation.getByRole('button', { name: '继续拆商品', exact: true }).click();
+    await preparation.getByRole('button', { name: '拆商品', exact: true }).click();
     confirm = page.getByRole('dialog');
-    await confirm.getByText(/预计新增请求/).waitFor();
+    await confirm.getByText(/新增请求/).waitFor();
     assert.match(await confirm.innerText(), /文字|字幕|转写/);
-    assert.match(await confirm.innerText(), /费用|估算/);
+    assert.match(await confirm.innerText(), /费用|计费/);
     assert.equal(calls.discovery, 0);
     await confirm.getByRole('button', { name: '取消', exact: true }).click();
     assert.deepEqual(calls, { asr: 1, discovery: 0, structure: 0 });
-    await preparation.getByRole('button', { name: '继续拆商品', exact: true }).click();
+    await preparation.getByRole('button', { name: '拆商品', exact: true }).click();
     await page.getByRole('dialog').getByRole('button', { name: '确认拆品', exact: true }).click();
     const products = page.getByLabel('商品列表', { exact: true });
     await products.getByRole('button', { name: /^合成商品甲/ }).waitFor();
@@ -144,7 +144,7 @@ test('ordinary existing video uses separately confirmed mock ASR, product discov
     const card = page.locator(`[data-product-card="${a.id}"]`);
     await card.getByRole('button', { name: /^分析 / }).click();
     confirm = page.getByRole('dialog'); await confirm.waitFor();
-    await confirm.getByText(/预计新增请求/).waitFor();
+    await confirm.getByText(/新增请求/).waitFor();
     assert.match(await confirm.innerText(), /00:00\.100|00:00.100/);
     assert.match(await confirm.innerText(), /00:05\.900|00:05.900/);
     assert.equal(calls.structure, 0);
@@ -188,10 +188,10 @@ test('ordinary existing video uses separately confirmed mock ASR, product discov
     await open(reuse.id);
     await page.getByRole('button', { name: '准备当前视频', exact: true }).click();
     const reusePreparation = page.getByRole('region', { name: '素材准备', exact: true });
-    await reusePreparation.getByRole('button', { name: '继续拆商品', exact: true }).waitFor();
-    assert.equal(await reusePreparation.getByRole('button', { name: '拆商品', exact: true }).count(), 0);
+    await reusePreparation.getByRole('button', { name: '拆商品', exact: true }).waitFor();
+    assert.equal(await reusePreparation.getByRole('button', { name: '转写', exact: true }).count(), 0);
     assert.deepEqual(calls, { asr: 1, discovery: 1, structure: 1 });
-    await reusePreparation.getByRole('button', { name: '继续拆商品', exact: true }).click();
+    await reusePreparation.getByRole('button', { name: '拆商品', exact: true }).click();
     await page.getByRole('dialog').getByRole('button', { name: '确认拆品', exact: true }).click();
     await page.getByLabel('商品列表', { exact: true }).getByRole('button', { name: /^合成商品甲/ }).waitFor();
     assert.deepEqual(calls, { asr: 1, discovery: 2, structure: 1 }, 'saved transcript bypasses unavailable ASR');
@@ -214,17 +214,17 @@ test('ordinary existing video uses separately confirmed mock ASR, product discov
     let sidecarPreparation = page.getByRole('region', { name: '素材准备', exact: true });
     const bind = sidecarPreparation.getByRole('button', { name: '确认这些字幕属于此原片', exact: true });
     await bind.waitFor();
-    assert.equal(await sidecarPreparation.getByRole('button', { name: '继续拆商品', exact: true }).count(), 0, 'unconfirmed sidecar is not silently reused');
+    assert.equal(await sidecarPreparation.getByRole('button', { name: '拆商品', exact: true }).count(), 0, 'unconfirmed sidecar is not silently reused');
     assert.deepEqual(calls, { asr: 1, discovery: 2, structure: 1 });
     await bind.click();
-    await sidecarPreparation.getByRole('button', { name: '继续拆商品', exact: true }).waitFor();
+    await sidecarPreparation.getByRole('button', { name: '拆商品', exact: true }).waitFor();
     assert.deepEqual(calls, { asr: 1, discovery: 2, structure: 1 }, 'provenance confirmation is local and never uploads audio');
     await context.close(); context = null;
     await open(sidecar.id);
     sidecarPreparation = page.getByRole('region', { name: '素材准备', exact: true });
-    await sidecarPreparation.getByRole('button', { name: '继续拆商品', exact: true }).waitFor();
+    await sidecarPreparation.getByRole('button', { name: '拆商品', exact: true }).waitFor();
     assert.equal(await sidecarPreparation.getByRole('button', { name: '确认这些字幕属于此原片', exact: true }).count(), 0, 'saved provenance survives fresh browser');
-    await sidecarPreparation.getByRole('button', { name: '继续拆商品', exact: true }).click();
+    await sidecarPreparation.getByRole('button', { name: '拆商品', exact: true }).click();
     await page.getByRole('dialog').getByRole('button', { name: '确认拆品', exact: true }).click();
     await page.getByLabel('商品列表', { exact: true }).getByRole('button', { name: /^合成商品甲/ }).waitFor();
     assert.deepEqual(calls, { asr: 1, discovery: 3, structure: 1 });
@@ -239,9 +239,9 @@ test('ordinary existing video uses separately confirmed mock ASR, product discov
     await open(missingTranscript.id);
     const missingPanel = page.getByLabel('直播拆品设置', { exact: true });
     if (!await missingPanel.evaluate(element => element.open)) await missingPanel.locator('summary').first().click();
-    await missingPanel.getByRole('region', { name: '素材准备', exact: true }).getByRole('button', { name: '拆商品', exact: true }).click();
+    await missingPanel.getByRole('region', { name: '素材准备', exact: true }).getByRole('button', { name: '转写', exact: true }).click();
     const missingDialog = page.getByRole('dialog', { name: '确认转写', exact: true });
-    await missingDialog.getByText(/预计新增请求/).waitFor();
+    await missingDialog.getByText(/新增请求/).waitFor();
     await missingDialog.getByRole('button', { name: '取消', exact: true }).click();
     assert.deepEqual(calls, { asr: 1, discovery: 3, structure: 1 });
     const retainedCuts = (await api(`/api/projects/${missingTranscript.id}/product-analysis`)).analysis;

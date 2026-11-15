@@ -2,7 +2,7 @@
 import { createHash } from 'node:crypto';
 
 export const STRUCTURE_COMPOSITION_VERSION = 'structure-composition-v1';
-export const STRUCTURE_COMPOSITION_ROLES = Object.freeze(['hook', 'core', 'purchase', 'pain', 'offer', 'trust', 'story', 'display']);
+export const STRUCTURE_COMPOSITION_ROLES = Object.freeze(['hook', 'core', 'purchase', 'pain', 'offer', 'price', 'trust', 'story', 'intro', 'display']);
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const string = value => typeof value === 'string' && value.length > 0;
 const strings = value => Array.isArray(value) && value.every(string);
@@ -50,7 +50,7 @@ function prepare(input = {}, { aiComposition = false } = {}) {
     ...(value.contract !== undefined ? { contract: value.contract } : {}),
     status: value.status, confirmed: value.confirmed, roles: value.roles, coreIds: value.coreIds,
     requires: Array.isArray(value.requires) ? value.requires.map(stableRef).sort((a, b) => encoded(a).localeCompare(encoded(b))) : value.requires,
-    conditions: value.conditions,
+    conditions: value.conditions, ...(value.subject ? { subject: value.subject } : {}),
     excludes: Array.isArray(value.excludes) ? value.excludes.map(stableRef).sort((a, b) => encoded(a).localeCompare(encoded(b))) : value.excludes,
   } : null;
   const inputHash = hash({ version: STRUCTURE_COMPOSITION_VERSION, sourceIdentity, scope: { startMs: scope.startMs, endMs: scope.endMs }, validScope,
@@ -97,6 +97,7 @@ function prepare(input = {}, { aiComposition = false } = {}) {
       if (Array.isArray(review.coreIds) && review.coreIds.length && !review.roles?.includes('core')) issue('CORE_ROLE_MISMATCH', '核心卖点编号与结构作用不一致，请核对。', candidate);
       if (review.excludes !== undefined && !strings(review.excludes)) issue('EXCLUSIONS_UNREVIEWED', '互斥话术记录格式无效，请核对。', candidate);
     }
+    if (review?.subject && !['self', 'comparison'].includes(review.subject.kind)) issue('SUBJECT_NOT_USABLE', review.subject.kind === 'other' ? '这段只讲其他商品，不能独立用作本品介绍、卖点或背书；需要保留完整对比上下文。' : '这段话的商品归属不明确，暂不自动拼接。', candidate);
     clue.issues = issues.slice(before);
     if (issues.length !== before) continue;
     const key = encoded(stableCandidate(candidate));

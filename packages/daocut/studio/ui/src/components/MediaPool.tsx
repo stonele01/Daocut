@@ -524,7 +524,7 @@ export function MediaPool({
   ];
   /** What to say of a proxy. */
   const proxyText = (proxy: MediaProxy) => (proxy.state === 'making' ? t('media.proxyMaking').replace('{p}', String(Math.round((proxy.ratio ?? 0) * 100)))
-    : proxy.state === 'waiting' ? t('media.proxyWaiting') : proxy.state === 'failed' ? t('media.proxyFailed') : t('media.proxyReady'));
+    : proxy.state === 'waiting' ? t('media.proxyWaiting') : proxy.state === 'failed' ? proxy.message ?? t('media.proxyFailed') : t('media.proxyReady'));
   /** Where a file or folder is linked from (a NAS), if it is a link. */
   const linkOf = (key: string): MediaLink | undefined => {
     const item = itemByKey.get(key);

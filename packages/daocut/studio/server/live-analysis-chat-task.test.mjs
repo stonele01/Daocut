@@ -62,7 +62,8 @@ test('card and chat share clipped words, absolute candidates and persisted cache
   assert.equal(cached.analysis.currentRunId, first.analysis.currentRunId);
   assert.equal(cached.analysis.omittedBoundaryWords, 2);
   assert.deepEqual(cached.transcription.segments, [], 'chat task status never includes the full transcript');
-  assert.deepEqual(f.calls[0].cues, [{ startMs: 2000, endMs: 3000, text: '本品' }]);
+  assert.deepEqual(f.calls[0].cues, [{ startMs: 2000, endMs: 3000, text: '本品', index: 0 }]);
+  assert.deepEqual(f.calls[0].cueIndexing, { base: 0, first: 0, last: 0, reference: 'cues.index', endInclusive: true });
   await analyze(f, { ...scope, productId: 'b', intervalId: 'b1', startMs: 6000, endMs: 10000 });
   await analyze(f, { ...scope, intervalId: 'a2', startMs: 12000, endMs: 16000 });
   f.route = createLiveAnalysis(f.options);

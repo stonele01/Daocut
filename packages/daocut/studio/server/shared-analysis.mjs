@@ -1,6 +1,6 @@
 /** Shared AI baselines only. Personal edits and film documents never enter this store. */
 import { createHash, randomUUID } from 'node:crypto';
-import { createReadStream } from 'node:fs';
+import { mediaContentHash } from '../../src/shared-media-reference.mjs';
 import { mkdir, readFile, readdir, realpath, stat, unlink, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { writeAtomic } from './atomic.mjs';
@@ -37,7 +37,7 @@ export async function probeSharedResultWritable(root) {
 }
 
 export function createSharedAnalysis({ coordinate, settings = () => readPrefs().sharedAnalysis, readManifest = sharedMediaManifest, resolveSource = productSourcePath, publishFile = writeAtomic } = {}) {
-  const hashes = new Map(), active = new Set();
+  const active = new Set();
   async function mapping(libraryId) {
     const config = await settings();
     const root = config?.enabled && config.resultRoots?.find(item => item.libraryId === libraryId)?.root;
@@ -55,14 +55,9 @@ export function createSharedAnalysis({ coordinate, settings = () => readPrefs().
     if (!await mapping(record.libraryId)) throw new HttpError(409, '已启用共享，请先为此素材库配置共享结果目录；未改成本机付费分析');
     if (typeof coordinate !== 'function') throw new HttpError(409, '共享任务协调服务未接通，未发起本机付费分析');
     const path = await realpath(await resolveSource(root, source.assetPath)), before = await stat(path);
-    const key = JSON.stringify([path, before.size, before.mtimeMs, before.ctimeMs, before.ino]);
-    let digest = hashes.get(key);
-    if (!digest) {
-      const hash = createHash('sha256'); for await (const chunk of createReadStream(path)) hash.update(chunk);
-      const after = await stat(path);
-      if (before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) throw new HttpError(409, '素材在校验期间发生变化，未发送请求');
-      digest = hash.digest('hex'); hashes.set(key, digest);
-    }
+    // Opening, playback and shared results use the same verified identity and in-flight read.
+    const digest = await mediaContentHash(path), after = await stat(path);
+    if (before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs || before.ino !== after.ino) throw new HttpError(409, '素材在校验期间发生变化，未发送请求');
     return { libraryId: record.libraryId, relativePath: record.relativePath, sha256: digest, size: before.size, durationMs: source.durationMs };
   }
   function verify(envelope, descriptor, ref) {

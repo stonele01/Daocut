@@ -34,7 +34,7 @@ async function fixture(t, { analyze = true, missingPurchase = false } = {}) {
   ], words: [] };
   let calls = 0;
   const options = { modelIdentity: 'isolated-local-text', probeSource: async () => ({ duration: 24 }), readTranscript: async () => transcript,
-    modelClient: async () => { calls++; return { schema: 'complete-speech-v1', candidates: [['故事'], ['痛点'], ['卖点'], ...(missingPurchase ? [] : [['行动指令']])].map((tags, i) => ({ firstCue: i, lastCue: i, tags })), issues: [] }; } };
+    modelClient: async () => { calls++; return { schema: 'complete-speech-v1', candidates: [['故事'], ['痛点'], ['卖点'], ...(missingPurchase ? [] : [['行动指令']])].map((tags, i) => ({ firstCue: i, lastCue: i, tags, subject: { kind: 'self', evidence: [i] } })), issues: [] }; } };
   const live = createLiveAnalysis(options);
   if (analyze) { await live.startAnalysis(root, { ...scope, lectureOnly: true }); await live.wait(root, 's'); assert.equal((await live.view(root, 's', 'i', 'p', scope)).analysis.status, 'complete'); }
   const forbiddenShared = new Proxy({}, { get: (_, name) => () => { throw Error(`Local composition must not call shared ${String(name)}`); } });

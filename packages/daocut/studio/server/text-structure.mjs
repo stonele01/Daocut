@@ -1,20 +1,30 @@
 import { readFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
-import { ANALYZE_SPEECH_PROMPT } from './approved-prompts.mjs';
+import { ANALYZE_SPEECH_PROMPT, PREVIOUS_CONTEXT_ANALYZE_SPEECH_PROMPT, PREVIOUS_ATTRIBUTED_ANALYZE_SPEECH_PROMPT, PREVIOUS_CURATED_ANALYZE_SPEECH_PROMPT, PREVIOUS_ANALYZE_SPEECH_PROMPT, PREVIOUS_SENTENCE_ANALYZE_SPEECH_PROMPT } from './approved-prompts.mjs';
+
+export const PREVIOUS_CONTEXT_TEXT_STRUCTURE_PROMPT = PREVIOUS_CONTEXT_ANALYZE_SPEECH_PROMPT;
+export const PREVIOUS_CURATED_TEXT_STRUCTURE_PROMPT = PREVIOUS_CURATED_ANALYZE_SPEECH_PROMPT;
+export const PREVIOUS_ATTRIBUTED_TEXT_STRUCTURE_PROMPT = PREVIOUS_ATTRIBUTED_ANALYZE_SPEECH_PROMPT;
+export const PREVIOUS_FULL_TEXT_STRUCTURE_PROMPT = PREVIOUS_ANALYZE_SPEECH_PROMPT;
+export const PREVIOUS_SENTENCE_TEXT_STRUCTURE_PROMPT = PREVIOUS_SENTENCE_ANALYZE_SPEECH_PROMPT;
 
 export const TEXT_STRUCTURE_VERSION = 'text-structure-v2';
-export const TEXT_STRUCTURE_TAGS = ['钩子', '故事', '痛点', '卖点', '产品演示', '福利机制', '信任背书', '价格锚点', '行动指令', '逼单'];
+export const TEXT_STRUCTURE_TAGS = ['钩子', '故事', '痛点', '卖点', '产品介绍', '产品演示', '价格机制', '福利机制', '信任背书', '价格锚点', '行动指令', '逼单'];
 export const COMPLETE_SPEECH_SCHEMA = 'complete-speech-v1';
+export const TEXT_OPENING_POLICY = 'curated-openings-v1';
 export const TEXT_STRUCTURE_WINDOW_VERSION = 'cue-byte-windows-v1';
-export const DEEPSEEK_TEXT_POLICY = Object.freeze({ maxOutputTokens: 32768, reasoningEffort: 'low', outputFormat: 'json_object' });
-/** Keep the established cache namespace for this transport-only upgrade. The
- * prompt, cues, model, reasoning and validators are unchanged. Actual request
- * policy stays in public configuration and receipts, never in this cache alias. */
+export const TEXT_CUE_ENCODING = 'indexed-cues-v1';
+export const LEGACY_TEXT_CUE_ENCODING = 'array-positions-v1';
+export const DEEPSEEK_TEXT_POLICY = Object.freeze({ maxOutputTokens: 65536, reasoningEffort: 'high', outputFormat: 'json_object' });
+export const DEEPSEEK_COMPOSITION_POLICY = Object.freeze({ ...DEEPSEEK_TEXT_POLICY, maxOutputTokens: 65536 });
+/** A stronger default applies to new requests; it does not invalidate saved
+ * analyses or their existing plans. Preserve the established reuse namespace
+ * for the reviewed defaults only. Actual effort stays in identities and receipts. */
 export function textResultCacheIdentity(identity) {
   if (identity?.provider !== 'deepseek' || !['https://api.deepseek.com/responses', 'https://api.deepseek.com/v1/responses'].includes(identity.endpoint)
-    || identity.maxOutputTokens !== 32768 || identity.reasoningEffort !== 'low' || identity.outputFormat !== 'json_object') return identity;
+    || ![32768, 65536].includes(identity.maxOutputTokens) || !['low', 'high'].includes(identity.reasoningEffort) || identity.outputFormat !== 'json_object') return identity;
   const { outputFormat, ...compatible } = identity;
-  return { ...compatible, maxOutputTokens: 16384 };
+  return { ...compatible, maxOutputTokens: 16384, reasoningEffort: 'low' };
 }
 export function textStructureWindowPolicy({ maxInputBytes = 32768, contextCues = 2 } = {}) {
   if (!Number.isInteger(maxInputBytes) || maxInputBytes < 256 || !Number.isInteger(contextCues) || contextCues < 0 || contextCues > 20) throw failure('MODEL_INPUT_TOO_LARGE', '文字窗口预算或上下文设置无效');
@@ -80,7 +90,8 @@ export function textStructureCachePrompt(prompt) {
 }
 
 /** No configuration or secret is read until a caller invokes the returned client. */
-export function createDeepSeekTextClient({ getConfig, getPublicConfig, fetch: fetchImpl, timeoutMs = 300000 }) {
+export function createDeepSeekTextClient({ getConfig, getPublicConfig, fetch: fetchImpl, timeoutMs = 600000, purpose }) {
+  const policy = purpose === 'curated-composition' ? DEEPSEEK_COMPOSITION_POLICY : DEEPSEEK_TEXT_POLICY;
   if (typeof getConfig !== 'function' || typeof fetchImpl !== 'function') throw new Error('需要注入配置读取器和 fetch');
   // This reader must contain public configuration only. In particular, GET state
   // inspection must never call getConfig, which may decrypt stored credentials.
@@ -89,7 +100,7 @@ export function createDeepSeekTextClient({ getConfig, getPublicConfig, fetch: fe
     let url;
     try { url = new URL(value.baseUrl); } catch { return null; }
     if (url.protocol !== 'https:' || url.hostname !== 'api.deepseek.com' || url.username || url.password || url.port || !['/', '/v1', '/v1/'].includes(url.pathname) || url.search || url.hash) return null;
-    return { provider: 'deepseek', endpoint: `${url.origin}${url.pathname.replace(/\/$/, '')}/responses`, model: value.model, ...DEEPSEEK_TEXT_POLICY };
+    return { provider: 'deepseek', endpoint: `${url.origin}${url.pathname.replace(/\/$/, '')}/responses`, model: value.model, ...policy };
   };
   const client = async ({ system, input, onReceipt }) => {
     let config;
@@ -107,13 +118,15 @@ export function createDeepSeekTextClient({ getConfig, getPublicConfig, fetch: fe
       const transport = (async () => {
         let response;
         try {
-          response = await fetchImpl(endpoint, { method: 'POST', redirect: 'error', signal: controller.signal, headers: { 'content-type': 'application/json', authorization: `Bearer ${config.apiKey}` }, body: JSON.stringify({ model: config.model, max_output_tokens: DEEPSEEK_TEXT_POLICY.maxOutputTokens, reasoning: { effort: DEEPSEEK_TEXT_POLICY.reasoningEffort }, text: { format: { type: DEEPSEEK_TEXT_POLICY.outputFormat } }, input: [{ role: 'system', content: system }, { role: 'user', content: input }] }) });
+          response = await fetchImpl(endpoint, { method: 'POST', redirect: 'error', signal: controller.signal, headers: { 'content-type': 'application/json', authorization: `Bearer ${config.apiKey}` }, body: JSON.stringify({ model: config.model, max_output_tokens: policy.maxOutputTokens, reasoning: { effort: policy.reasoningEffort }, text: { format: { type: policy.outputFormat } }, input: [{ role: 'system', content: system }, { role: 'user', content: input }] }) });
         } catch (error) { throw controller.signal.aborted || error?.name === 'AbortError' || error?.name === 'TimeoutError' ? failure('MODEL_TIMEOUT', '模型请求超时') : failure('MODEL_NETWORK', '模型网络请求失败'); }
         if (!response.ok) throw Object.assign(failure('MODEL_HTTP', '模型服务返回 HTTP 错误'), { httpStatus: Number.isInteger(response.status) && response.status >= 400 && response.status <= 599 ? response.status : null });
         let body;
         try { body = await response.json(); } catch { throw controller.signal.aborted ? failure('MODEL_TIMEOUT', '模型请求超时') : failure('MODEL_INVALID_JSON', '模型响应 JSON 无效'); }
         if (controller.signal.aborted) throw failure('MODEL_TIMEOUT', '模型请求超时');
         const usage = Object.fromEntries(['input_tokens', 'output_tokens', 'total_tokens'].filter(key => Number.isFinite(body.usage?.[key]) && body.usage[key] >= 0).map(key => [key, body.usage[key]]));
+        const cachedTokens = body.usage?.input_tokens_details?.cached_tokens;
+        if (Number.isSafeInteger(cachedTokens) && cachedTokens >= 0) usage.input_tokens_details = { cached_tokens: cachedTokens };
         const reasoningTokens = body.usage?.output_tokens_details?.reasoning_tokens;
         if (Number.isSafeInteger(reasoningTokens) && reasoningTokens >= 0) usage.output_tokens_details = { reasoning_tokens: reasoningTokens };
         const text = (Array.isArray(body.output) ? body.output : []).flatMap(x => Array.isArray(x?.content) ? x.content : []).filter(x => x?.type === 'output_text' && typeof x.text === 'string').map(x => x.text).join('');
@@ -121,7 +134,7 @@ export function createDeepSeekTextClient({ getConfig, getPublicConfig, fetch: fe
         // Persist visible response text before parsing or rejecting it. Keep internal
         // reasoning text, credentials, headers and arbitrary provider metadata out.
         await onReceipt?.({ provider: 'deepseek', model: config.model, endpoint, requestId: typeof body.id === 'string' ? body.id.slice(0, 200) : null, httpStatus: response.status ?? 200,
-          status: ['completed', 'incomplete', 'failed', 'in_progress'].includes(body.status) ? body.status : 'incomplete', usage, incompleteReason, ...DEEPSEEK_TEXT_POLICY,
+          status: ['completed', 'incomplete', 'failed', 'in_progress'].includes(body.status) ? body.status : 'incomplete', usage, incompleteReason, ...policy,
           responseVersion: RESPONSE_RECEIPT_VERSION, inputSha256: responseInputDigest({ system, input }), rawText: text, rawTextSha256: responseDigest(text) });
         if (body.status !== 'completed') throw failure('MODEL_INCOMPLETE', '模型响应未完成或达到输出上限');
         try { return JSON.parse(text); } catch { throw failure('MODEL_INVALID_JSON', '模型输出 JSON 无效'); }
@@ -140,12 +153,55 @@ function validateInput({ sourceId, productId, intervalId, cues, rangeStartMs, ra
   }
 }
 
+function textStructureInput({ sourceId, productId, intervalId, rangeStartMs, rangeEndMs, cues, cueEncoding }) {
+  if (![TEXT_CUE_ENCODING, LEGACY_TEXT_CUE_ENCODING].includes(cueEncoding)) throw failure('MODEL_INPUT_CHANGED', '不支持的文字字幕编号格式');
+  // Keep this property order and the original cues for exact paid-receipt recovery.
+  const body = { sourceId, productId, intervalId, rangeStartMs, rangeEndMs, cues };
+  if (cueEncoding === TEXT_CUE_ENCODING) {
+    body.cues = cues.map((cue, index) => ({ ...cue, index }));
+    body.cueIndexing = { base: 0, first: 0, last: cues.length - 1, reference: 'cues.index', endInclusive: true };
+  }
+  return JSON.stringify(body);
+}
+
+/** Every new window has its own explicit zero-based cue indices. Legacy requests
+ * retain their original bytes; encoding is selected by the saved attempt. */
+export function textStructureRequest({ sourceId, productId, intervalId, cues, rangeStartMs, rangeEndMs, prompt = TEXT_STRUCTURE_PROMPT, cueEncoding = TEXT_CUE_ENCODING }) {
+  validateInput({ sourceId, productId, intervalId, cues, rangeStartMs, rangeEndMs });
+  return { system: prompt, input: textStructureInput({ sourceId, productId, intervalId, rangeStartMs, rangeEndMs, cues, cueEncoding }) };
+}
+
 /** Budget complete cues without guessing token counts. Keep the previous cue
  * windows for the reviewed wording cleanup so completed paid windows survive;
  * report actual transmitted bytes, not the reserved headroom. */
-export function textStructureWindows({ sourceId, productId, intervalId, cues, rangeStartMs, rangeEndMs, prompt = TEXT_STRUCTURE_PROMPT, maxInputBytes, contextCues }) {
+export function textStructureWindows({ sourceId, productId, intervalId, cues, rangeStartMs, rangeEndMs, prompt = TEXT_STRUCTURE_PROMPT, maxInputBytes, contextCues, cueEncoding = TEXT_CUE_ENCODING }) {
   validateInput({ sourceId, productId, intervalId, cues, rangeStartMs, rangeEndMs });
   const policy = textStructureWindowPolicy({ maxInputBytes, contextCues });
+  const requestArgs = { sourceId, productId, intervalId, rangeStartMs, rangeEndMs, cueEncoding };
+  const encodedEmpty = textStructureInput({ ...requestArgs, cues: [] });
+  if (cueEncoding === TEXT_CUE_ENCODING) {
+    const fixed = Buffer.byteLength(prompt, 'utf8') + Buffer.byteLength(encodedEmpty, 'utf8');
+    const sizes = cues.map(cue => Buffer.byteLength(JSON.stringify({ ...cue, index: 0 }), 'utf8'));
+    const windows = [];
+    for (let first = 0; first < cues.length;) {
+      let end = first, contentBytes = 0;
+      while (end < cues.length) {
+        const indexDigits = String(end - first).length;
+        const nextContentBytes = contentBytes + sizes[end] + indexDigits - 1 + (end > first ? 1 : 0);
+        // The empty encoding reserves two bytes for last:-1; the real inclusive
+        // last index and each cue's index grow with the current window only.
+        if (fixed + nextContentBytes + indexDigits - 2 > policy.maxInputBytes) break;
+        contentBytes = nextContentBytes; end++;
+      }
+      if (end === first) throw failure('MODEL_INPUT_TOO_LARGE', '单条字幕与提示词超出文字窗口预算，请先检查字幕边界');
+      const windowCues = cues.slice(first, end);
+      const bytes = Buffer.byteLength(prompt, 'utf8') + Buffer.byteLength(textStructureInput({ ...requestArgs, cues: windowCues }), 'utf8');
+      windows.push({ index: windows.length, firstCue: first, lastCue: end - 1, cues: windowCues, bytes });
+      if (end === cues.length) break;
+      first = Math.max(first + 1, end - policy.contextCues);
+    }
+    return windows;
+  }
   const inputFixed = Buffer.byteLength(JSON.stringify({ sourceId, productId, intervalId, rangeStartMs, rangeEndMs, cues: [] }), 'utf8');
   const actualFixed = Buffer.byteLength(prompt, 'utf8') + inputFixed;
   const sizes = cues.map(cue => Buffer.byteLength(JSON.stringify(cue), 'utf8'));
@@ -177,10 +233,14 @@ function mergeCompleteSpeechDuplicate(previous, candidate) {
     if (Object.hasOwn(conditions, key) && conditions[key] !== value) problems.push(`条件 ${key} 在分窗结果中冲突（${JSON.stringify(conditions[key])} / ${JSON.stringify(value)}）`);
     else conditions[key] = value;
   }
+  if (JSON.stringify(left?.subject) !== JSON.stringify(right?.subject)) problems.push('同一话术在分窗结果中的商品归属不一致');
+  if (JSON.stringify(left?.price) !== JSON.stringify(right?.price)) problems.push('同一话术在分窗结果中的成交价归属不一致');
   if (!leftCompact || !rightCompact) problems.push('同一范围的分窗结果完整性标记不一致，请核对后使用');
   previous.details = { ...previous.details,
     review: [...new Set([...(previous.details?.review ?? []), ...(candidate.details?.review ?? []), ...problems])],
     composition: { ...(leftCompact ? left : right), conditions,
+      ...((left?.openingPolicy ?? right?.openingPolicy) ? { openingPolicy: left?.openingPolicy ?? right?.openingPolicy } : {}),
+      ...((left?.opening ?? right?.opening) ? { opening: structuredClone(left?.opening ?? right?.opening) } : {}),
       status: !problems.length && left?.status === 'confirmed' && right?.status === 'confirmed' ? 'confirmed' : 'pending' } };
 }
 
@@ -198,33 +258,58 @@ export function combineTextStructureWindows({ outputs, sourceId, intervalId, cue
   return { ...(completeSpeech ? { schema: COMPLETE_SPEECH_SCHEMA } : {}), candidates, coverage: [{ sourceId, intervalId, asrRanges: cues.map(cue => [cue.startMs, cue.endMs]), audioRanges: [], videoRanges: [] }], issues: [...new Set(outputs.flatMap(output => output.issues))], version };
 }
 
-const roleForTag = { 钩子: 'hook', 故事: 'story', 痛点: 'pain', 卖点: 'core', 产品演示: 'display', 福利机制: 'offer', 价格锚点: 'offer', 信任背书: 'trust', 行动指令: 'purchase', 逼单: 'purchase' };
+const roleForTag = { 钩子: 'hook', 故事: 'story', 痛点: 'pain', 卖点: 'core', 产品介绍: 'intro', 产品演示: 'display', 价格机制: 'price', 福利机制: 'offer', 价格锚点: 'offer', 信任背书: 'trust', 行动指令: 'purchase', 逼单: 'purchase' };
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const strings = value => Array.isArray(value) && value.every(item => typeof item === 'string');
-function completeSpeechDetails(item, tags, lines) {
+function completeSpeechDetails(item, tags, lines, openingPolicy, subjectRequired = false, context = null) {
   const conditions = item.conditions ?? {}, review = item.review ?? [];
   if (!record(conditions) || Object.values(conditions).some(value => !['string', 'number', 'boolean'].includes(typeof value) || (typeof value === 'number' && !Number.isFinite(value))) || !strings(review)) throw failure('MODEL_CONSTRAINT', '模型结果违反格式或来源约束');
+  const subject = item.subject ?? (subjectRequired ? { kind: 'unknown', evidence: [] } : undefined);
+  if (subject && (!record(subject) || !['self', 'other', 'comparison', 'unknown'].includes(subject.kind)
+    || !Array.isArray(subject.evidence) || subject.evidence.some(cue => !Number.isInteger(cue) || cue < (context ? 0 : item.firstCue) || cue > (context ? context.count - 1 : item.lastCue))
+    || (subject.kind !== 'unknown' && !subject.evidence.length))) throw failure('MODEL_CONSTRAINT', '话术归属必须引用允许范围内的真实字幕编号');
+  const subjectReview = subject?.kind === 'unknown' ? ['这句话说的是哪个商品尚不明确，暂不自动拼接'] : [];
   const roles = [...new Set(tags.map(tag => roleForTag[tag]))];
+  const price = item.price;
+  if (price !== undefined && (!roles.includes('price') || !record(price) || !['current', 'reference', 'future'].includes(price.kind)
+    || !Array.isArray(price.evidence) || !price.evidence.length || price.evidence.some(cue => !Number.isInteger(cue) || cue < item.firstCue || cue > item.lastCue))) throw failure('MODEL_CONSTRAINT', '价格机制必须区分成交价、参考价或拟改价，并引用本段实际报价的字幕编号');
+  if (roles.includes('price') && !price) subjectReview.push('价格机制尚未区分实际成交价、参考价和拟改价');
+  if (item.opening !== undefined && (!record(item.opening) || Object.keys(item.opening).some(key => !['group', 'followup'].includes(key))
+    || !['group', 'followup'].every(key => typeof item.opening[key] === 'string' && item.opening[key].trim()))) throw failure('MODEL_CONSTRAINT', '优选开头需要具体诉求和后文承接说明');
   const identity = createHash('sha256').update(JSON.stringify([Math.min(...lines.map(c => c.startMs)), Math.max(...lines.map(c => c.endMs)), joinCueText(lines)])).digest('hex').slice(0, 24);
-  return { subtypes: [], reason: '完整话术范围', evidence: ['ASR'], context: '', repetition: '', review: [...review],
-    composition: { contract: COMPLETE_SPEECH_SCHEMA, status: review.length ? 'pending' : 'confirmed', roles, coreIds: roles.includes('core') ? [`speech-${identity}`] : [], requires: [], conditions: { ...conditions }, excludes: [] } };
+  return { subtypes: [], reason: '完整话术范围', evidence: ['ASR'], context: '', repetition: '', review: [...review, ...subjectReview],
+    composition: { contract: COMPLETE_SPEECH_SCHEMA, status: review.length || subjectReview.length ? 'pending' : 'confirmed', roles,
+      ...(subject ? { subject: { kind: subject.kind, evidence: [...new Set(subject.evidence)].filter(cue => cue >= item.firstCue && cue <= item.lastCue).map(cue => cue - item.firstCue),
+        ...(context && subject.evidence.some(cue => cue < item.firstCue || cue > item.lastCue) ? { contextEvidence: [...new Set(subject.evidence)].filter(cue => cue < item.firstCue || cue > item.lastCue).map(cue => cue + context.offset) } : {}) } } : {}),
+      ...(price ? { price: { kind: price.kind, evidence: [...new Set(price.evidence)].map(cue => cue - item.firstCue) } } : {}),
+      coreIds: roles.includes('core') ? [`speech-${identity}`] : [], requires: [], conditions: { ...conditions }, excludes: [],
+      ...(openingPolicy || item.opening ? { openingPolicy: openingPolicy ?? TEXT_OPENING_POLICY } : {}),
+      ...(item.opening ? { opening: { group: item.opening.group.trim(), followup: item.opening.followup.trim() } } : {}) } };
 }
 
 /** The caller supplies a model client; this module does not access credentials or persist data. */
-export async function analyzeTextStructure({ sourceId, productId, intervalId, cues, rangeStartMs, rangeEndMs, client, prompt = TEXT_STRUCTURE_PROMPT, version = TEXT_STRUCTURE_VERSION, cueIndexOffset = 0 }) {
+export async function analyzeTextStructure({ sourceId, productId, intervalId, cues, rangeStartMs, rangeEndMs, client, prompt = TEXT_STRUCTURE_PROMPT, version = TEXT_STRUCTURE_VERSION, cueIndexOffset = 0, cueEncoding = TEXT_CUE_ENCODING }) {
   if (typeof client !== 'function') throw Object.assign(new Error('文字分析需要可用的模型客户端'), { code: 'MODEL_CLIENT_UNAVAILABLE' });
   validateInput({ sourceId, productId, intervalId, cues, rangeStartMs, rangeEndMs });
   if (!Number.isInteger(cueIndexOffset) || cueIndexOffset < 0) throw new Error('无效字幕索引偏移');
-  const response = await client({ system: prompt, input: JSON.stringify({ sourceId, productId, intervalId, rangeStartMs, rangeEndMs, cues }) });
+  const response = await client(textStructureRequest({ sourceId, productId, intervalId, cues, rangeStartMs, rangeEndMs, prompt, cueEncoding }));
   if (!response || response.truncated || (response.schema !== undefined && response.schema !== COMPLETE_SPEECH_SCHEMA) || !Array.isArray(response.candidates) || !Array.isArray(response.issues) || response.issues.some(x => typeof x !== 'string')) throw failure('MODEL_CONSTRAINT', '模型结果违反格式或来源约束');
   const completeSpeech = response.schema === COMPLETE_SPEECH_SCHEMA;
-  const candidates = response.candidates.map(item => {
+  const candidates = response.candidates.map((item, candidateIndex) => {
     if (!item || typeof item !== 'object' || Array.isArray(item)) throw failure('MODEL_CONSTRAINT', '模型结果违反格式或来源约束');
     const { firstCue, lastCue } = item;
-    if (!Number.isInteger(firstCue) || !Number.isInteger(lastCue) || firstCue < 0 || lastCue < firstCue || lastCue >= cues.length || !Array.isArray(item.tags) || !item.tags.length || item.tags.some(t => !TEXT_STRUCTURE_TAGS.includes(t) || t === '产品演示')) throw failure('MODEL_CONSTRAINT', '模型结果违反格式或来源约束');
+    if (!Number.isInteger(firstCue) || !Number.isInteger(lastCue) || firstCue < 0 || lastCue < firstCue || lastCue >= cues.length) {
+      const showIndex = value => ['number', 'string', 'boolean'].includes(typeof value) || value === null ? JSON.stringify(value).slice(0, 80) : typeof value;
+      throw Object.assign(failure('MODEL_CONSTRAINT', `第 ${candidateIndex + 1} 个候选的字幕引用无效：firstCue=${showIndex(firstCue)}，lastCue=${showIndex(lastCue)}；当前窗口允许 0–${cues.length - 1}，必须为整数、包含两端且 firstCue ≤ lastCue`), {
+        cueIssue: { row: candidateIndex + 1, first: typeof firstCue === 'number' ? firstCue : showIndex(firstCue), last: typeof lastCue === 'number' ? lastCue : showIndex(lastCue), min: 0, max: cues.length - 1 },
+      });
+    }
+    if (!Array.isArray(item.tags) || !item.tags.length || item.tags.some(t => !TEXT_STRUCTURE_TAGS.includes(t) || t === '产品演示')) throw failure('MODEL_CONSTRAINT', '模型结果违反格式或来源约束');
     const lines = cues.slice(firstCue, lastCue + 1);
     const tags = completeSpeech ? item.tags.map(tag => tag === '价格锚点' ? '福利机制' : tag === '逼单' ? '行动指令' : tag) : item.tags;
-    const details = completeSpeech ? completeSpeechDetails(item, tags, lines) : item.details;
+    const details = completeSpeech ? completeSpeechDetails(item, tags, lines,
+      [TEXT_STRUCTURE_PROMPT, PREVIOUS_CONTEXT_TEXT_STRUCTURE_PROMPT, PREVIOUS_CURATED_TEXT_STRUCTURE_PROMPT, PREVIOUS_ATTRIBUTED_TEXT_STRUCTURE_PROMPT].includes(prompt) ? TEXT_OPENING_POLICY : undefined,
+      [TEXT_STRUCTURE_PROMPT, PREVIOUS_CONTEXT_TEXT_STRUCTURE_PROMPT, PREVIOUS_ATTRIBUTED_TEXT_STRUCTURE_PROMPT].includes(prompt), [TEXT_STRUCTURE_PROMPT, PREVIOUS_CONTEXT_TEXT_STRUCTURE_PROMPT].includes(prompt) ? { count: cues.length, offset: cueIndexOffset } : null) : item.details;
     if (!details || !strings(details.subtypes) || typeof details.reason !== 'string' || !details.reason.trim() || !Array.isArray(details.evidence) || details.evidence.length !== 1 || details.evidence[0] !== 'ASR' || typeof details.context !== 'string' || typeof details.repetition !== 'string' || !strings(details.review)) throw failure('MODEL_CONSTRAINT', '模型结果违反格式或来源约束');
     return { id: randomUUID(), sourceId, productId, intervalId, startMs: Math.min(...lines.map(c => c.startMs)), endMs: Math.max(...lines.map(c => c.endMs)), text: joinCueText(lines), tags: [...new Set(tags)], origin: 'ai-text', version, details: { ...details, review: [...new Set([...details.review, '仅依据 ASR；画面、声音和句级边界待核实'])] }, cueRange: [firstCue + cueIndexOffset, lastCue + cueIndexOffset] };
   });

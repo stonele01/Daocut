@@ -1,12 +1,21 @@
 // @ts-check
 /** Read-only logical media references. No writable project-path helper calls this module. */
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { createReadStream } from 'node:fs';
+import { mkdir, readFile, writeFile, stat, realpath } from 'node:fs/promises';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { studioHomeDir } from './locations.mjs';
 import { readableLink } from './media-links.mjs';
 
+/** One read-only HTTP operation reuses verified metadata; no TTL or cross-request trust. */
+const snapshots = new AsyncLocalStorage();
+export async function withMediaReferenceSnapshot(/** @type {() => any} */ work) {
+ const cache = new Map();
+ try { return await snapshots.run(cache, work); } finally { cache.clear(); }
+}
+const referenceKey = (/** @type {string} */ root, /** @type {string} */ rel) => JSON.stringify([resolve(root), rel]);
 const MANIFEST='assets/.daocut-source-media.json';
 const MEDIA=/\.(mp4|mov|mkv|avi|m4v|webm|wmv|flv|ts|mts|m2ts|wav|m4a|mp3|aac|ogg|flac|png|jpe?g|webp)$/i;
 /** @type {Map<string,string>} */
@@ -35,12 +44,35 @@ export function mediaReferences(root){
 }
 const version=(/** @type {string} */path,/** @type {import('node:fs').Stats} */info)=>JSON.stringify([path,info.size,info.mtimeMs,info.ctimeMs,info.ino]);
 function remember(/** @type {string} */key,/** @type {string} */hash){if(hashes.size>=256)hashes.delete(/** @type {string} */(hashes.keys().next().value));hashes.set(key,hash);}
-/** Stream once when registering/validating; regular media reads reuse the unchanged file identity.
+/** Keep verified identities across app restarts; changed file metadata invalidates the record.
  * @param {string} path */
-export async function mediaContentHash(path){const before=statSync(path),key=version(path,before),cached=hashes.get(key);if(cached)return cached;let work=pending.get(key);if(!work){work=(async()=>{const h=createHash('sha256');for await(const part of createReadStream(path))h.update(part);if(version(path,statSync(path))!==key)throw fail('Shared media changed during identity verification');const sha=h.digest('hex');remember(key,sha);return sha;})();pending.set(key,work);void work.finally(()=>pending.delete(key)).catch(()=>{});}return work;}
+export async function mediaContentHash(path){
+ const before=await stat(path),key=version(path,before),cached=hashes.get(key);if(cached)return cached;
+ let work=pending.get(key);
+ if(!work){
+  work=(async()=>{
+   const directory=join(studioHomeDir(),'cache','media-identities-v1');
+   const file=join(directory,createHash('sha256').update(key).digest('hex')+'.json');
+   let saved;
+   try{saved=JSON.parse(await readFile(file,'utf8'));}catch{/* Missing or incomplete cache falls back to a full read. */}
+   if(saved?.version===1&&saved.key===key&&/^[a-f0-9]{64}$/.test(saved.sha256??'')){
+    if(version(path,await stat(path))!==key)throw fail('Shared media changed during identity verification');
+    remember(key,saved.sha256);return saved.sha256;
+   }
+   const h=createHash('sha256');for await(const part of createReadStream(path,{highWaterMark:1024*1024}))h.update(part);
+   if(version(path,await stat(path))!==key)throw fail('Shared media changed during identity verification');
+   const sha=h.digest('hex');remember(key,sha);
+   try{await mkdir(directory,{recursive:true});await writeFile(file,JSON.stringify({version:1,key,sha256:sha}));}catch{/* A cache write failure must not prevent using the verified original. */}
+   return sha;
+  })();
+  pending.set(key,work);void work.finally(()=>pending.delete(key)).catch(()=>{});
+ }
+ return work;
+}
 /** Locate a registered reference without following unregistered paths.
  * @param {string} root @param {string} rel @returns {{path:string,info:import('node:fs').Stats,reference:any}|null} */
 function candidate(root,rel){
+ const cached=snapshots.getStore()?.get(referenceKey(root,rel));if(cached)return cached;
  const records=mediaReferences(root),record=records[rel];if(!record)return null;
  if(record.mode==='project-reference'){
   const home=realpathSync.native(resolve(root,'../../..'));
@@ -62,6 +94,28 @@ function candidate(root,rel){
  const info=statSync(path);if(!info.isFile()||info.size!==record.size||Math.abs(info.mtimeMs-record.mtimeMs)>2000)throw fail('Shared media changed and needs confirmation');
  return {path,info,reference:record};
 }
+async function candidateAsync(/** @type {string} */ root,/** @type {string} */ rel){
+ const records=mediaReferences(root),record=records[rel];if(!record)return null;
+ if(record.mode==='project-reference'){
+  const home=await realpath(resolve(root,'../../..'));
+  const meta=JSON.parse(readFileSync(join(root,'.film/structure-draft.json'),'utf8'));
+  if(!/^[a-f0-9]{24}$/.test(meta?.draftId??'')||meta.draftId!==basename(root)||resolve(root)!==join(home,'.film','structure-drafts',meta.draftId)||meta.parentRelative!=='../../..'||meta.parentProjectId!==record.parentProjectId||readFileSync(join(home,'.film/id'),'utf8').trim()!==record.parentProjectId)throw fail('Parent project identity or draft location changed');
+  const asked=resolve(home,...record.parentAssetPath.split('/'));
+  if(!inside(join(home,'assets'),asked))throw fail('Parent media must stay inside assets');
+  const path=await realpath(asked);
+  if(!inside(join(home,'assets'),path)&&!readableLink(home,asked))throw fail('Parent media is not an authorized project asset');
+  if(existsSync(join(root,...rel.split('/'))))throw fail('Logical media reference conflicts with an existing project file');
+  const info=await stat(path);if(!info.isFile()||info.size!==record.size||Math.abs(info.mtimeMs-record.mtimeMs)>2000)throw fail('Parent media changed and needs confirmation');
+  return {path,info,reference:record};
+ }
+ const prefs=JSON.parse(readFileSync(join(studioHomeDir(),'prefs.json'),'utf8'));
+ const library=prefs?.sharedMediaLibraries?.find((/** @type {any} */l)=>l.id===record.libraryId&&typeof l.root==='string'&&isAbsolute(l.root));if(!library)throw fail('Configure this material library on this computer first.');
+ const home=await realpath(library.root),asked=resolve(home,...record.relativePath.split('/'));
+ if(!inside(home,asked))throw fail('Shared media must stay inside its library');const path=await realpath(asked);if(!inside(home,path))throw fail('Shared media must stay inside its library');
+ if(existsSync(join(root,...rel.split('/'))))throw fail('Logical media reference conflicts with an existing project file');
+ const info=await stat(path);if(!info.isFile()||info.size!==record.size||Math.abs(info.mtimeMs-record.mtimeMs)>2000)throw fail('Shared media changed and needs confirmation');
+ return {path,info,reference:record};
+}
 
 /** Synchronous consumers only use identities already checked by their asynchronous entry points.
  * @param {string} root @param {string} rel */
@@ -81,7 +135,12 @@ export function inspectMediaReference(root,rel){return candidate(root,rel);}
 /** Prepare one requested source, or all references before a render. Concurrent checks share one stream.
  * @param {string} root @param {string} [rel] */
 export async function prepareMediaReferences(root,rel){
- for(const asset of rel===undefined?Object.keys(mediaReferences(root)):[rel]){const result=candidate(root,asset);if(!result)continue;await mediaContentHash(result.path);resolveMediaReference(root,asset);}
+ for(const asset of rel===undefined?Object.keys(mediaReferences(root)):[rel]){
+  const key=referenceKey(root,asset),cache=snapshots.getStore();if(cache?.has(key))continue;
+  const result=await candidateAsync(root,asset);if(!result)continue;
+  if(await mediaContentHash(result.path)!==result.reference.sha256)throw fail('Shared media content changed and needs confirmation');
+  cache?.set(key,result);
+ }
 }
 
 /** The safe project URL for a render's browser codec check.

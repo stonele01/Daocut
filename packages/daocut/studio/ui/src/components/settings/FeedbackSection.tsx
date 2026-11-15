@@ -4,6 +4,7 @@ import { useLanguage, useT } from '@/i18n';
 import { api, type StudioProblem } from '@/api';
 import { feedbackReport } from '@/lib/feedback-report';
 import { limitFeedbackText } from '@/lib/feedback-text';
+import { FEEDBACK_REQUEST, takeFeedbackProblem } from '@/lib/feedback-request';
 import { studioHost, type HostCompany, type HostCompanyFeedback, type HostCompanyState, type HostFeedbackAttachmentInput, type HostFeedbackDiagnostics } from '@/lib/host';
 import { DiagnosticsGroup, makeReport } from './DiagnosticsGroup';
 import { SettingsSelect } from './SettingsSelect';
@@ -37,6 +38,12 @@ export function FeedbackSection() {
   const company = studioHost?.company;
   const [state, setState] = React.useState<HostCompanyState | null>(null);
   const [problem, setProblem] = React.useState<StudioProblem | null>(null);
+  React.useEffect(() => {
+    const receive = () => { const next = takeFeedbackProblem(); if (next) setProblem(next); };
+    receive();
+    window.addEventListener(FEEDBACK_REQUEST, receive);
+    return () => window.removeEventListener(FEEDBACK_REQUEST, receive);
+  }, []);
   const [identity, setIdentity] = React.useState<{ serverUrl: string; userId: string } | null>(null);
   React.useEffect(() => {
     if (!company) return;

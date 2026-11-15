@@ -20,7 +20,7 @@ test('ordinary UI reviews two transcript seams, preserves drafts on save failure
   await mkdir(process.env.DAOCUT_TRASH_DIR);
   let studio, browser, context, page, step = 'fixture';
   const calls = { asr: 0, model: 0 };
-  const start = () => startStudio({ port: 0, openBrowser: () => {}, requireAnalysisPlan: true,
+  const start = () => startStudio({ port: 0, ...(process.env.DAOCUT_TRANSCRIPTION_UI ? { editorDir: resolve(process.env.DAOCUT_TRANSCRIPTION_UI) } : {}), openBrowser: () => {}, requireAnalysisPlan: true,
     analysisServices: async () => ({ transcription: { enabled: false, provider: 'synthetic', model: 'mock', endpoint: 'local://mock/asr' }, text: { enabled: true, provider: 'synthetic', model: 'mock', endpoint: 'local://mock/text' } }),
     liveAnalysis: { modelIdentity: 'synthetic-seam-model-v1', modelClient: async ({ input }) => {
       calls.model++;
@@ -134,6 +134,13 @@ test('ordinary UI reviews two transcript seams, preserves drafts on save failure
     assert.ok(transcript.cues.some(cue => cue.text === '人工核对后：价格是1.2元' && cue.startMs === 11800 && cue.endMs === 12800));
     assert.equal(await readFile(join(project.path, '.film', 'product-analysis.json'), 'utf8'), baselineAnalysis, 'subtitle corrections preserve manual products and lecture ranges');
     assert.deepEqual(await Promise.all(protectedPaths.map(hash)), protectedBefore, 'local seam correction alone never changes original manifest, video, film or private takes');
+    const preparation = await api(`${endpoint}/product-workflow/status?sourceId=${source.id}`);
+    assert.equal(preparation.transcription.status, 'complete');
+    assert.equal(preparation.ready, true);
+    assert.equal(preparation.discoveryReady, false);
+    assert.equal(preparation.discovery.status, 'idle');
+    await page.getByRole('region', { name: '原视频转写', exact: true }).getByRole('button', { name: /^继续拆品/ }).waitFor();
+    assert.deepEqual(calls, { asr: 3, model: 0 });
     step = 'an explicitly requested mock structure becomes stale after local subtitle revision';
     const plan = await api(`${endpoint}/product-workflow/plan?sourceId=${source.id}&action=analysis&productId=manual-product&intervalId=manual-range`);
     await api(`${endpoint}/product-workflow/execute`, 'POST', { confirmed: true, plan });
@@ -142,7 +149,7 @@ test('ordinary UI reviews two transcript seams, preserves drafts on save failure
     assert.equal(live.analysis.status, 'complete'); assert.deepEqual(calls, { asr: 3, model: 1 });
     const afterModel = await readFile(join(project.path, '.film', 'product-analysis.json'), 'utf8');
     await context.close(); context = null; await open();
-    await page.locator('[data-product-card="manual-product"]').getByRole('button', { name: /^已分析 / }).waitFor();
+    await page.locator('[data-product-card="manual-product"]').getByRole('button', { name: /^重新分析 / }).waitFor();
     await panel().getByLabel('选择接缝', { exact: true }).selectOption(secondId);
     await panel().getByLabel('字幕文字 1', { exact: true }).fill('人工再次核对：价格是1.2元');
     await acknowledge();

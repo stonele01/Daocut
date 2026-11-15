@@ -87,7 +87,9 @@ export function VirtualList<T>({ items, itemKey, estimateHeight, renderItem, lab
   for (let i = lo; i < layout.rows.length && layout.rows[i].top <= to; i++) visible.push(layout.rows[i]);
   const pin = pinnedKey === undefined ? undefined : layout.index.get(pinnedKey);
   if (pin !== undefined && !visible.some(row => row.key === pinnedKey)) visible.push(layout.rows[pin]);
-  return <div ref={root} aria-label={label} tabIndex={0} data-virtual-list="" className="min-h-0 w-full overflow-y-auto overscroll-contain" style={{ height: Math.min(maxHeight, layout.height), overflowAnchor: 'none' }} onScroll={event => setView({ top: event.currentTarget.scrollTop, height: event.currentTarget.clientHeight })}>
+  // Keep the text width stable when measured cards cross maxHeight. Otherwise
+  // a scrollbar changes width, clears measurements, then disappears on estimates.
+  return <div ref={root} aria-label={label} tabIndex={0} data-virtual-list="" className="min-h-0 w-full overflow-y-auto overscroll-contain" style={{ height: Math.min(maxHeight, layout.height), overflowAnchor: 'none', scrollbarGutter: 'stable' }} onScroll={event => setView({ top: event.currentTarget.scrollTop, height: event.currentTarget.clientHeight })}>
     <div className="relative w-full" style={{ height: layout.height }}>
       {visible.map(row => <MeasuredRow key={row.key} rowKey={row.key} top={row.top} onMeasure={measure}>{renderItem(row.item)}</MeasuredRow>)}
     </div>

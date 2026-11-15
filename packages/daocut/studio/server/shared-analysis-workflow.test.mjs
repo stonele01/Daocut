@@ -87,6 +87,18 @@ test('output budget upgrade can explicitly recover a shared failure and colleagu
   });
 });
 
+test('combined preparation publishes both stages and a coworker reuses them without new service calls', async t => {
+  const f = await fixture(t);
+  await f.run(0, 'transcription', { prepare: true });
+  assert.deepEqual(f.counts(), { asr: 1, text: 1 });
+  await f.run(1, 'transcription', { prepare: true });
+  assert.deepEqual(f.counts(), { asr: 1, text: 1 });
+  for (const root of f.roots) {
+    const analysis = (await readProductAnalysis(root)).analysis;
+    assert.equal(analysis.products.length, 2); assert.equal(analysis.intervals.length, 3);
+  }
+});
+
 test('ordinary three-stage workflow reuses shared first results across projects and preserves A-B-A and private edits', async t => {
   const f = await fixture(t);
   await f.run(0, 'transcription'); await f.run(0, 'discovery');

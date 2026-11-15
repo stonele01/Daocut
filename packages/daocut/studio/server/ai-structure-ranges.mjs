@@ -2,7 +2,9 @@
 import { createHash } from 'node:crypto';
 import { inspectAiCompositionInput } from './structure-composition.mjs';
 
-export const AI_STRUCTURE_RANGE_VERSION = 'ai-structure-plans-v2';
+export const PREVIOUS_AI_STRUCTURE_RANGE_VERSION = 'ai-structure-plans-v2';
+export const AI_STRUCTURE_RANGE_VERSION = 'ai-structure-plans-v3';
+const rangeVersions = [AI_STRUCTURE_RANGE_VERSION, PREVIOUS_AI_STRUCTURE_RANGE_VERSION];
 export const AI_STRUCTURE_RANGE_SPEED = 1.3;
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const nonempty = value => typeof value === 'string' && value.length > 0;
@@ -17,21 +19,22 @@ const roleFor = Object.freeze({ 故事: 'story', 钩子: 'hook', 痛点: 'pain',
 const invalid = message => { throw Object.assign(Error(message), { code: 'AI_STRUCTURE_INVALID_RESPONSE' }); };
 
 /** Parent roles do not describe every possible child; don't require a parent hook/core/close trio. */
-export function inspectAiRangeInput(engineInput) {
+export function inspectAiRangeInput(engineInput, { version = AI_STRUCTURE_RANGE_VERSION } = {}) {
+  if (!rangeVersions.includes(version)) invalid('不支持的 AI 子段规则版本');
   const old = inspectAiCompositionInput(engineInput);
   const issues = old.issues.filter(item => !item.code.startsWith('MISSING_'));
   const eligibleCount = old.reviewItems.filter(item => !item.issues.length).length;
   if (!eligibleCount && !issues.length) issues.push({ code: 'RANGE_MATERIAL_REQUIRED', message: '缺少可追溯的已确认话术范围，请先核对已有分析；不会自动重发模型。' });
-  return { ...old, version: AI_STRUCTURE_RANGE_VERSION,
-    inputHash: hash([AI_STRUCTURE_RANGE_VERSION, AI_STRUCTURE_RANGE_SPEED, old.inputHash]),
+  return { ...old, version,
+    inputHash: hash([version, AI_STRUCTURE_RANGE_SPEED, old.inputHash]),
     eligibleCount, ready: eligibleCount > 0 && !issues.some(item => item.code === 'SCOPE_INVALID'),
     materialComplete: eligibleCount > 0 && !issues.length, issues };
 }
 
 function validateFormat(value) {
-  if (!record(value) || value.schema !== AI_STRUCTURE_RANGE_VERSION || !Array.isArray(value.plans) || typeof value.complete !== 'boolean'
+  if (!record(value) || !rangeVersions.includes(value.schema) || !Array.isArray(value.plans) || typeof value.complete !== 'boolean'
     || !Array.isArray(value.issues) || value.issues.some(issue => typeof issue !== 'string')
-    || Object.keys(value).some(key => !['schema', 'plans', 'complete', 'issues'].includes(key))) invalid('AI 子段返回格式无效：需要 v2 方案及真实字幕首尾编号');
+    || Object.keys(value).some(key => !['schema', 'plans', 'complete', 'issues'].includes(key))) invalid('AI 子段返回格式无效：需要 v2/v3 方案及真实字幕首尾编号');
   for (const row of value.plans) {
     if (!Array.isArray(row) || !row.length) invalid('AI 子段方案格式无效：不能返回半条或空的方案');
     for (const part of row) {
@@ -53,7 +56,8 @@ function visualEvidence(input, selected) {
 /** Return only the valid explicitly returned rows. No repair, enumeration or semantic keyword guesses. */
 export function validateAiStructureRanges(input, value) {
   validateFormat(value);
-  const engine = input.engineInput, inspected = inspectAiRangeInput(engine), candidates = engine.candidates ?? [];
+  const version = value.schema;
+  const engine = input.engineInput, inspected = inspectAiRangeInput(engine, { version }), candidates = engine.candidates ?? [];
   const cues = engine.cues ?? [], cueIndices = engine.cueIndices ?? cues.map((_, n) => n), positions = new Map(cueIndices.map((n, i) => [n, i]));
   const reviews = new Map(inspected.reviewItems.map(item => [item.candidateId, item]));
   const byId = new Map(candidates.map(candidate => [candidate.id, candidate]));
@@ -134,12 +138,12 @@ export function validateAiStructureRanges(input, value) {
       if (previous && previous[1] === clip.startMs) previous[1] = clip.endMs;
       else playback.push([clip.startMs, clip.endMs]);
     }
-    const id = `ai-${hash([AI_STRUCTURE_RANGE_VERSION, sourceIdentity, scope.startMs, scope.endMs, AI_STRUCTURE_RANGE_SPEED, playback])}`;
+    const id = `ai-${hash([version, sourceIdentity, scope.startMs, scope.endMs, AI_STRUCTURE_RANGE_SPEED, playback])}`;
     if (seen.has(id)) return;
     seen.add(id);
     clips[0].roles = unique(['hook', ...clips[0].roles]);
     const coreLabels = Object.fromEntries(clips.flatMap(clip => clip.coreIds.map(coreId => [coreId, clip.text.length > 24 ? `${clip.text.slice(0, 24)}…` : clip.text])));
-    plans.push({ id, version: AI_STRUCTURE_RANGE_VERSION, generationMethod: 'ai', inputHash: inspected.inputHash,
+    plans.push({ id, version, generationMethod: 'ai', inputHash: inspected.inputHash,
       scope: { ...scope }, clips, coreIds: cores, coreLabels, durationMs, sourceDurationMs, speed: AI_STRUCTURE_RANGE_SPEED,
       referenceDuration: 'reference', structure: clips.map(clip => ({ candidateId: clip.candidateId, roles: [...clip.roles], coreIds: [...clip.coreIds] })),
       continuousActionVerified: false, speechVerified: false });

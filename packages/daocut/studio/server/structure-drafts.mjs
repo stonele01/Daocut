@@ -11,6 +11,8 @@ import { FILM_SUBTITLE_DEFAULT } from './film-subtitle.mjs';
 import { productSourcePath } from './product-transcription.mjs';
 import { sharedMediaManifest } from './shared-media.mjs';
 import { transcriptPath, translationsOf } from './transcripts.mjs';
+import { savedStructureTranscriptVtt } from './structure-transcript.mjs';
+import { probeSource } from './nle.mjs';
 
 export const STRUCTURE_DRAFTS_DIR = '.film/structure-drafts';
 export const STRUCTURE_DRAFT_META = '.film/structure-draft.json';
@@ -170,8 +172,15 @@ async function create(parentRoot, parentProjectId, plan) {
   // An explicit snapshot prevents an untouched draft from inheriting another draft's browser-wide last style.
   await writeSubtitleStyle(stage, await readSubtitleStyle(parent) ?? FILM_SUBTITLE_DEFAULT);
   for (const rel of [transcriptPath(source.assetPath), ...(await translationsOf(parent, source.assetPath)).map(language => transcriptPath(source.assetPath, language))]) await copySmallFile(parent, stage, rel);
+  const subtitle = join(stage, transcriptPath(source.assetPath));
+  if (!await lstat(subtitle).catch(error => { if (error.code === 'ENOENT') return null; throw error; })) {
+    const body = await savedStructureTranscriptVtt(parent, source);
+    if (body) { await mkdir(dirname(subtitle), { recursive: true }); await writeFile(subtitle, body, { flag: 'wx' }); }
+  }
   let at = 0;
-  const film = { stage: structuredClone(parentFilm.value.stage), tracks: [{ clips: checked.clips.map((clip, index) => {
+  const natural = await probeSource(sourcePath);
+  const canvas = natural.w > 0 && natural.h > 0 ? { w: natural.w, h: natural.h } : structuredClone(parentFilm.value.stage);
+  const film = { stage: canvas, tracks: [{ clips: checked.clips.map((clip, index) => {
     const value = { id: `structure-${index + 1}`, src: clip.assetPath, at: at / (1000 * checked.speed), time: [clip.startMs / 1000, clip.endMs / 1000], speed: checked.speed, attrs: { 'data-structure-source-id': clip.sourceId, 'data-structure-original-text': clip.text, 'data-structure-roles': clip.roles.join('|'), 'data-structure-core-ids': clip.coreIds.join('|') } };
     at += clip.endMs - clip.startMs; return value;
   }) }] };

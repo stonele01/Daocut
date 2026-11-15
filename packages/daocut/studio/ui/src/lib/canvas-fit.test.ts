@@ -1,9 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { canvasFor, canvasSide, fitToCanvas, originalShape } from './canvas-fit.ts';
+import { canvasFor, canvasSide, fitToCanvas, originalShape, firstVideoCanvas } from './canvas-fit.ts';
 
 const wide = { w: 1920, h: 1080 }, tall = { w: 1080, h: 1440 }, cinema = { w: 2538, h: 1080 };
 const boxOf = (out: ReturnType<typeof fitToCanvas>, id: string) => out.find((c) => c.id === id)?.box;
+
+test('first portrait video uses its natural canvas; existing edits and custom frames are preserved', () => {
+  const source = { kind: 'video', w: 912, h: 1920 };
+  assert.deepEqual(firstVideoCanvas(wide, false, source), { w: 912, h: 1920 });
+  assert.equal(firstVideoCanvas(wide, true, source), null);
+  assert.equal(firstVideoCanvas(tall, false, source), null);
+  assert.equal(firstVideoCanvas(wide, false, { kind: 'audio', w: 912, h: 1920 }), null);
+  assert.equal(firstVideoCanvas(wide, false, { kind: 'video' }), null);
+});
 
 test('another shape keeps the canvas short side (1920×1080 made 3:4 is 1080×1440)', () => {
   assert.deepEqual(canvasFor(wide, '3:4'), tall);
