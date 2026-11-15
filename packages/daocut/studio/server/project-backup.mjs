@@ -13,7 +13,7 @@ export { ProjectBackupError } from './project-backup-error.mjs';
 
 export const PROJECT_BACKUP_MANIFEST = '.daocut-project-backup.json';
 const STATE_FILES = new Set(['settings.json', 'subtitles.json', 'markers.json', 'product-analysis.json', 'source-takes.json', 'restore-provenance.json', 'structure-draft.json', 'structure-workspace.json']);
-const STATE_DIRS = new Set(['product-transcripts', 'product-discovery', 'live-analysis', 'shared-analysis', 'structure-drafts']);
+const STATE_DIRS = new Set(['product-transcripts', 'product-discovery', 'live-analysis', 'shared-analysis', 'ai-structure-plans', 'structure-plans', 'structure-drafts']);
 const EXCLUDED = new Set(['.git', 'node_modules', '.DS_Store', '.env', 'providers.json', 'byok-keys', 'company-session.bin', PROJECT_BACKUP_MANIFEST]);
 const forbiddenKey = /^(?:api[-_]?key|access[-_]?token|refresh[-_]?token|authorization|password|client[-_]?secret|app[-_]?secret)$/i;
 const digest = value => createHash('sha256').update(value).digest('hex');

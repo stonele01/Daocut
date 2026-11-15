@@ -70,18 +70,27 @@ export async function rebindRestoredProject(stage, target, sources, options = {}
         warnings.push('拆品原始结果已保留；当前字幕尚待接缝核对，未把旧结果重新标记为有效，也未重新分析。');
       }
     }
-    // Preserve all prior structure results; without their original full model identity they must remain inspectable, not falsely current.
+    // Relocate verified source bindings without changing saved analysis or plan identities.
     const livePath = join(stage, '.film/live-analysis', `${hash(source.sourceId)}.json`), live = await read(livePath);
     if (live) {
       const oldFp = `${source.fingerprint.size}:${source.fingerprint.mtimeMs}:${source.fingerprint.ctimeMs}:${source.ino}`, newFp = `${info.size}:${info.mtimeMs}:${info.ctimeMs}:${info.ino}`;
+      // The full source hash was verified by restore. Preserve the original
+      // cache input across this relocation, including a second backup/restore.
+      const before = { assetPath: source.assetPath, path: source.fingerprint.path, fingerprint: oldFp };
+      const after = { assetPath: source.assetPath, path: fingerprint.path, fingerprint: newFp };
+      const previous = live.movedSource;
+      live.movedSource = { original: previous && JSON.stringify(previous.current) === JSON.stringify(before) ? previous.original : before, current: after };
       if (live.transcription?.sourceFingerprint === oldFp) live.transcription.sourceFingerprint = newFp;
       for (const item of [live.analysis, ...Object.values(live.analyses ?? {}), ...Object.values(live.results ?? {})]) {
         if (!item || item.sourceFingerprint !== oldFp) continue;
+        // Plan IDs and saved requests refer to the analysis-time source identity.
+        // Keep that identity; only the separately checked file binding changes.
+        item.planSourceFingerprint ??= oldFp;
         item.sourceFingerprint = newFp;
         if (item.sharedRef && item.transcriptHash) item.sharedSignature = hash({ fingerprint: newFp, transcript: item.transcriptHash, intervalId: item.intervalId, productId: item.productId, startMs: item.rangeStartMs, endMs: item.rangeEndMs });
       }
       await save(livePath, live);
-      if (Object.values(live.analyses ?? {}).some(item => item.currentRunId && !item.sharedRef)) warnings.push('旧本机话术结果和人工修改已保留；原模型身份未完整保存的缓存需核对，不会自动重新分析。');
+      if (Object.values(live.analyses ?? {}).some(item => item.currentRunId && !item.sharedRef && !item.cacheIdentity)) warnings.push('旧本机话术结果和人工修改已保留；原模型身份未完整保存的缓存需核对，不会自动重新分析。');
     }
   }
   const takesPath = join(stage, '.film/source-takes.json'), takes = await read(takesPath);

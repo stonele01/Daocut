@@ -291,7 +291,7 @@ export function ExportCenter(props: ExportCenterProps) {
     const loaded = loadSettings(language);
     setS(props.focusClipId
       ? { ...loaded, dest: 'alpha', alpha: { ...loaded.alpha, source: props.focusClipId } }
-      : loaded);
+      : props.durationMs > 0 ? loaded : { ...loaded, dest: 'project' });
     setHydrated(true);
     setResult(null);
     setWorking(null);
@@ -1068,7 +1068,7 @@ export function ExportCenter(props: ExportCenterProps) {
               {dest === 'project' && (
                 <>
                   <PartToggle checked={s.project.backup} onChange={(backup) => patch('project', { backup, ...(backup ? { as: 'folder' } : {}) })}
-                    label="完整个人工程备份" hint="保存商品、转写、接缝修订、取用、成片及固定的共享版本；不复制 NAS 原片，不包含密钥、对话和日志。" size="" />
+                    label="完整个人工程备份" hint="保存商品、转写、AI 方案、个人草稿、字幕、取用、成片及固定的共享版本；不复制 NAS 原片，不包含密钥、对话和日志。" size="" />
                   {s.project.backup ? <Hint>备份为文件夹。换电脑后从工程列表的导入菜单选择“恢复工程备份”，校验原片内容并重新关联素材库。请先保存修改，完成前不要编辑工程。</Hint> : <>
                   <Field label={t('exportCenter.format')}>
                     <div className="grid grid-cols-2 gap-2">

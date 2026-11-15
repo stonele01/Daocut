@@ -80,7 +80,7 @@ export function createStructurePlanInputReader({ readAnalysis = readProductAnaly
       catch (error) { return unavailable('LOCAL_ANALYSIS_REQUIRED', `本机原始分析记录暂不可用于拼结构：${error.message}；请恢复已有结果`); }
       baseline = { result: { sha256: sharedHash({ visibility: 'local', cacheIdentity: saved.cacheIdentity, runId: saved.currentRunId, payload }) },
         snapshot: { payload, dataHash: sharedHash({ cues: selected.segments, cueIndices: selected.cueIndices }),
-          sourceIdentity: sharedHash({ visibility: 'local', sourceId: source.id, sourceFingerprint: saved.sourceFingerprint }) } };
+          sourceIdentity: sharedHash({ visibility: 'local', sourceId: source.id, sourceFingerprint: saved.planSourceFingerprint ?? saved.sourceFingerprint }) } };
     }
     const snapshot = baseline.snapshot;
     const baselineLabel = visibility === 'local' ? '已保存的原始分析' : '公共底稿';
