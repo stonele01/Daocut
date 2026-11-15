@@ -35,6 +35,32 @@ async function finished(route, root, type) {
   }
   throw Error('task did not finish');
 }
+test('transcription exposes real extraction and recognition stages while running', async () => {
+  const root = await setup();
+  let advance, release, entered;
+  const gate = new Promise(resolve => { advance = resolve; });
+  const done = new Promise(resolve => { release = resolve; });
+  const started = new Promise(resolve => { entered = resolve; });
+  let saved = null;
+  try {
+    const route = createLiveAnalysis({ readTranscript: async () => saved, transcribe: async (_root, _source, { onProgress }) => {
+      await onProgress({ phase: 'extracting', currentSegment: 2, completedSegments: 1, totalSegments: 21 }); entered();
+      await gate;
+      await onProgress({ phase: 'transcribing', currentSegment: 2, completedSegments: 1, totalSegments: 21 });
+      await done; saved = transcript; return transcript;
+    } });
+    await request(route, root, 'POST', 'live-analysis/transcribe', { sourceId: 's', confirmed: true });
+    await started;
+    assert.deepEqual((await request(route, root, 'GET', 'live-analysis')).transcription.progress, { phase: 'extracting', currentSegment: 2, completedSegments: 1, totalSegments: 21 });
+    advance();
+    for (let i = 0; i < 100; i++) {
+      if ((await request(route, root, 'GET', 'live-analysis')).transcription.progress?.phase === 'transcribing') break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal((await request(route, root, 'GET', 'live-analysis')).transcription.progress.phase, 'transcribing');
+    release(); assert.equal((await finished(route, root, 'transcription')).transcription.status, 'complete');
+  } finally { advance(); release(); await rm(root, { recursive: true, force: true }); }
+});
 test('locked service rejects before writing and keeps existing transcript visible', async () => {
   const root = await setup();
   try {

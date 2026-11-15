@@ -80,6 +80,7 @@ export function ProductPreparation({ projectId, source, onReady, refreshKey = 0,
       </details>}
       {published && <p role="status">{published}</p>}
       {!reviewBlocked && <p role="status">{state.discoveryReady && hasTranscript ? '商品段已准备好' : state.needsReview ? '拆品结果已生成，请在下面核对并应用' : state.transcription.status === 'running' ? '正在转写' : state.discovery.status === 'running' ? '正在拆商品' : boundaryReview ? '转写分段已保存，边界待核对' : hasTranscript ? '转写已就绪' : '尚需转写'}</p>}
+      {state.transcription.status === 'running' && state.transcription.progress && <p role="status">{state.transcription.progress.phase === 'extracting' ? '正在准备音频' : '正在识别音频'} · 第 {state.transcription.progress.currentSegment}/{state.transcription.progress.totalSegments} 段 · 已完成 {state.transcription.progress.completedSegments} 段</p>}
       {primaryAction && !state.discoveryReady && !state.needsReview && !busy && !boundaryReview && !publishPending && !reviewBlocked && <p className="text-[var(--text-muted)]">{hasTranscript ? '已有转写会复用，继续识别商品。' : '先转写整条视频，再自动识别商品；一个品就生成一个品。'}</p>}
       {(state.transcription.error || state.discovery.error) && <p className="text-[var(--warn)]">{state.transcription.error || state.discovery.error}</p>}
       {boundaryReview && <p>已完成分段保留，请在下面核对字幕接缝，无需再次上传音频。</p>}

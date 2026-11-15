@@ -42,7 +42,7 @@ export function createDesktopAnalysisServices({ textBridge, providersFile = defa
       return current.key;
     };
     await check();
-    return transcribeProductSource(root, source, { retryUncertain: options.retryUncertain === true, getKey: check,
+    return transcribeProductSource(root, source, { retryUncertain: options.retryUncertain === true, getKey: check, onProgress: options.onProgress,
       ...(readAudio ? { readAudio } : {}), runProvider: async (...args) => { await check(); return (runProvider ?? doubao.run.bind(doubao))(...args); } });
   };
   return {

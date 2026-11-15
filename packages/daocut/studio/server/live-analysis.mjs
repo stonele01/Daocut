@@ -337,7 +337,7 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
           if (expected?.fingerprint && await sourceFingerprint(root, source) !== expected.fingerprint) throw Object.assign(new Error('素材已变化，音频未发送'), { code: 'ASR_NOT_SUBMITTED', reason: 'source' });
           // Only an explicitly confirmed retry passes this authority through to
           // the trusted transcriber; GET/reopen never reach this callback.
-          const transcript = await transcribe(root, source, { retryUncertain, ...(expected?.service ? { expectedService: expected.service } : {}) });
+          const transcript = await transcribe(root, source, { retryUncertain, onProgress: async progress => { state.transcription.progress = progress; await persist(); }, ...(expected?.service ? { expectedService: expected.service } : {}) });
           if (!segmentsOf(transcript).length) throw new Error('转写没有可用的时间段');
           state.transcription = { status: 'complete', confirmationId, segments: [], sourceFingerprint: await sourceFingerprint(root, source), transcriptHash: transcriptHash(transcript) };
         } else {
