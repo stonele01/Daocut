@@ -7,7 +7,7 @@ import { setTimeout } from 'node:timers/promises';
 import { readPrefs, writePrefs } from './prefs.mjs';
 import { readState, markOpened } from './projects.mjs';
 import { browseSharedLibraryFolder, createSharedMediaProject, sharedMediaManifest, SharedMediaError } from './shared-media.mjs';
-import { mediaContentHash } from '../../src/shared-media-reference.mjs';
+import { mediaContentHash, withMediaReferenceSnapshot } from '../../src/shared-media-reference.mjs';
 
 const DIRECTORY = '.daocut-shared';
 const MANIFEST = 'manifest.json';
@@ -18,7 +18,7 @@ const inside = (/** @type {string} */ root, /** @type {string} */ target) => { c
 const fail = (/** @type {string} */ message, status = 409) => new SharedMediaError(message, status);
 const errorCode = (/** @type {unknown} */ error) => /** @type {NodeJS.ErrnoException | undefined} */ (error)?.code;
 /** @typedef {{ version: 1, libraryId: string, name: string, resultPath: '.daocut-shared', coordinationId: string }} FolderManifest */
-/** @typedef {{ coordinate?: (action: string, body: any) => Promise<any>, openFile?: typeof open, initialize?: (root: string, input: any) => Promise<any>, refresh?: (root: string) => Promise<any> }} Dependencies */
+/** @typedef {{ coordinate?: (action: string, body: any) => Promise<any>, openFile?: typeof open, initialize?: (root: string, input: any) => Promise<any>, refresh?: (root: string) => Promise<any>, progress?: (value:any)=>void }} Dependencies */
 /** @typedef {{ folder?: unknown, videoPath?: unknown, requestId?: unknown, projectId?: unknown, createNew?: boolean }} OpenInput */
 /** @typedef {{ status: 'ready'|'needs-initialization', folder: string, name: string, resultRoot: string|null, legacy: boolean, library?: import('./shared-media.mjs').SharedLibrary, videos: {path:string,name:string,size:number,mtimeMs:number}[], transcripts: {path:string,name:string,size:number,mtimeMs:number}[], moreVideos:boolean,moreTranscripts:boolean,warnings:string[] }} LiveFolder */
 
@@ -132,14 +132,26 @@ export async function inspectLiveFolder({ folder: requested, initialize = false 
 }
 
 const pendingOpens = new Map();
+const openProgress = new Map();
+/** Only local authenticated clients can read this through the Studio API. */
+export function liveProjectProgress(/** @type {string} */ requestId) {
+  return openProgress.get(requestId) ?? { stage: 'checking-folder' };
+}
 /** @param {OpenInput} input @param {Dependencies} [dependencies] */
 export async function openLiveProject(input, dependencies = {}) {
   if (typeof input.requestId !== 'string' || !/^[a-z0-9-]{8,100}$/i.test(input.requestId)) throw fail('打开请求标识无效', 400);
   const signature = JSON.stringify(input), earlier = pendingOpens.get(input.requestId);
   if (earlier) { if (earlier.signature !== signature) throw fail('同一打开请求不能改变直播或工程'); return earlier.work; }
-  const work = openPersonal(input, dependencies);
+  // Keep a small terminal history so a final poll cannot miss completion; never persist paths.
+  for (const [id, value] of openProgress) if (value.finished && openProgress.size >= 64) openProgress.delete(id);
+  const startedAt = Date.now();
+  const progress = (/** @type {any} */value) => { openProgress.set(input.requestId, { ...value, startedAt, updatedAt: Date.now() }); dependencies.progress?.(value); };
+  progress({ stage: 'checking-folder' });
+  const work = withMediaReferenceSnapshot(() => openPersonal(input, { ...dependencies, progress }));
   pendingOpens.set(input.requestId, { signature, work });
-  try { return await work; } finally { pendingOpens.delete(input.requestId); }
+  try { const result = await work; progress({ stage: 'complete', finished: true }); return result; }
+  catch (error) { progress({ stage: 'error', finished: true }); throw error; }
+  finally { pendingOpens.delete(input.requestId); }
 }
 async function openPersonal(/** @type {OpenInput} */ input, /** @type {Dependencies} */ dependencies) {
   const live = await inspectLiveFolder({ folder: input.folder }, dependencies);
@@ -147,7 +159,8 @@ async function openPersonal(/** @type {OpenInput} */ input, /** @type {Dependenc
   const video = live.videos.find(v => v.path === input.videoPath);
   if (!video) throw fail('请选择此直播文件夹中列出的视频', 400);
   const path = join(live.library.root, ...video.path.split('/'));
-  const sha256 = await mediaContentHash(path);
+  const onIdentityProgress = (/** @type {import('../../src/shared-media-reference.mjs').IdentityProgress} */value) => dependencies.progress?.({ stage: 'identifying-video', ...value });
+  dependencies.progress?.({ stage: 'finding-project' });
   const matches = []; let replaced = false;
   for (const recent of (await readState()).recent) {
     // A structure draft is a child of the live project, not another live workspace.
@@ -156,7 +169,10 @@ async function openPersonal(/** @type {OpenInput} */ input, /** @type {Dependenc
     if (!(await stat(join(recent.path, 'film.html')).catch(() => null))?.isFile()) continue;
     for (const [asset, source] of Object.entries((await sharedMediaManifest(recent.path)).items)) {
       if (source.libraryId !== live.library.id || source.relativePath !== video.path) continue;
-      if (source.sha256 !== sha256 || source.size !== video.size || Math.abs(source.mtimeMs - video.mtimeMs) > 2000) { replaced = true; continue; }
+      if (source.size !== video.size || Math.abs(source.mtimeMs - video.mtimeMs) > 2000) { replaced = true; continue; }
+      // Old projects keep their original full identity; new projects carry the bounded fingerprint kind.
+      const sha256 = await mediaContentHash(path, { identityKind: source.identityKind, onProgress: onIdentityProgress });
+      if (source.sha256 !== sha256) { replaced = true; continue; }
       const info = await stat(recent.path);
       matches.push({ project: { ...recent, name: basename(recent.path), missing: false, createdAt: Math.round(info.birthtimeMs || info.ctimeMs) }, asset, source });
       break;
@@ -168,11 +184,12 @@ async function openPersonal(/** @type {OpenInput} */ input, /** @type {Dependenc
     const selected = input.projectId ? matches.find(m => m.project.id === input.projectId) : matches.length === 1 ? matches[0] : null;
     if (input.projectId && !selected) throw fail('所选工程与此视频身份不匹配');
     if (selected) {
+      dependencies.progress?.({ stage: 'reading-analysis' });
       const sharedRead = await dependencies.refresh?.(selected.project.path);
       return { status: 'opened', reused: true, project: await markOpened(selected.project.id), asset: selected.asset, source: selected.source, ...(sharedRead ? { sharedRead } : {}) };
     }
     if (matches.length > 1) return { status: 'choose-project', projects: matches.map(m => m.project) };
   }
-  const made = await createSharedMediaProject({ libraryId: live.library.id, videoPath: video.path, requestId: input.requestId }, { initialize: dependencies.initialize });
+  const made = await createSharedMediaProject({ libraryId: live.library.id, videoPath: video.path, requestId: input.requestId }, { initialize: dependencies.initialize, onIdentityProgress, onStage: stage => dependencies.progress?.({ stage }) });
   return { status: 'opened', reused: false, ...made };
 }

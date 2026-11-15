@@ -80,7 +80,8 @@ export function createExistingAnalysisPublication({ sharedAnalysis: shared, live
     const descriptor = await shared.prepareExisting(root, source, item);
     const restoration = await read(join(root, '.film/restore-provenance.json'));
     const provenance = await read(join(root, '.film/source-provenance.json'));
-    const recordedSha = restoration?.sources?.find(s => s.sourceId === source.id)?.contentHash ?? ((provenance?.sourceId === source.id || provenance?.assetPath === source.assetPath) ? provenance.sha256 : undefined);
+    const restoredSource = restoration?.sources?.find(s => s.sourceId === source.id);
+    const recordedSha = (restoredSource?.identitySha256 ?? restoredSource?.contentHash) ?? ((provenance?.sourceId === source.id || provenance?.assetPath === source.assetPath) ? provenance.sha256 : undefined);
     const resolvedPath = await realpath(await productSourcePath(root, source.assetPath)), info = await stat(resolvedPath);
     const fingerprint = `${info.size}:${info.mtimeMs}:${info.ctimeMs}:${info.ino}`;
     const discoveryFingerprint = sharedHash({ sourceId: source.id, assetPath: source.assetPath, resolvedPath, size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs, ino: info.ino, durationMs: source.durationMs });

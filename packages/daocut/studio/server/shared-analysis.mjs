@@ -56,9 +56,9 @@ export function createSharedAnalysis({ coordinate, settings = () => readPrefs().
     if (typeof coordinate !== 'function') throw new HttpError(409, '共享任务协调服务未接通，未发起本机付费分析');
     const path = await realpath(await resolveSource(root, source.assetPath)), before = await stat(path);
     // Opening, playback and shared results use the same verified identity and in-flight read.
-    const digest = await mediaContentHash(path), after = await stat(path);
+    const digest = await mediaContentHash(path, { identityKind: record.identityKind }), after = await stat(path);
     if (before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs || before.ino !== after.ino) throw new HttpError(409, '素材在校验期间发生变化，未发送请求');
-    return { libraryId: record.libraryId, relativePath: record.relativePath, sha256: digest, size: before.size, durationMs: source.durationMs };
+    return { libraryId: record.libraryId, relativePath: record.relativePath, sha256: digest, ...(record.identityKind ? { identityKind: record.identityKind } : {}), size: before.size, durationMs: source.durationMs };
   }
   function verify(envelope, descriptor, ref) {
     if (!envelope || envelope.schema !== schema || envelope.taskKey !== descriptor.taskKey || envelope.sourceIdentity !== descriptor.sourceIdentity || envelope.action !== descriptor.action || sharedHash(envelope) !== ref.sha256) throw new HttpError(409, '共享结果身份或完整性校验失败，未导入也未重新请求');

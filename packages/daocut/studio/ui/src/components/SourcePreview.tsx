@@ -210,6 +210,10 @@ function MediaPreviewPane({ file, sources, onClose, onPlace, sourceId, mediaVers
   const [diagnostics, setDiagnostics] = React.useState<SourcePlaybackDiagnostic[]>([]);
   const playSequence = React.useRef(0);
   const desiredPlaying = React.useRef(false);
+  const reconnect = React.useRef<{ time: number; resume: boolean } | null>(null);
+  const reconnectTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectAttempts = React.useRef(0);
+  const [reconnecting, setReconnecting] = React.useState<number | null>(null);
   const preparedSeek = React.useRef<string | null>(null);
   const appliedSeek = React.useRef<string | null>(null);
   const cancelledSeek = React.useRef<string | null>(null);
@@ -239,6 +243,7 @@ function MediaPreviewPane({ file, sources, onClose, onPlace, sourceId, mediaVers
   const pauseMedia = React.useCallback((media: HTMLMediaElement) => {
     playSequence.current++;
     desiredPlaying.current = false;
+    if (reconnect.current) reconnect.current.resume = false;
     setPlaying(false); setPlaybackState('paused');
     media.pause();
   }, []);
@@ -255,7 +260,32 @@ function MediaPreviewPane({ file, sources, onClose, onPlace, sourceId, mediaVers
       setPlayError(record(media, 'play-rejected', error));
     });
   }, [record]);
-  React.useEffect(() => () => { playSequence.current++; desiredPlaying.current = false; }, []);
+  React.useEffect(() => () => {
+    playSequence.current++; desiredPlaying.current = false;
+    if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+  }, []);
+
+  // Retry an interrupted read, never a decoder/format failure. Keep the latest
+  // user position and intent while load() resets the media element's clock.
+  const reconnectMedia = React.useCallback((media: HTMLMediaElement) => {
+    if (media.error?.code !== 2 || reconnectAttempts.current >= 2) return false;
+    const attempt = ++reconnectAttempts.current;
+    reconnect.current ??= { time: scrubTarget.current ?? media.currentTime, resume: desiredPlaying.current };
+    scrubTarget.current = null;
+    playSequence.current++;
+    if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+    setPlayError(null); setReconnecting(attempt); setPlaybackState('loading');
+    record(media, `network-retry-${attempt}`);
+    reconnectTimer.current = setTimeout(() => {
+      reconnectTimer.current = null;
+      if (mediaRef.current !== media || !reconnect.current) return;
+      const url = new URL(media.currentSrc || media.src, window.location.href);
+      url.searchParams.set('retry', `${Date.now()}-${attempt}`);
+      media.src = url.href;
+      media.load();
+    }, 250);
+    return true;
+  }, [record]);
 
   // A completed local cache replaces the remote file at the same media URL. Reload
   // the decoder too, preserving the selected moment and whether it was playing.
@@ -265,7 +295,9 @@ function MediaPreviewPane({ file, sources, onClose, onPlace, sourceId, mediaVers
     loadedVersion.current = mediaVersion;
     const media = mediaRef.current;
     if (!media || file.kind !== 'video') return;
-    const at = media.currentTime, resume = desiredPlaying.current;
+    const at = reconnect.current?.time ?? media.currentTime, resume = desiredPlaying.current;
+    if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+    reconnect.current = null; setReconnecting(null); reconnectAttempts.current = 0;
     playSequence.current++;
     media.pause();
     const restore = () => {
@@ -308,9 +340,12 @@ function MediaPreviewPane({ file, sources, onClose, onPlace, sourceId, mediaVers
     clearPreviewRange();
     const media = mediaRef.current;
     if (media) {
-      if (media.paused) pauseMedia(media);
-      scrubTarget.current = seconds;
-      finishScrub();
+      if (reconnect.current) reconnect.current.time = seconds;
+      else {
+        if (media.paused) pauseMedia(media);
+        scrubTarget.current = seconds;
+        finishScrub();
+      }
     }
     setTime(seconds);
     clockRef.current?.({ time: seconds, duration: durationRef.current });
@@ -324,10 +359,14 @@ function MediaPreviewPane({ file, sources, onClose, onPlace, sourceId, mediaVers
       if (range && (media.currentTime < range.startMs / 1000 || media.currentTime >= range.endMs / 1000 - 0.001)) media.currentTime = range.startMs / 1000;
       else if (!range && (media.ended || media.currentTime >= media.duration - 0.05)) media.currentTime = 0;
       cancelledSeek.current = preparedSeek.current;
-      playMedia(media);
+      reconnectAttempts.current = 0;
+      desiredPlaying.current = true;
+      if (reconnect.current) { reconnect.current.resume = true; setPlaying(true); }
+      else if (media.error?.code === 2) { setPlaying(true); reconnectMedia(media); }
+      else playMedia(media);
     }
     else { cancelledSeek.current = preparedSeek.current; pauseMedia(media); }
-  }, [pauseMedia, playMedia]);
+  }, [pauseMedia, playMedia, reconnectMedia]);
 
   React.useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -346,7 +385,7 @@ function MediaPreviewPane({ file, sources, onClose, onPlace, sourceId, mediaVers
     if (!playing) return;
     let raf = 0;
     let published = 0;
-    const step = () => { const m = mediaRef.current; if (m) {
+    const step = () => { const m = mediaRef.current; if (m && !reconnect.current) {
       const range = previewRangeRef.current;
       if (range && m.currentTime >= range.endMs / 1000) { m.pause(); m.currentTime = range.endMs / 1000; setTime(m.currentTime); clockRef.current?.({ time: m.currentTime, duration: durationRef.current }); return; }
       const now = performance.now();
@@ -394,10 +433,16 @@ function MediaPreviewPane({ file, sources, onClose, onPlace, sourceId, mediaVers
       setPlaying(!!seekRequest.play);
       setPlaybackState(seekRequest.play ? 'loading' : 'paused');
     }
-    if (media.readyState < 1) return;
-    appliedSeek.current = key;
     const targetMs = range && seekRequest.play && seekRequest.timeMs >= range.endMs ? range.startMs : seekRequest.timeMs;
     const seconds = Math.max(0, Math.min((range ? Math.max(range.startMs, Math.min(targetMs, range.endMs)) : targetMs) / 1000, Number.isFinite(media.duration) ? media.duration : Infinity));
+    if (reconnect.current) {
+      reconnect.current = { time: seconds, resume: !!seekRequest.play };
+      appliedSeek.current = key;
+      setTime(seconds);
+      return;
+    }
+    if (media.readyState < 1) return;
+    appliedSeek.current = key;
     media.currentTime = seconds;
     if (seekRequest.play) playMedia(media);
     setTime(seconds);
@@ -409,13 +454,34 @@ function MediaPreviewPane({ file, sources, onClose, onPlace, sourceId, mediaVers
     onSeeked: finishScrub,
     onPlay: (e: React.SyntheticEvent<HTMLMediaElement>) => { if (!e.currentTarget.paused) { desiredPlaying.current = true; setPlaying(true); setPlaybackState('loading'); record(e.currentTarget, 'play'); } },
     onPlaying: (e: React.SyntheticEvent<HTMLMediaElement>) => { if (!e.currentTarget.paused) { setPlayError(null); setPlaying(true); setPlaybackState('playing'); record(e.currentTarget, 'playing'); } },
-    onPause: (e: React.SyntheticEvent<HTMLMediaElement>) => { if (e.currentTarget.paused) { playSequence.current++; desiredPlaying.current = false; setPlaying(false); setPlaybackState('paused'); } },
+    onPause: (e: React.SyntheticEvent<HTMLMediaElement>) => { if (e.currentTarget.paused && !reconnect.current) { playSequence.current++; desiredPlaying.current = false; setPlaying(false); setPlaybackState('paused'); } },
     onEnded: () => { playSequence.current++; desiredPlaying.current = false; setPlaying(false); setPlaybackState('paused'); },
     onWaiting: (e: React.SyntheticEvent<HTMLMediaElement>) => { if (desiredPlaying.current) { setPlaybackState('waiting'); record(e.currentTarget, 'waiting'); } },
     onStalled: (e: React.SyntheticEvent<HTMLMediaElement>) => { if (desiredPlaying.current) { setPlaybackState('waiting'); record(e.currentTarget, 'stalled'); } },
-    onLoadedMetadata: (e: React.SyntheticEvent<HTMLMediaElement>) => { if (Number.isFinite(e.currentTarget.duration)) setDuration(e.currentTarget.duration); record(e.currentTarget, 'loadedmetadata'); applySeek(); },
-    onTimeUpdate: (e: React.SyntheticEvent<HTMLMediaElement>) => { const m = e.currentTarget; const range = previewRangeRef.current; if (range && !m.paused && m.currentTime >= range.endMs / 1000) { m.pause(); m.currentTime = range.endMs / 1000; } setTime(m.currentTime); clockRef.current?.({ time: m.currentTime, duration: durationRef.current }); },
-    onError: (e: React.SyntheticEvent<HTMLMediaElement>) => { playSequence.current++; desiredPlaying.current = false; setPlaying(false); setPlaybackState('error'); setPlayError(record(e.currentTarget, 'media-error')); },
+    onLoadedMetadata: (e: React.SyntheticEvent<HTMLMediaElement>) => {
+      const media = e.currentTarget;
+      if (Number.isFinite(media.duration)) setDuration(media.duration);
+      record(media, 'loadedmetadata');
+      const pending = reconnect.current;
+      if (pending) {
+        reconnect.current = null; setReconnecting(null);
+        media.currentTime = Math.max(0, Math.min(pending.time, Number.isFinite(media.duration) ? media.duration : Infinity));
+        setTime(media.currentTime);
+        if (pending.resume) playMedia(media); else pauseMedia(media);
+      }
+      finishScrub();
+      applySeek();
+    },
+    onTimeUpdate: (e: React.SyntheticEvent<HTMLMediaElement>) => { if (reconnect.current) return; const m = e.currentTarget; const range = previewRangeRef.current; if (range && !m.paused && m.currentTime >= range.endMs / 1000) { m.pause(); m.currentTime = range.endMs / 1000; } setTime(m.currentTime); clockRef.current?.({ time: m.currentTime, duration: durationRef.current }); },
+    onError: (e: React.SyntheticEvent<HTMLMediaElement>) => {
+      const media = e.currentTarget;
+      const error = record(media, 'media-error');
+      if (reconnectMedia(media)) return;
+      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+      reconnect.current = null; setReconnecting(null);
+      playSequence.current++; desiredPlaying.current = false;
+      setPlaying(false); setPlaybackState('error'); setPlayError(error);
+    },
   };
 
   return (
@@ -455,7 +521,7 @@ function MediaPreviewPane({ file, sources, onClose, onPlace, sourceId, mediaVers
         )}
       </div>
       {playError ? <p role="alert" className="px-3 text-xs text-[var(--text-muted)]">{playbackFailureText(playError)}</p> : null}
-      {playbackState === 'loading' || playbackState === 'waiting' ? <p role="status" data-source-playback-state="" className="px-3 text-xs text-[var(--text-muted)]">{playbackState === 'waiting' ? '正在缓冲视频…' : '正在加载视频…'}</p> : null}
+      {reconnecting || playbackState === 'loading' || playbackState === 'waiting' ? <p role="status" data-source-playback-state="" className="px-3 text-xs text-[var(--text-muted)]">{reconnecting ? `视频连接中断，正在重试（${reconnecting}/2）…` : playbackState === 'waiting' ? '正在缓冲视频…' : '正在加载视频…'}</p> : null}
       {diagnostics.length > 0 ? <details className="px-3 text-xs text-[var(--text-muted)]">
         <summary className="cursor-pointer">播放诊断</summary>
         <pre data-source-playback-diagnostic="" className="max-h-32 overflow-auto whitespace-pre-wrap break-all">{JSON.stringify({ state: playbackState, events: diagnostics }, null, 2)}</pre>

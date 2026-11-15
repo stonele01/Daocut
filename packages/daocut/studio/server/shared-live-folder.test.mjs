@@ -21,6 +21,39 @@ const api = () => import('./shared-live-folder.mjs');
 const manifestPath = () => join(folder, '.daocut-shared', 'manifest.json');
 const useHome = name => { process.env.DAOCUT_STUDIO_HOME = join(scratch, name, 'home'); process.env.DAOCUT_LIBRARY = join(scratch, name, 'projects'); };
 
+test('large video opens with bounded identity progress and preserves that identity on reopen', async () => {
+  const { inspectLiveFolder, openLiveProject, liveProjectProgress } = await api();
+  await writeFile(join(folder, '原视频.mp4'), Buffer.alloc(10 * 1024 * 1024, 7));
+  const live = await inspectLiveFolder({ folder, initialize: true }, { coordinate });
+  const input = { folder, videoPath: live.videos[0].path, requestId: 'sampled-open-01' }, updates = [];
+  let entered, release;
+  const ready = new Promise(resolve => { entered = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  const opening = openLiveProject(input, { coordinate, progress: value => updates.push(value), initialize: async () => { entered(); await gate; } });
+  await ready;
+  assert.equal(liveProjectProgress(input.requestId).stage, 'reading-analysis');
+  release(); const first = await opening;
+  assert.equal(first.source.identityKind, 'sampled-sha256-v1');
+  assert.ok(updates.some(p => p.stage === 'identifying-video' && p.bytesRead === 8 * 1024 * 1024 && p.totalBytes === p.bytesRead));
+  assert.equal(liveProjectProgress(input.requestId).stage, 'complete');
+  const second = await openLiveProject({ ...input, requestId: 'sampled-open-02' }, { coordinate });
+  assert.equal(second.reused, true); assert.equal(second.project.id, first.project.id);
+  assert.deepEqual(second.source, first.source);
+});
+
+test('another workstation preserves a published legacy full identity instead of missing existing analysis', async () => {
+  const { inspectLiveFolder, openLiveProject } = await api();
+  const { mediaContentHash } = await import('../../src/shared-media-reference.mjs');
+  const file = join(folder, '原视频.mp4'); await writeFile(file, Buffer.alloc(10 * 1024 * 1024, 9));
+  const live = await inspectLiveFolder({ folder, initialize: true }, { coordinate });
+  const sha256 = await mediaContentHash(file), resultDir = join(live.resultRoot, 'results', 'a'.repeat(64));
+  await mkdir(resultDir, { recursive: true });
+  await writeFile(join(resultDir, 'b'.repeat(64) + '.json'), JSON.stringify({ schema: 'daocut.shared-analysis.v1', source: { libraryId: live.library.id, relativePath: live.videos[0].path, size: live.videos[0].size, sha256 } }));
+  useHome('coworker');
+  const made = await openLiveProject({ folder, videoPath: live.videos[0].path, requestId: 'legacy-co-worker' }, { coordinate });
+  assert.equal(made.source.sha256, sha256); assert.equal(made.source.identityKind, undefined);
+});
+
 beforeEach(async () => {
   const base = resolve(process.env.DAOCUT_TEST_TMP || '.test-temp'); await mkdir(base, { recursive: true });
   scratch = await mkdtemp(join(base, 'live-folder-'));

@@ -164,7 +164,7 @@ test('real local folder routes initialize once and reopen the same edited privat
     await dialog.waitFor({ state: 'detached' });
     await page.waitForURL(/\/projects\//);
     const projectId = new URL(page.url()).pathname.split('/').at(-1);
-    const split = page.getByRole('button', { name: '拆商品', exact: true });
+    const split = page.getByRole('button', { name: /^转写并拆品 / });
     await split.waitFor({ state: 'visible' });
     const position = await split.boundingBox();
     assert.ok(position && position.y < 400, 'a new live folder must expose the next daily action above the product list');

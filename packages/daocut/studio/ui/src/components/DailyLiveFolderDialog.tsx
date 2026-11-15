@@ -1,11 +1,13 @@
 import React from 'react';
 import { createPortal } from 'react-dom';
 import { Check, FolderOpen, Loader2, Settings2, Video, X } from 'lucide-react';
-import { api, type Project, type SharedLiveFolder } from '@/api';
+import { api, type Project, type SharedLiveFolder, type SharedLiveProgress } from '@/api';
 import { LegacySharedMediaProjectDialog } from './LegacySharedMediaProjectDialog';
 
 const newId = () => crypto.randomUUID();
 const button = 'inline-flex items-center justify-center gap-2 rounded-lg border border-[var(--border)] px-3 py-2 text-[12px] transition hover:bg-[var(--bg-hover)] active:scale-[0.98] disabled:opacity-50';
+const stages = { 'checking-folder': '正在检查直播文件夹', 'finding-project': '正在查找个人工程', 'identifying-video': '正在识别视频', 'opening-project': '正在打开个人工程', 'reading-analysis': '正在读取视频信息和已有分析', complete: '打开完成', error: '打开未完成' };
+const mb = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 
 /** One folder is the normal entry. Manual mappings remain available for older libraries. */
 export function DailyLiveFolderDialog({ onClose, onCreated }: { onClose: () => void; onCreated: (project: Project) => void }) {
@@ -17,6 +19,8 @@ export function DailyLiveFolderDialog({ onClose, onCreated }: { onClose: () => v
   const [projects, setProjects] = React.useState<Project[]>([]);
   const [busy, setBusy] = React.useState<'picker' | 'folder' | 'initialize' | 'project' | null>(null);
   const [error, setError] = React.useState('');
+  const [progress, setProgress] = React.useState<SharedLiveProgress | null>(null);
+  const [elapsed, setElapsed] = React.useState(0);
   const generation = React.useRef(0);
   const requestId = React.useRef(newId());
   const mounted = React.useRef(true);
@@ -27,9 +31,16 @@ export function DailyLiveFolderDialog({ onClose, onCreated }: { onClose: () => v
   const current = (id: number) => mounted.current && generation.current === id;
   const message = (reason: unknown) => reason instanceof Error ? reason.message : String(reason);
   const openProject = async (value: SharedLiveFolder, path: string, id: number, choice?: { projectId?: string; createNew?: boolean }) => {
-    setBusy('project'); setError('');
+    setBusy('project'); setError(''); setProgress({ stage: 'checking-folder' }); setElapsed(0);
+    const openingId = requestId.current, started = Date.now();
+    let stopped = false, timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      try { const next = await api.sharedLiveProgress(openingId); if (!stopped && current(id)) setProgress(next); } catch { /* The open request owns the error message. */ }
+      if (!stopped && current(id)) { setElapsed(Math.floor((Date.now() - started) / 1000)); timer = setTimeout(() => void poll(), 500); }
+    };
+    timer = setTimeout(() => void poll(), 250);
     try {
-      const result = await api.sharedLiveProject({ folder: value.folder, videoPath: path, requestId: requestId.current, ...choice });
+      const result = await api.sharedLiveProject({ folder: value.folder, videoPath: path, requestId: openingId, ...choice });
       if (!current(id)) return;
       if (result.status === 'choose-project') setProjects(result.projects);
       else {
@@ -39,7 +50,7 @@ export function DailyLiveFolderDialog({ onClose, onCreated }: { onClose: () => v
         onCreated(result.project);
       }
     } catch (reason) { if (current(id)) setError(message(reason)); }
-    finally { if (current(id)) setBusy(null); }
+    finally { stopped = true; clearTimeout(timer); if (current(id)) { setBusy(null); setProgress(null); } }
   };
   const readFolder = async (path: string, id: number, initialize = false) => {
     if (!path.trim()) return;
@@ -100,7 +111,13 @@ export function DailyLiveFolderDialog({ onClose, onCreated }: { onClose: () => v
         {folder && !folder.videos.length && <p className="text-[12px] text-[var(--text-muted)]">此文件夹没有可用视频。</p>}
         {folder?.status === 'ready' && (folder.videos.length > 1 || folder.moreVideos) && <section className="space-y-2 rounded-xl border border-[var(--border)] p-3 animate-in fade-in duration-150"><p className="text-[12px] text-[var(--text-muted)]">选择这次要打开的视频；每个视频分别保存分析结果。</p>{folder.videos.map(video => <button type="button" key={video.path} disabled={!!busy} className={`${button} w-full justify-start ${videoPath === video.path ? 'border-[var(--accent)] text-[var(--accent)]' : ''}`} onClick={() => { setVideoPath(video.path); setProjects([]); requestId.current = newId(); }}><Video size={14} /><span className="truncate">{video.name}</span></button>)}{folder.moreVideos && <p className="text-[12px] text-[var(--warn)]">视频较多，当前只显示部分列表。</p>}<button type="button" className={button} disabled={!videoPath || !!busy} onClick={() => { if (videoPath) void openProject(folder, videoPath, generation.current); }}>打开所选视频</button></section>}
         {projects.length > 0 && folder && videoPath && <section className="space-y-2 rounded-xl border border-[var(--border)] p-3 animate-in fade-in duration-150"><p className="text-[12px]">本机有多个使用此视频的工程，请选择继续哪一个。</p>{projects.map(project => <button type="button" key={project.id} className={`${button} w-full justify-start`} disabled={!!busy} onClick={() => void openProject(folder, videoPath, generation.current, { projectId: project.id })}>继续：{project.name}</button>)}<button type="button" className={button} disabled={!!busy} onClick={() => void openProject(folder, videoPath, generation.current, { createNew: true })}>另外新建个人工程</button></section>}
-        {busy && <p role="status" className="flex items-center gap-2 text-[12px] text-[var(--text-muted)]"><Loader2 size={14} className="animate-spin" />{busy === 'project' ? '正在打开自己的工程并读取已有分析…' : busy === 'initialize' ? '正在创建共享结果目录…' : busy === 'picker' ? '请选择直播文件夹…' : '正在识别直播文件夹…'}</p>}
+        {busy && <div role="status" aria-live="polite" className="space-y-2 text-[12px] text-[var(--text-muted)] animate-in fade-in duration-150">
+          <p className="flex items-center gap-2"><Loader2 size={14} className="animate-spin" />{busy === 'project' ? stages[progress?.stage ?? 'checking-folder'] : busy === 'initialize' ? '正在创建共享结果目录…' : busy === 'picker' ? '请选择直播文件夹…' : '正在识别直播文件夹…'}{busy === 'project' && <span className="ml-auto tabular-nums">已用 {elapsed} 秒</span>}</p>
+          {busy === 'project' && progress?.stage === 'identifying-video' && progress.totalBytes !== undefined && <>
+            <progress aria-label="视频识别进度" max={progress.totalBytes || 1} value={progress.bytesRead ?? 0} className="h-1.5 w-full overflow-hidden rounded-full accent-[var(--accent)] transition-all" />
+            <p className="flex justify-between gap-2 tabular-nums"><span>{progress.identityKind === 'sampled-sha256-v1' ? '快速识别' : '校验已有视频'}{progress.cached ? ' · 已缓存' : ''}</span><span>{mb(progress.bytesRead ?? 0)} / {mb(progress.totalBytes)}</span></p>
+          </>}
+        </div>}
         {error && <div role="alert" className="space-y-2 text-[12px] text-red-400"><p>{error}</p>{folder?.status === 'ready' && videoPath && !projects.length && <button type="button" className={button} disabled={!!busy} onClick={() => void openProject(folder, videoPath, generation.current)}>重试打开</button>}</div>}
         <button type="button" disabled={!!busy} onClick={() => setAdvanced(true)} className="inline-flex items-center gap-1.5 text-[11.5px] text-[var(--text-muted)] transition hover:text-[var(--text)] active:scale-[0.98]"><Settings2 size={13} />手动配置旧素材库</button>
       </div>

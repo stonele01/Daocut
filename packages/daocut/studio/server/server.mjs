@@ -26,7 +26,7 @@ import { spawn } from 'node:child_process';
 import { EditError, editProjectFilm, pageClipLook, readProjectFilm } from './film.mjs';
 import { FileError, bringIn, collect, extractAudio, freezeFrame, importFile, inside, listFiles, makeFolder, moveCheck, moveFile, readable, relink, trashFile } from './files.mjs';
 import { SharedMediaError, addSharedMedia, bindSharedMediaCopy, associateProjectLibrary, associateSharedLibrary, browseSharedFolder, createSharedMediaProject, listSharedProjectMedia } from './shared-media.mjs';
-import { inspectLiveFolder, openLiveProject } from './shared-live-folder.mjs';
+import { inspectLiveFolder, openLiveProject, liveProjectProgress } from './shared-live-folder.mjs';
 import { ProjectBackupError, inspectProjectBackup, restoreProjectBackup } from './project-backup.mjs';
 import { ExportError, createExports, draftApps, exportCapabilities, exportsRoot, projectSizes, installedDraftsFolder } from './exports.mjs';
 import { MediaError, frame, loudness, poster, probe, waveform } from './derived.mjs';
@@ -416,6 +416,9 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
       if (parts[1] === 'live-project' && parts.length === 2 && req.method === 'POST') {
         const body = await readJson(req);
         return json(res, 200, await openLiveProject({ folder: body?.folder, videoPath: body?.videoPath, requestId: body?.requestId, projectId: body?.projectId, createNew: body?.createNew === true }, { coordinate: sharedAnalysis?.coordinate, initialize: productWorkflowRoute.openSharedProject, refresh: productWorkflowRoute.refreshSharedProject }));
+      }
+      if (parts[1] === 'live-project' && parts.length === 3 && req.method === 'GET') {
+        return json(res, 200, liveProjectProgress(parts[2]));
       }
       if (parts[1] === 'libraries' && parts.length === 2 && req.method === 'POST') {
         const { id, name, root } = /** @type {{ id?: unknown, name?: unknown, root?: unknown }} */ (await readJson(req));

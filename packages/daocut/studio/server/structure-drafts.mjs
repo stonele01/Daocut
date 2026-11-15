@@ -81,7 +81,7 @@ export async function rebindStructureDrafts(parentRoot, sources) {
     if (manifest?.version !== 1) fail('备份中的结构草稿缺少原片引用');
     for (const [asset, record] of Object.entries(manifest.items ?? {})) {
       const source = sources.find(item => item.assetPath === asset);
-      if (!source || record.sha256 !== source.sha256 || record.size !== source.size) fail('备份中的草稿与父工程原片内容不一致');
+      if (!source || record.sha256 !== (source.identitySha256 ?? source.sha256) || record.identityKind !== source.identityKind || record.size !== source.size) fail('备份中的草稿与父工程原片内容不一致');
       if (record.mode === 'project-reference') {
         if (record.parentProjectId !== meta.parentProjectId || record.parentAssetPath !== asset) fail('备份中的草稿原片引用身份不一致');
         record.parentProjectId = parentProjectId; record.libraryId = `project-${digest(parentProjectId).slice(0, 24)}`;
@@ -161,11 +161,10 @@ async function create(parentRoot, parentProjectId, plan) {
   try {
   await mkdir(join(stage, '.film'), { recursive: true }); await mkdir(join(stage, 'assets'), { recursive: true });
   const source = checked.source, sourcePath = await productSourcePath(parent, source.assetPath), info = await stat(sourcePath);
-  const sha256 = await mediaContentHash(sourcePath);
   const parentManifest = await sharedMediaManifest(parent), shared = parentManifest.items[source.assetPath];
   const record = shared?.mode === 'reference' ? structuredClone(shared) : {
     libraryId: `project-${digest(parentProjectId).slice(0, 24)}`, libraryName: '个人工程原片', relativePath: source.assetPath,
-    mode: 'project-reference', parentProjectId, parentAssetPath: source.assetPath, size: info.size, mtimeMs: info.mtimeMs, sha256,
+    mode: 'project-reference', parentProjectId, parentAssetPath: source.assetPath, size: info.size, mtimeMs: info.mtimeMs, sha256: await mediaContentHash(sourcePath),
   };
   await writeFile(join(stage, 'assets/.daocut-source-media.json'), JSON.stringify({ version: 1, items: { [source.assetPath]: record } }, null, 2));
   for (const rel of ['.film/settings.json', '.film/subtitles.json', '.film/markers.json', '.film/product-analysis.json', '.film/source-takes.json']) await copySmallFile(parent, stage, rel);

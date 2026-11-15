@@ -17,7 +17,7 @@ import { inside, listFiles, relink } from './files.mjs';
 import { createProject } from './projects.mjs';
 import { readPrefs, writePrefs } from './prefs.mjs';
 import { writeProductAnalysis } from './product-analysis.mjs';
-import { mediaContentHash, prepareMediaReferences, resolveMediaReference } from '../../src/shared-media-reference.mjs';
+import { mediaContentHash, mediaEditingIdentity, prepareMediaReferences, resolveMediaReference } from '../../src/shared-media-reference.mjs';
 
 export const SHARED_MEDIA_MANIFEST = 'assets/.daocut-source-media.json';
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.mkv', '.avi', '.m4v', '.webm', '.wmv', '.flv', '.ts', '.mts', '.m2ts']);
@@ -35,7 +35,7 @@ export class SharedMediaError extends Error {
 }
 
 /** @typedef {{ id: string, name: string, root: string, managedFolder?: true }} SharedLibrary */
-/** @typedef {{ libraryId: string, libraryName: string, relativePath: string, size: number, mtimeMs: number, mode?: 'reference'|'verified-copy'|'project-reference', sha256?: string, parentProjectId?: string, parentAssetPath?: string }} SourceRecord */
+/** @typedef {{ libraryId: string, libraryName: string, relativePath: string, size: number, mtimeMs: number, mode?: 'reference'|'verified-copy'|'project-reference', sha256?: string, identityKind?: string, parentProjectId?: string, parentAssetPath?: string }} SourceRecord */
 /** @typedef {{ version: 1, items: Record<string, SourceRecord> }} SourceManifest */
 
 const posix = (/** @type {string} */ path) => path.split(sep).join('/');
@@ -87,6 +87,7 @@ function manifestOf(/** @type {unknown} */ value) {
     const extra = /** @type {any} */ (item);
     items[assetPath] = { libraryId: item.libraryId, libraryName: item.libraryName.trim().slice(0, 80), relativePath, size: item.size, mtimeMs: item.mtimeMs,
       ...(['reference', 'verified-copy', 'project-reference'].includes(extra.mode) ? { mode: extra.mode, sha256: extra.sha256 } : {}),
+      ...(extra.identityKind !== undefined ? { identityKind: extra.identityKind } : {}),
       ...(extra.mode === 'project-reference' ? { parentProjectId: extra.parentProjectId, parentAssetPath: extra.parentAssetPath } : {}) };
   }
   return /** @type {SourceManifest} */ ({ version: 1, items });
@@ -179,8 +180,32 @@ export async function browseSharedLibraryFolder(/** @type {SharedLibrary} */ lib
 /** A duplicate click or a retry with this same id waits for/returns the one create operation for this Studio session. */
 const creations = new Map();
 
+/** A new workstation must still find analyses published with the old full-file identity.
+ * Inspect only result metadata; never replace an established identity with a new algorithm.
+ * @param {SharedLibrary} library @param {{path:string,relativePath:string,info:import('node:fs').Stats}} source
+ * @param {import('../../src/shared-media-reference.mjs').IdentityOptions['onProgress']} [onProgress] */
+async function editingIdentity(library, source, onProgress) {
+  const resultRoot = readPrefs().sharedAnalysis.resultRoots.find(item => item.libraryId === library.id)?.root;
+  if (source.info.size > 8 * 1024 * 1024 && resultRoot) {
+    const results = join(resultRoot, 'results');
+    const tasks = await readdir(results, { withFileTypes: true }).catch(error => { if (error.code === 'ENOENT') return []; throw error; });
+    for (const task of tasks.filter(item => item.isDirectory() && /^[a-f0-9]{64}$/.test(item.name))) {
+      const directory = join(results, task.name);
+      for (const file of (await readdir(directory, { withFileTypes: true })).filter(item => item.isFile() && /^[a-f0-9]{64}\.json$/.test(item.name))) {
+        const value = JSON.parse(await readFile(join(directory, file.name), 'utf8'));
+        if (value?.schema !== 'daocut.shared-analysis.v1' || value.source?.libraryId !== library.id || value.source?.relativePath !== source.relativePath || value.source?.size !== source.info.size) continue;
+        const identityKind = value.source.identityKind;
+        const sha256 = await mediaContentHash(source.path, { identityKind, onProgress });
+        if (sha256 !== value.source.sha256) throw new SharedMediaError('原视频与已有共享分析的身份不一致，请核对来源；未创建重复分析', 409);
+        return { ...(identityKind ? { identityKind } : {}), sha256 };
+      }
+    }
+  }
+  return mediaEditingIdentity(source.path, { onProgress });
+}
+
 /** Create the personal project and its read-only logical reference. It intentionally does not edit film.html. */
-export function createSharedMediaProject(/** @type {{ libraryId?: unknown, videoPath?: unknown, requestId?: unknown }} */ { libraryId, videoPath, requestId }, /** @type {{ initialize?: (root: string, input: { assetPath: string, sourceId: string, expectedAnalysis: any }) => Promise<any> }} */ { initialize } = {}) {
+export function createSharedMediaProject(/** @type {{ libraryId?: unknown, videoPath?: unknown, requestId?: unknown }} */ { libraryId, videoPath, requestId }, /** @type {{ initialize?: (root: string, input: { assetPath: string, sourceId: string, expectedAnalysis: any }) => Promise<any>, onIdentityProgress?: import('../../src/shared-media-reference.mjs').IdentityOptions['onProgress'], onStage?: (stage:string)=>void }} */ { initialize, onIdentityProgress, onStage } = {}) {
   if (typeof requestId !== 'string' || !/^[a-z0-9-]{8,100}$/i.test(requestId)) throw new SharedMediaError('A creation request id is required.');
   const earlier = creations.get(requestId);
   if (earlier) return earlier;
@@ -190,6 +215,8 @@ export function createSharedMediaProject(/** @type {{ libraryId?: unknown, video
     const root = await openedRoot(library);
     const source = await sourceFile(root, String(videoPath ?? ''));
     if (!VIDEO_EXTENSIONS.has(extname(source.path).toLowerCase())) throw new SharedMediaError('Choose a video file.');
+    const identity = await editingIdentity(library, source, onIdentityProgress);
+    onStage?.('opening-project');
     const productDir = dirname(source.relativePath);
     const product = productDir === '.' ? basename(root) : basename(productDir);
     const project = await createProject(product || basename(source.path, extname(source.path)) || 'Untitled');
@@ -202,7 +229,7 @@ export function createSharedMediaProject(/** @type {{ libraryId?: unknown, video
       relativePath: source.relativePath,
       size: source.info.size,
       mtimeMs: Math.round(source.info.mtimeMs),
-      mode: 'reference', sha256: await mediaContentHash(source.path),
+      mode: 'reference', ...identity,
     };
     await writeManifest(project.path, manifest);
     const sourceId = randomUUID();
@@ -212,6 +239,7 @@ export function createSharedMediaProject(/** @type {{ libraryId?: unknown, video
       products: [{ id: randomUUID(), name: product || basename(source.path, extname(source.path)), sourceIds: [sourceId] }],
       intervals: [], candidates: [],
     });
+    onStage?.('reading-analysis');
     const sharedRead = initialize ? await initialize(project.path, { assetPath: asset, sourceId, expectedAnalysis: initial.analysis }) : undefined;
     return { project, asset, source: manifest.items[asset], ...(sharedRead ? { sharedRead } : {}) };
   })();
@@ -244,7 +272,7 @@ export async function addSharedMedia({ projectRoot, libraryId, folder, videoPath
       if (existing) { assets.push(existing[0]); continue; }
       const asset = await referenceAsset(projectRoot, basename(source.path), manifest);
       if (!asset) throw new SharedMediaError('The shared video could not be linked into the project.', 500);
-      manifest.items[asset] = { libraryId: library.id, libraryName: library.name, relativePath: source.relativePath, size: source.info.size, mtimeMs: Math.round(source.info.mtimeMs), mode: 'reference', sha256: await mediaContentHash(source.path) };
+      manifest.items[asset] = { libraryId: library.id, libraryName: library.name, relativePath: source.relativePath, size: source.info.size, mtimeMs: Math.round(source.info.mtimeMs), mode: 'reference', ...await editingIdentity(library, source) };
       await writeManifest(projectRoot, manifest);
       assets.push(asset);
     }
@@ -283,7 +311,7 @@ export async function refreshSharedMedia(/** @type {string} */ projectRoot) {
       continue;
     }
     if (source.mode === 'reference') {
-      try { await mediaContentHash(candidate.path); resolveMediaReference(projectRoot, asset); states[asset] = { ...base, status: 'available' }; }
+      try { await prepareMediaReferences(projectRoot, asset); resolveMediaReference(projectRoot, asset); states[asset] = { ...base, status: 'available' }; }
       catch { states[asset] = { ...base, status: 'needs-confirmation' }; }
       continue;
     }

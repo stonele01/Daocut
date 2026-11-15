@@ -70,7 +70,7 @@ test('source playback handles delayed media and superseded user commands', { tim
       const values = new WeakMap();
       const state = media => { if (!values.has(media)) values.set(media, { paused: true, ready: Number(new URL(location.href).searchParams.get('ready') ?? 1), time: 0, error: null }); return values.get(media); };
       const pending = [];
-      const fixture = window.fixture = { calls: 0, pauses: 0, pending, state };
+      const fixture = window.fixture = { calls: 0, pauses: 0, loads: 0, pending, state };
       for (const [name, getter] of Object.entries({ paused: s => s.paused, readyState: s => s.ready, currentTime: s => s.time,
         duration: () => 30, networkState: () => 2, error: s => s.error,
         buffered: () => ({ length: 1, start: () => 0, end: () => 2 }) })) {
@@ -83,6 +83,14 @@ test('source playback handles delayed media and superseded user commands', { tim
       };
       HTMLMediaElement.prototype.pause = function () {
         fixture.pauses++; state(this).paused = true; this.dispatchEvent(new Event('pause'));
+      };
+      HTMLMediaElement.prototype.load = function () {
+        fixture.loads++;
+        Object.assign(state(this), { paused: true, ready: 0, time: 0, error: null });
+        this.dispatchEvent(new Event('pause'));
+      };
+      fixture.metadata = () => {
+        const media = document.querySelector('video'); state(media).ready = 1; media.dispatchEvent(new Event('loadedmetadata'));
       };
       fixture.event = type => document.querySelector('video').dispatchEvent(new Event(type));
       fixture.resolve = index => { const p = pending[index]; state(p.media).paused = false; p.media.dispatchEvent(new Event('playing')); p.resolve(); };
@@ -150,7 +158,7 @@ test('source playback handles delayed media and superseded user commands', { tim
       await scrubber.evaluate(el => { el.style.height = '20px'; });
       const box = await scrubber.boundingBox(); assert.ok(box);
       await scrubber.click({ position: { x: box.width * 8 / 30, y: 5 } });
-      const scrubbed = await page.locator('video').evaluate(v => v.currentTime);
+      const scrubbed = Number(await scrubber.getAttribute('aria-valuenow'));
       assert.ok(Math.abs(scrubbed - 8) < 0.05);
       await page.evaluate(() => { window.fixture.state(document.querySelector('video')).ready = 1; window.fixture.event('loadedmetadata'); }); await flush();
       assert.equal(await page.locator('video').evaluate(v => v.currentTime), scrubbed, 'late metadata must not restore the superseded 1s position');
@@ -187,12 +195,51 @@ test('source playback handles delayed media and superseded user commands', { tim
       await page.evaluate(() => window.fixture.event('waiting')); await flush();
       assert.match(await page.locator('[data-source-playback-state]').innerText(), /缓冲|加载/);
       await page.evaluate(() => window.fixture.mediaError(2, 'Network read failed')); await flush();
-      assert.match(await page.getByRole('alert').innerText(), /读取|网络/);
+      assert.equal(await page.getByRole('alert').count(), 0);
+      assert.match(await page.locator('[data-source-playback-state]').innerText(), /重试（1\/2）/);
       await page.getByText('播放诊断', { exact: true }).click();
       assert.match(await page.locator('[data-source-playback-diagnostic]').innerText(), /MEDIA_ERR_NETWORK/);
       await open();
       await page.evaluate(() => window.fixture.mediaError(4, 'Media response was not usable')); await flush();
       assert.match(await page.getByRole('alert').innerText(), /无法读取或格式不受支持/, 'a bad HTTP response must not be diagnosed as a codec failure');
+      assert.equal(await page.evaluate(() => window.fixture.loads), 0, 'format errors are not retried');
+    });
+    await t.test('network reconnect restores position and ignores a stale play rejection', async () => {
+      await open();
+      await page.locator('video').evaluate(v => { v.currentTime = 12; });
+      await page.evaluate(() => window.fixture.mediaError(2, 'read interrupted'));
+      await page.waitForFunction(() => window.fixture.loads === 1);
+      await page.evaluate(() => { window.fixture.reject(0, 'AbortError'); window.fixture.metadata(); });
+      await page.waitForFunction(() => window.fixture.calls === 2);
+      assert.equal(await page.locator('video').evaluate(v => v.currentTime), 12);
+      await page.evaluate(() => window.fixture.resolve(1)); await flush();
+      assert.equal(await page.getByRole('alert').count(), 0);
+      assert.equal(await page.locator('[data-source-playback-state]').count(), 0);
+    });
+    await t.test('pause and a later seek during reconnect win over the interrupted play', async () => {
+      await open();
+      await page.evaluate(() => window.fixture.mediaError(2, 'read interrupted'));
+      await page.waitForFunction(() => window.fixture.loads === 1);
+      await page.evaluate(() => window.fixture.seek({ sourceId: 'source-a', requestId: 2, timeMs: 8000, play: true })); await flush();
+      await page.getByRole('button', { name: '暂停', exact: true }).click();
+      await page.evaluate(() => window.fixture.metadata()); await flush();
+      assert.equal(await page.locator('video').evaluate(v => v.currentTime), 8);
+      assert.equal(await page.locator('video').evaluate(v => v.paused), true);
+      assert.equal(await page.evaluate(() => window.fixture.calls), 1, 'reconnect must not undo the user pause');
+    });
+    await t.test('repeated read failures stop after two retries and manual play can retry again', async () => {
+      await open();
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        await page.evaluate(() => window.fixture.mediaError(2, 'read interrupted'));
+        await page.waitForFunction(n => window.fixture.loads === n, attempt);
+      }
+      await page.evaluate(() => window.fixture.mediaError(2, 'still unavailable')); await flush();
+      assert.match(await page.getByRole('alert').innerText(), /读取|网络/);
+      assert.equal(await page.evaluate(() => window.fixture.loads), 2);
+      await page.getByRole('button', { name: '播放', exact: true }).click();
+      await page.waitForFunction(() => window.fixture.loads === 3);
+      await page.evaluate(() => window.fixture.metadata()); await flush();
+      assert.equal(await page.evaluate(() => window.fixture.calls), 2);
     });
     await t.test('a play request remains loading until the playing event and unexpected abort remains visible', async () => {
       await open();

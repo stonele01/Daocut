@@ -55,11 +55,19 @@ jobs:
           scripts/daocut-release-config.test.mjs scripts/locked-versions.test.mjs
       - name: Check Studio authorization without media or model calls
         run: node --test packages/daocut/studio/server/company-authorize.test.mjs
+      - name: Check bounded shared-video identities and opening progress
+        run: >-
+          node --test --test-concurrency=1
+          packages/daocut/src/shared-media-identity-cache.test.mjs
+          packages/daocut/src/shared-media-sampled-identity.test.mjs
+          packages/daocut/src/shared-media-snapshot.test.mjs
+          packages/daocut/studio/server/shared-live-folder.test.mjs
       - name: Check project backup and restored AI plans
         run: >-
           node --test --test-concurrency=1
           packages/daocut/studio/server/project-backup.test.mjs
           packages/daocut/studio/server/project-backup-plans.test.mjs
+          packages/daocut/studio/server/project-backup-sampled.test.mjs
           packages/daocut/studio/server/project-backup-legacy-reference.test.mjs
           packages/daocut/studio/server/structure-drafts.test.mjs
       - name: Check LAN publisher files and manifests

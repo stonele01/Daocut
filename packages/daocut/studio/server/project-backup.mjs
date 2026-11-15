@@ -68,7 +68,7 @@ export async function createProjectBackup(projectRoot, targetPath, options = {})
     const input = await (options.resolveSource ?? productSourcePath)(root, source.assetPath), info = await stat(input);
     if (!info.isFile()) throw new ProjectBackupError('来源素材不可读取，无法确认备份身份');
     const resolvedPath = await realpath(input);
-    sources.push({ sourceId: source.id, assetPath: source.assetPath, durationMs: source.durationMs, ...shared[source.assetPath], sha256: await sha256(input), size: info.size,
+    sources.push({ sourceId: source.id, assetPath: source.assetPath, durationMs: source.durationMs, ...shared[source.assetPath], ...(shared[source.assetPath]?.identityKind ? { identitySha256: shared[source.assetPath].sha256 } : {}), sha256: await sha256(input), size: info.size,
       fingerprint: { size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs, path: resolvedPath }, ino: info.ino });
   }
   for (const assetPath of Object.keys(shared)) if (!sources.some(source => source.assetPath === assetPath)) throw new ProjectBackupError('有共享素材未登记到商品来源，无法完整备份；请先修正素材关联');
@@ -156,13 +156,14 @@ export async function restoreProjectBackup(input, options = {}) {
       // library identity were checked above: restore the same source as a read-only logical reference.
       const mode = source.mode === 'verified-copy' ? 'verified-copy' : 'reference';
       if (mode === 'reference' && manifest.files.some(file => file.path === source.assetPath)) throw new ProjectBackupError('共享素材引用与备份中的实体文件冲突');
-      Object.assign(record, { mode, sha256: source.sha256, size: source.verifiedInfo.size, mtimeMs: source.verifiedInfo.mtimeMs });
+      if (record.identityKind !== source.identityKind || (source.identityKind && (!/^[a-f0-9]{64}$/.test(source.identitySha256 ?? '') || record.sha256 !== source.identitySha256))) throw new ProjectBackupError('共享素材指纹与备份来源不一致');
+      Object.assign(record, { mode, sha256: source.identitySha256 ?? source.sha256, size: source.verifiedInfo.size, mtimeMs: source.verifiedInfo.mtimeMs });
     }
     if (shared) await writeFile(join(stage, 'assets/.daocut-source-media.json'), JSON.stringify(shared));
     warnings.push(...await rebindRestoredProject(stage, target, resolvedSources, { ...options, resultRoots: input.resultRoots ?? [], backupId: manifest.backupId }));
     await rebindStructureDrafts(stage, resolvedSources);
     await mkdir(join(stage, '.film'), { recursive: true });
-    await writeFile(join(stage, '.film/restore-provenance.json'), JSON.stringify({ backupId: manifest.backupId, restoredAt: new Date().toISOString(), sources: resolvedSources.map(({ sourceId, sha256: contentHash }) => ({ sourceId, contentHash })), warnings }));
+    await writeFile(join(stage, '.film/restore-provenance.json'), JSON.stringify({ backupId: manifest.backupId, restoredAt: new Date().toISOString(), sources: resolvedSources.map(({ sourceId, sha256, identitySha256, identityKind }) => ({ sourceId, contentHash: sha256, ...(identityKind ? { identityKind, identitySha256 } : {}) })), warnings }));
     // A NAS file can be replaced while the personal files are being copied. Do not publish that
     // half-valid restoration; only the new staging directory is discarded, never the source/backup.
     for (const source of resolvedSources.filter(source => source.libraryId && source.mode !== 'verified-copy')) {
