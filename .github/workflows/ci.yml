@@ -62,6 +62,8 @@ jobs:
           studio/server/shared-original-associations.test.mjs
           studio/server/shared-workflow-folder-open.test.mjs
           studio/server/shared-analysis-workflow.test.mjs
+          studio/server/shared-analysis-versions.test.mjs
+          studio/server/structure-plans.test.mjs
           studio/server/shared-composition-scopes.test.mjs
           studio/ui/src/lib/saved-structure-range.test.ts
       - name: Check bounded shared-video identities and opening progress

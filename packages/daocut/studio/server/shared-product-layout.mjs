@@ -1,6 +1,6 @@
 /** Share confirmed product topology separately from immutable AI results.
  * Recovery scopes and candidate IDs stay intact for existing private drafts. */
-import { mkdir, readFile, readdir, rmdir } from 'node:fs/promises';
+import { mkdir, readFile, rmdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { sharedHash } from './shared-analysis.mjs';
 import { readProductAnalysis, updateProductAnalysis, validateProductAnalysis } from './product-analysis.mjs';
@@ -17,12 +17,7 @@ const clean = item => Object.fromEntries(Object.entries(item).filter(([key]) => 
 export async function exportProductLayout(root, sourceId, analysis) {
   const source = analysis.sources.find(s => s.id === sourceId);
   const live = await read(join(root, '.film/live-analysis', `${sharedHash(sourceId)}.json`));
-  const records = [];
-  for (const name of await readdir(join(root, '.film/shared-analysis')).catch(e => { if (e.code === 'ENOENT') return []; throw e; })) {
-    if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
-    const r = await read(join(root, '.film/shared-analysis', name));
-    if (r?.sourceId === sourceId && r.status === 'complete' && r.snapshot?.action === 'analysis' && sharedHash(r.snapshot) === r.result?.sha256) records.push(r);
-  }
+  const records = await readOriginalAnalysisReceipts(root, sourceId);
   const selected = ranges(analysis).filter(r => r.sourceId === sourceId && !r.sharedLayoutHidden && !r.originalScopeId);
   const ids = new Map([...analysis.products, ...selected].map(r => [r.id, r.sharedOriginalId ?? r.id]));
   const aliasesOnly = new Set(analysis.products.filter(p => ranges(analysis).some(r => r.productId === p.id && r.originalScopeId) && !selected.some(r => r.productId === p.id)).map(p => p.id));
@@ -31,9 +26,10 @@ export async function exportProductLayout(root, sourceId, analysis) {
   for (const range of selected) {
     const actual = range.savedResultScopeId && !live?.analyses?.[range.id] ? ranges(analysis).find(r => r.id === range.savedResultScopeId) : range;
     const saved = live?.analyses?.[actual?.id];
-    const refs = records.filter(r => r.result.sha256 === (saved?.sharedRef?.sha256 ?? saved?.historicalRef?.sha256)
-      || r.descriptor?.localScope?.intervalId === actual?.id
-      || r.snapshot.payload?.originalRunId && r.snapshot.payload.originalRunId === saved?.currentRunId);
+    const selectedRef = saved?.sharedRef?.sha256 ?? saved?.historicalRef?.sha256;
+    const runRefs = records.filter(r => r.snapshot.payload?.originalRunId && r.snapshot.payload.originalRunId === saved?.currentRunId);
+    const refs = selectedRef ? records.filter(r => r.result.sha256 === selectedRef) : runRefs.length ? runRefs
+      : records.filter(r => r.descriptor?.localScope?.intervalId === actual?.id);
     const exact = [...new Set(refs.filter(r => r.snapshot.scope?.startMs === range.startMs && r.snapshot.scope?.endMs === range.endMs).map(r => r.result.sha256))];
     if (exact.length === 1) links[ids.get(range.id)] = exact[0];
     else if (analysis.candidates.some(c => c.intervalId === actual?.id)) throw failure(`范围 ${range.id} 的原始结果尚未完整共享`);
@@ -176,5 +172,15 @@ export function createSharedProductLayout({ shared, probeSource } = {}) {
     }).finally(() => { if (active.get(key) === work) active.delete(key); });
     active.set(key, work); return work;
   }
-  return { sync };
+  async function preferredResults(root, sourceId) {
+    const { analysis } = await readProductAnalysis(root), source = analysis.sources.find(s => s.id === sourceId);
+    if (!source || !shared?.layoutLocation) return new Set();
+    const location = await shared.layoutLocation(root, source);
+    if (!location) return new Set();
+    const current = await read(join(location.directory, 'current.json'));
+    if (!current) return new Set();
+    if (current.version !== 1 || current.sourceIdentity !== location.sourceIdentity || current.revision !== sharedHash({ layout: current.layout, links: current.links })) throw failure('共享关联校验失败');
+    return new Set(Object.values(current.links));
+  }
+  return { sync, preferredResults };
 }

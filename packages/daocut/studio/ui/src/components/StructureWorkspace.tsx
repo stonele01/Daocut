@@ -15,7 +15,7 @@ import { selectedStructurePlanIds, toggleStructurePlan, StructureExportSelection
 export interface StructureEditorBridge {
   ownerId: string; scope: StructureScope | null; rightWidth: number; preview: StructurePlan | null; previewFolder: string;
   previewRequest: { clipIndex: number; requestId: number };
-  onScope: (scope: StructureScope | null) => void; onCompose: (scope: StructureScope) => void;
+  onScope: (scope: StructureScope | null) => void; onCompose: (scope: StructureScope, generate?: boolean) => void;
   onClosePreview: () => void; onShowPlans: () => void; registerSave: (save: () => Promise<void>) => () => void;
   onReturnToProject: () => void;
   onAnalysisUpdated?: () => void;
@@ -140,15 +140,15 @@ export function StructureWorkspace({ projectId, onProject, onLeave }: { projectI
     };
     timer = setTimeout(poll, 1000); return () => { alive = false; clearTimeout(timer); };
   }, [projectId, scopeKey(scope), plans?.status, rulesVersion]);
-  const compose = async (selected: StructureScope) => {
+  const compose = async (selected: StructureScope, generate = true) => {
     showPlans(); setError('');
     // A card click carries the exact lecture even if React has not yet applied its selection.
-    if (scopeKey(currentScope.current) !== scopeKey(selected)) { composeAfterSelection.current = scopeKey(selected); onScope(selected); return; }
+    if (scopeKey(currentScope.current) !== scopeKey(selected)) { composeAfterSelection.current = generate ? scopeKey(selected) : ''; onScope(selected); return; }
     const token = ++generation.current; request.current += 1; setWorking(true); setReadingPlans(true);
     try {
       const next = await api.structurePlans(projectId, selected);
       if (generation.current !== token) return;
-      const needsConfirmation = needsStructureGeneration(next) && next.confirmation;
+      const needsConfirmation = generate && needsStructureGeneration(next) && next.confirmation;
       // Read current analysis/results without submitting another generation.
       acceptPlans(next);
       if (needsConfirmation) setConfirmation({ scope: selected, plan: next.confirmation! });
@@ -228,7 +228,7 @@ export function StructureWorkspace({ projectId, onProject, onLeave }: { projectI
   };
   const activeDraft = workspace?.drafts.find(item => item.projectId === active);
   const draftLabel = activeDraft ? structureDraftLabel(activeDraft.planId, plans?.plans ?? []) : undefined;
-  const bridge: StructureEditorBridge = { ownerId: projectId, scope, rightWidth: plansVisible ? 350 : 0, preview, previewRequest, previewFolder: folder, onScope, onCompose: selected => void compose(selected), onClosePreview: closePreview, onShowPlans: showPlans, registerSave, onReturnToProject: () => void switchTo(null), onAnalysisUpdated: () => { const selected = currentScope.current; if (selected) void refreshPlans(selected); }, draftLabel,
+  const bridge: StructureEditorBridge = { ownerId: projectId, scope, rightWidth: plansVisible ? 350 : 0, preview, previewRequest, previewFolder: folder, onScope, onCompose: (selected, generate) => void compose(selected, generate), onClosePreview: closePreview, onShowPlans: showPlans, registerSave, onReturnToProject: () => void switchTo(null), onAnalysisUpdated: () => { const selected = currentScope.current; if (selected) void refreshPlans(selected); }, draftLabel,
     batchExport: selectedIds.length ? { projectId, title: projectTitle, ordinals: (plans?.plans ?? []).flatMap((plan, index) => selectedIds.includes(plan.id) ? [index + 1] : []), onExport: exportSelected } : undefined };
   return <div data-active-structure-draft={active} inert={!!confirmation}>
     {workspace && <div inert={switching} aria-busy={switching}><ProjectView key={active} projectId={active} onProject={onProject} onLeave={onLeave} structure={bridge} /></div>}

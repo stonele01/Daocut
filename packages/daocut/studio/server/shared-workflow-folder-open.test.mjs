@@ -37,6 +37,7 @@ test('confirmed joined lecture analyzes and composes its entire range while pres
   await f.run(0, 'transcription'); await f.run(0, 'discovery');
   const original = (await readProductAnalysis(f.roots[0])).analysis, [first, second] = original.intervals;
   for (const r of [first, second]) await f.run(0, 'analysis', { productId: r.productId, intervalId: r.id });
+  await f.open(1);
   const before = (await readProductAnalysis(f.roots[0])).analysis;
   await updateProductAnalysis(f.roots[0], data => applyProductEdit(data, { type: 'join-lecture', intervalIds: [first.id, second.id], newIntervalId: 'whole', productId: first.productId, allowGap: false }), probe);
   const scope = { productId: first.productId, intervalId: 'whole' };
@@ -50,12 +51,59 @@ test('confirmed joined lecture analyzes and composes its entire range while pres
   assert.equal(input.visibility, 'shared'); assert.equal(input.engineInput.candidates.length, 1);
   assert.equal(input.engineInput.candidates[0].endMs, second.endMs);
   const calls = f.counts();
-  await f.open(1);
+  await f.workflows[1].resumeSharedProject(f.roots[1], f.ids[1]);
   const colleague = (await readProductAnalysis(f.roots[1])).analysis;
   const joined = colleague.intervals.find(r => r.sharedOriginalId === 'whole');
   const reused = await createStructurePlanInputReader({ liveAnalysis: f.liveAnalyses[1] })(f.roots[1], { sourceId: f.ids[1], productId: joined.productId, intervalId: joined.id });
   assert.equal(reused.visibility, 'shared'); assert.equal(reused.engineInput.candidates.length, 1);
   assert.equal(reused.engineInput.candidates[0].endMs, second.endMs); assert.deepEqual(f.counts(), calls);
+});
+
+test('a colleague refreshes to the successful reanalysis while old result scopes and private references remain available', async t => {
+  const options = {}, f = await fixture(t, options);
+  await f.run(0, 'transcription'); await f.run(0, 'discovery');
+  const range = (await readProductAnalysis(f.roots[0])).analysis.intervals[0];
+  const scope = { productId: range.productId, intervalId: range.id };
+  await f.run(0, 'analysis', scope); await f.open(1);
+  const before = (await readProductAnalysis(f.roots[1])).analysis;
+  const oldRange = before.intervals.find(r => r.sharedOriginalId === range.id);
+  const reader = createStructurePlanInputReader({ liveAnalysis: f.liveAnalyses[1] });
+  const oldInput = await reader(f.roots[1], { sourceId: f.ids[1], productId: oldRange.productId, intervalId: oldRange.id });
+  await writeFile(join(f.roots[1], '.film/personal-draft.json'), JSON.stringify({ candidateIds: before.candidates.map(c => c.id), scope: oldRange.id }));
+  options.analysisTag = '痛点';
+  await f.run(0, 'analysis', { ...scope, rerun: true });
+  const counts = f.counts();
+  const report = await f.workflows[1].resumeSharedProject(f.roots[1], f.ids[1]);
+  assert.equal(report.status, 'ready');
+  const after = (await readProductAnalysis(f.roots[1])).analysis;
+  const current = after.intervals.find(r => r.sharedOriginalId === range.id);
+  const newInput = await reader(f.roots[1], { sourceId: f.ids[1], productId: current.productId, intervalId: current.id });
+  assert.equal(newInput.visibility, 'shared');
+  assert.notEqual(newInput.analysisVersion, oldInput.analysisVersion);
+  assert.ok(newInput.engineInput.candidates.every(c => c.tags.includes('痛点')));
+  const historical = await reader(f.roots[1], { sourceId: f.ids[1], productId: oldRange.productId, intervalId: oldRange.id });
+  assert.equal(historical.analysisVersion, oldInput.analysisVersion);
+  assert.ok(before.candidates.every(c => after.candidates.some(saved => saved.id === c.id)));
+  assert.equal(await readFile(join(f.roots[1], '.film/personal-draft.json'), 'utf8'), JSON.stringify({ candidateIds: before.candidates.map(c => c.id), scope: oldRange.id }));
+  await f.workflows[1].resumeSharedProject(f.roots[1], f.ids[1]);
+  assert.deepEqual((await readProductAnalysis(f.roots[1])).analysis.candidates, after.candidates, 'another refresh does not duplicate either version');
+  assert.deepEqual(f.counts(), counts);
+});
+
+test('a newly opened colleague project uses the saved latest analysis with its older version in history', async t => {
+  const options = {}, f = await fixture(t, options);
+  await f.run(0, 'transcription'); await f.run(0, 'discovery');
+  const range = (await readProductAnalysis(f.roots[0])).analysis.intervals[0], scope = { productId: range.productId, intervalId: range.id };
+  await f.run(0, 'analysis', scope);
+  options.analysisTag = '痛点'; await f.run(0, 'analysis', { ...scope, rerun: true });
+  const counts = f.counts(), report = await f.open(1);
+  assert.equal(report.status, 'ready');
+  const analysis = (await readProductAnalysis(f.roots[1])).analysis, current = analysis.intervals.find(r => r.sharedOriginalId === range.id);
+  const input = await createStructurePlanInputReader({ liveAnalysis: f.liveAnalyses[1] })(f.roots[1], { sourceId: f.ids[1], productId: current.productId, intervalId: current.id });
+  assert.equal(input.visibility, 'shared');
+  assert.ok(input.engineInput.candidates.every(c => c.tags.includes('痛点')));
+  assert.ok(analysis.candidates.some(c => c.tags.includes('卖点')));
+  assert.deepEqual(f.counts(), counts);
 });
 
 test('an older publisher with duplicate imports repairs links in place and accepts a colleague layout correction', async t => {
@@ -105,11 +153,12 @@ async function fixture(t, options = {}) {
     calls.push({ op, body: structuredClone(body) });
     if (body.expectedCoordinatorId && body.expectedCoordinatorId !== company) throw Error('Company identity changed');
     if (op === 'catalog') return { coordinationId: company, results: [...tasks.values()].filter(row => row.status === 'complete' && row.catalog?.sourceIdentity === body.sourceIdentity).map(row => structuredClone(row)) };
+    if (op === 'versions') return { coordinationId: company, versions: [...tasks.values()].filter(row => row.status === 'complete' && (row.familyKey ?? row.taskKey) === body.taskKey).map(row => structuredClone(row)) };
     let task = tasks.get(body.taskKey);
     if (op === 'status') return { coordinationId: company, task: structuredClone(task ?? null) };
     if (op === 'claim') {
       if (task) return { coordinationId: company, acquired: false, task: structuredClone(task) };
-      task = { taskKey: body.taskKey, inputHash: body.inputHash, attemptId: `attempt-${++serial}`, status: 'claimed', ...(body.catalog ? { catalog: body.catalog } : {}) };
+      task = { taskKey: body.taskKey, familyKey: body.familyKey ?? body.taskKey, sequence: serial + 1, inputHash: body.inputHash, attemptId: `attempt-${++serial}`, status: 'claimed', ...(body.catalog ? { catalog: body.catalog } : {}) };
       tasks.set(body.taskKey, task);
       return { coordinationId: company, acquired: true, task: structuredClone(task) };
     }
@@ -124,7 +173,7 @@ async function fixture(t, options = {}) {
   const modelClient = async ({ input }) => {
     text++;
     const value = JSON.parse(input);
-    return value.intervalId ? { candidates: [{ firstCue: 0, lastCue: value.cues.length - 1, tags: ['卖点'], details }], issues: [] }
+    return value.intervalId ? { candidates: [{ firstCue: 0, lastCue: value.cues.length - 1, tags: [options.analysisTag ?? '卖点'], details }], issues: [] }
       : { products: [{ key: 'A', name: 'Product A', aliases: [], variant: '', evidence: [0] }, { key: 'B', name: 'Product B', aliases: [], variant: '', evidence: [2] }], ranges: [{ key: 'A', firstCue: 0, lastCue: 1, kind: 'lecture', reason: 'first', evidence: [0] }, { key: 'B', firstCue: 2, lastCue: 3, kind: 'lecture', reason: 'second', evidence: [2] }, { key: 'A', firstCue: 4, lastCue: 5, kind: 'lecture', reason: 'return', evidence: [4] }], issues: [] };
   };
   const transcribe = async (root, source) => {

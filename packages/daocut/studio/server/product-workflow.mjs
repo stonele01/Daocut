@@ -31,6 +31,7 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
   const existingPublication = createExistingAnalysisPublication({ liveAnalysis, discovery, sharedAnalysis, importNormal: importDiscoveredShared });
   const productLayout = createSharedProductLayout({ shared: sharedAnalysis, probeSource });
   existingPublication.restoreLayout = (root, sourceId) => productLayout.sync(root, sourceId);
+  existingPublication.preferredResults = (root, sourceId) => productLayout.preferredResults(root, sourceId);
   async function syncProductLayout(root, publish = false) {
     const before = (await readProductAnalysis(root)).analysis;
     for (const source of before.sources) await productLayout.sync(root, source.id, { publish });
@@ -113,7 +114,7 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
     // A manually selected range still produces an original AI result. Share
     // that first result by source/time and original transcript, without sharing
     // private product edits or replacing a different range's existing result.
-    const localOnly = rerun ? '明确重新分析仅生成本机新版本，共享首版不变' : transcript?.localReconciled ? '人工确认或修改的转写仅用于本机分析，不上传共享底稿' : action === 'discovery' && manual.length ? '人工商品修改只保存在本机，新拆品不会覆盖共享首版' : undefined;
+    const localOnly = transcript?.localReconciled ? '人工确认或修改的转写仅用于本机分析，不上传共享底稿' : rerun && action !== 'analysis' ? '明确重新拆品仅生成本机新版本，共享首版不变' : action === 'discovery' && manual.length ? '人工商品修改只保存在本机，新拆品不会覆盖共享首版' : undefined;
     const selectedTranscript = action === 'analysis' ? productTranscriptRange(transcript, scope, source.durationMs) : null;
     const data = action === 'transcription' ? null : selectedTranscript ? { cues: selectedTranscript.segments, cueIndices: selectedTranscript.cueIndices } : transcript?.cues;
     // Reuse/recovery publishes the original paid judgment under its original
@@ -123,7 +124,15 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
         : action === 'discovery' ? await discovery.existingSharedContract?.(root, source.id) : null
       : null;
     const contract = existingContract ?? (action === 'transcription' ? { service: serviceIdentity(cleanService((await analysisServices()).transcription)), audioPolicy, audio: 'mp3-16k-mono-32k' } : action === 'analysis' ? await liveAnalysis.sharedContract() : await discovery.sharedContract());
-    return sharedAnalysis.prepare(root, source, { action, scope, data, contract, localOnly, newVersion });
+    if (rerun && action === 'analysis' && !newVersion && !localOnly) {
+      const previous = await sharedAnalysis.prepare(root, source, { action, scope, data, contract });
+      if (previous?.mode === 'reuse') {
+        await sharedAnalysis.read(root, previous);
+        return { ...await sharedAnalysis.prepare(root, source, { action, scope, data, contract, newVersion: true }), activateOnComplete: true };
+      }
+    }
+    const descriptor = await sharedAnalysis.prepare(root, source, { action, scope, data, contract, localOnly, newVersion });
+    return rerun && action === 'analysis' && descriptor?.newVersion ? { ...descriptor, activateOnComplete: true } : descriptor;
   }
   async function applyFirstDiscovery(root, sourceId, before) {
     const result = await discovery.view(root, sourceId);
@@ -177,11 +186,11 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
       const imported = await liveAnalysis.importHistorical(root, source.id, { version: 1, kind: 'historical-ai-structure', scope: snapshot.scope, candidates }, result, {
         productId: body.productId, productName: body.productId ? undefined : body.productName || '已有话术（商品待核对）',
         expectedAnalysis: body.expectedAnalysis, expectedSourceFingerprint: selection.localSourceFingerprint,
-        sourceSha: selection.descriptor.source.sha256, sharedWorkflow: payload,
+        sourceSha: selection.descriptor.source.sha256, sharedWorkflow: payload, preserveVersion: body.preserveVersion === true,
       });
       return { ...imported, ...(!imported.reusedOriginal ? { needsReview: true, reason: '已有话术已完整读取；原记录缺少商品关联，保留为独立分析范围，可核对商品后使用。已有结构方案仍复用原共享底稿。' } : {}) };
     };
-    if (!reference) return restoreIndependent();
+    if (!reference || body.preservePrevious) return restoreIndependent();
     const { analysis } = await readProductAnalysis(root), split = await discovery.view(root, source.id);
     if (analysis.sharedLayouts?.[source.id]) return restoreIndependent();
     if (split.runId !== `shared-${reference.discoverySha}` || !(analysis.discoveryApplied ?? []).some(item => item.sourceId === source.id && item.runId === split.runId)) return restoreIndependent();
@@ -222,13 +231,25 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
     payload.count = current.action === 'transcription' ? payload.cues.length : current.action === 'analysis' ? payload.candidates.length : (await discovery.view(root, source.id)).proposal?.intervals.length ?? 0;
     if (recover) await sharedAnalysis.recover(root, descriptor, payload, current.service);
     else await sharedAnalysis.complete(root, descriptor, attemptId, payload, current.service);
+    await activatePublishedAnalysis(root, source, descriptor);
     if (current.action !== 'transcription') await productLayout.sync(root, source.id, { publish: true }).catch(() => {}); // Durable pending state is shown separately; the paid result is already complete.
+  }
+  async function activatePublishedAnalysis(root, source, descriptor) {
+    if (descriptor.action === 'analysis' && descriptor.activateOnComplete && descriptor.newVersion) {
+      const selection = await sharedAnalysis.adoption(root, source.id, descriptor.familyKey, descriptor.taskKey, descriptor.baseResultSha256);
+      await importDiscoveredShared(root, { source, descriptor: selection.descriptor, snapshot: selection.currentSnapshot, result: selection.currentResult },
+        { productId: descriptor.localScope.productId, preservePrevious: true, preserveVersion: true });
+      const runId = selection.snapshot.payload.originalRunId;
+      await sharedAnalysis.pendingAdoption(root, selection, runId);
+      await liveAnalysis.activateSharedDraft(root, source.id, descriptor.localScope, descriptor.taskKey, selection.result, selection.currentSnapshot);
+      await sharedAnalysis.commitAdoption(root, selection);
+    }
   }
   async function plan(root, request) {
     const { action, sourceId } = request;
     if (!actions.includes(action)) throw new HttpError(400, '请选择转写、商品拆分或单段结构分析');
     const { source, analysis } = await sourceFor(root, sourceId);
-    const newVersion = request.newVersion === true || request.newVersion === 'true';
+    let newVersion = request.newVersion === true || request.newVersion === 'true';
     const rerun = request.rerun === true || request.rerun === 'true';
     const retry = !rerun && (request.retry === true || request.retry === 'true');
     const publicServices = await analysisServices();
@@ -279,6 +300,7 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
       if (!inputIdentity) error ??= '当前商品段转写或模型配置不可用';
     }
     const sharedDescriptor = await sharedFor(root, source, analysis, action, scope, rerun, newVersion);
+    if (sharedDescriptor?.newVersion) newVersion = true;
     if (newVersion && sharedDescriptor?.mode === 'retry-required' && await sharedAnalysis.recoverable(root, sharedDescriptor)) {
       try {
         if (action === 'analysis') await liveAnalysis.exportShared(root, sourceId, scope.intervalId, sharedDescriptor.taskKey);
@@ -450,14 +472,19 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
         return status(root, source.id);
       }
     }
+    const descriptor = pending?.taskKey === body.taskKey && pending.newVersion
+      ? await sharedFor(root, source, analysis, pending.action, pending.scope, false, true) : null;
     await sharedAnalysis.publish(root, body.sourceId, body.taskKey);
+    if (descriptor) await activatePublishedAnalysis(root, source, descriptor);
+    await productLayout.sync(root, source.id, { publish: true }).catch(() => {});
     return status(root, body.sourceId);
   }
   async function sharedVersions(root, sourceId) {
     const { source, analysis } = await sourceFor(root, sourceId);
     if (!sharedAnalysis) return { groups: [] };
     const applied = [...(analysis.discoveryApplied ?? [])];
-    for (const pending of await sharedAnalysis.pendingAdoptions(root, sourceId)) {
+    const pendingAdoptions = await sharedAnalysis.pendingAdoptions(root, sourceId);
+    for (const pending of pendingAdoptions) {
       try {
         if (pending.descriptor.action === 'analysis') {
           const scope = pending.descriptor.localScope, live = await liveAnalysis.view(root, sourceId, scope.intervalId, scope.productId, scope);
@@ -469,6 +496,7 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
       } catch { /* A pending adoption stays pinned until its effective results can be verified. */ }
     }
     await sharedAnalysis.reconcileAdoptions(root, sourceId, applied, source);
+    if (pendingAdoptions.some(pending => applied.some(item => item.sourceId === sourceId && item.runId === pending.runId))) await productLayout.sync(root, sourceId, { publish: true }).catch(() => {});
     return sharedAnalysis.versions(root, sourceId);
   }
   async function adoptShared(root, body) {

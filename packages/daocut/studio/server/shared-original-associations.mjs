@@ -10,10 +10,12 @@ export async function readOriginalAnalysisReceipts(root, sourceId) {
   const directory = join(root, '.film/shared-analysis'), records = [];
   for (const name of await readdir(directory).catch(e => { if (e.code === 'ENOENT') return []; throw e; })) {
     if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
-    const r = JSON.parse(await readFile(join(directory, name), 'utf8'));
-    if (r.sourceId === sourceId && r.status === 'complete' && r.snapshot?.action === 'analysis'
-      && sharedHash(r.snapshot) === r.result?.sha256 && r.snapshot.taskKey === r.descriptor?.taskKey
-      && r.snapshot.sourceIdentity === r.descriptor?.sourceIdentity) records.push(r);
+    const saved = JSON.parse(await readFile(join(directory, name), 'utf8'));
+    for (const r of [saved, ...(saved.previousVersions ?? []).map(version => ({ ...version, sourceId: saved.sourceId, status: 'complete' }))]) {
+      if (r.sourceId === sourceId && r.status === 'complete' && r.snapshot?.action === 'analysis'
+        && sharedHash(r.snapshot) === r.result?.sha256 && r.snapshot.taskKey === r.descriptor?.taskKey
+        && r.snapshot.sourceIdentity === r.descriptor?.sourceIdentity && !records.some(item => item.result.sha256 === r.result.sha256)) records.push(r);
+    }
   }
   return records;
 }

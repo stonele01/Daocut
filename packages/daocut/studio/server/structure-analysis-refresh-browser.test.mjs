@@ -13,7 +13,7 @@ const require = createRequire(import.meta.url), repo = resolve(import.meta.dirna
 test('saved analysis clears the old structure error by reading state without generating plans', { timeout: 60000 }, async () => {
   const base = join(repo, '.tmp/structure-analysis-refresh'); await mkdir(base, { recursive: true });
   const scratch = await mkdtemp(join(base, 'case-')), apiFile = join(scratch, 'api.ts'), view = join(scratch, 'view.tsx'), empty = join(scratch, 'empty.tsx');
-  await writeFile(apiFile, `const f=window.fixture={ready:false,reads:0,writes:0};export const api={
+  await writeFile(apiFile, `export class ApiError extends Error{};const f=window.fixture={ready:false,reads:0,writes:0};export const api={
     structureWorkspace:async()=>({ownerId:'p',activeProjectId:'p',drafts:[]}),film:async()=>({folder:'',project:{name:'fixture'}}),
     structurePlans:async()=>{f.reads++;return {status:f.ready?'idle':'unavailable',version:'ai-structure-plans-v6',plans:[],issues:f.ready?[]:[{message:'上次分析失败'}],confirmation:f.ready?{id:'c',enabled:true,openingCount:1,requestCount:1}:undefined}},
     generateStructurePlans:async()=>{f.writes++;throw Error('Must never generate automatically')}
