@@ -9,9 +9,89 @@ import { createProductWorkflow } from './product-workflow.mjs';
 import { readProductAnalysis, recordProductEdit, updateProductAnalysis } from './product-analysis.mjs';
 import { readProductTranscript, transcriptionLocation } from './product-transcription.mjs';
 import { createStructurePlanInputReader } from './structure-plans.mjs';
+import { applyProductEdit } from '../ui/src/lib/product-manual.ts';
+import { visibleProducts, isRecoveredProduct } from '../ui/src/lib/product-analysis.ts';
 
 const probe = async () => ({ duration: 20 });
 const details = { subtypes: [], reason: 'synthetic evidence', evidence: ['ASR'], context: '', repetition: '', review: [] };
+
+test('original publisher resumes its own paid results without generating recovery products or duplicate candidates', async t => {
+  const f = await fixture(t);
+  await f.run(0, 'transcription'); await f.run(0, 'discovery');
+  const original = (await readProductAnalysis(f.roots[0])).analysis;
+  for (const r of original.intervals) await f.run(0, 'analysis', { productId: r.productId, intervalId: r.id });
+  const before = (await readProductAnalysis(f.roots[0])).analysis, calls = f.counts();
+  await f.workflows[0].syncProductLayout(f.roots[0], true);
+  for (let i = 0; i < 2; i++) {
+    await f.workflows[0].resumeSharedProject(f.roots[0], f.ids[0]);
+    const after = (await readProductAnalysis(f.roots[0])).analysis;
+    assert.deepEqual(after.candidates, before.candidates);
+    assert.deepEqual(after.intervals, before.intervals);
+    assert.equal(visibleProducts(after).filter(isRecoveredProduct).length, 0);
+  }
+  assert.deepEqual(f.counts(), calls);
+});
+
+test('confirmed joined lecture analyzes and composes its entire range while preserving both previous parts', async t => {
+  const f = await fixture(t);
+  await f.run(0, 'transcription'); await f.run(0, 'discovery');
+  const original = (await readProductAnalysis(f.roots[0])).analysis, [first, second] = original.intervals;
+  for (const r of [first, second]) await f.run(0, 'analysis', { productId: r.productId, intervalId: r.id });
+  const before = (await readProductAnalysis(f.roots[0])).analysis;
+  await updateProductAnalysis(f.roots[0], data => applyProductEdit(data, { type: 'join-lecture', intervalIds: [first.id, second.id], newIntervalId: 'whole', productId: first.productId, allowGap: false }), probe);
+  const scope = { productId: first.productId, intervalId: 'whole' };
+  const plan = await f.run(0, 'analysis', scope);
+  assert.equal(plan.scope.startMs, first.startMs); assert.equal(plan.scope.endMs, second.endMs);
+  const after = (await readProductAnalysis(f.roots[0])).analysis;
+  assert.deepEqual(after.candidates.filter(c => c.intervalId !== 'whole'), before.candidates);
+  const full = after.candidates.filter(c => c.intervalId === 'whole');
+  assert.equal(full.length, 1); assert.equal(full[0].endMs, second.endMs);
+  const input = await createStructurePlanInputReader({ liveAnalysis: f.liveAnalyses[0] })(f.roots[0], { sourceId: f.ids[0], ...scope });
+  assert.equal(input.visibility, 'shared'); assert.equal(input.engineInput.candidates.length, 1);
+  assert.equal(input.engineInput.candidates[0].endMs, second.endMs);
+  const calls = f.counts();
+  await f.open(1);
+  const colleague = (await readProductAnalysis(f.roots[1])).analysis;
+  const joined = colleague.intervals.find(r => r.sharedOriginalId === 'whole');
+  const reused = await createStructurePlanInputReader({ liveAnalysis: f.liveAnalyses[1] })(f.roots[1], { sourceId: f.ids[1], productId: joined.productId, intervalId: joined.id });
+  assert.equal(reused.visibility, 'shared'); assert.equal(reused.engineInput.candidates.length, 1);
+  assert.equal(reused.engineInput.candidates[0].endMs, second.endMs); assert.deepEqual(f.counts(), calls);
+});
+
+test('an older publisher with duplicate imports repairs links in place and accepts a colleague layout correction', async t => {
+  const f = await fixture(t);
+  await f.run(0, 'transcription'); await f.run(0, 'discovery');
+  const original = (await readProductAnalysis(f.roots[0])).analysis;
+  for (const r of original.intervals) await f.run(0, 'analysis', { productId: r.productId, intervalId: r.id });
+  await f.workflows[0].syncProductLayout(f.roots[0], true);
+  const before = (await readProductAnalysis(f.roots[0])).analysis, first = before.intervals[0];
+  const row = [...f.tasks.values()].find(row => row.catalog?.action === 'analysis' && row.catalog.scope.startMs === first.startMs);
+  const duplicate = { ...first, id: 'old-import', productId: 'old-recovery', kind: 'historical-analysis', confirmed: true, origin: 'shared-historical' };
+  const copy = { ...before.candidates.find(c => c.intervalId === first.id), id: 'old-copy', intervalId: duplicate.id, productId: duplicate.productId };
+  await updateProductAnalysis(f.roots[0], a => {
+    a.products.push({ id: duplicate.productId, name: '已有话术（商品待核对） 0–4秒', sourceIds: [f.ids[0]] });
+    (a.scopes ??= []).push(duplicate); a.candidates.push(copy); return a;
+  }, probe);
+  const file = join(f.roots[0], '.film/live-analysis', `${sharedHash(f.ids[0])}.json`);
+  const journal = JSON.parse(await readFile(file, 'utf8'));
+  journal.analyses[duplicate.id] = { ...journal.analyses[first.id], intervalId: duplicate.id, productId: duplicate.productId, sharedRef: row.result, historicalRef: row.result };
+  await writeFile(file, JSON.stringify(journal));
+  const protectedCandidates = (await readProductAnalysis(f.roots[0])).analysis.candidates, counts = f.counts();
+  await f.workflows[0].syncProductLayout(f.roots[0]);
+  const fixed = (await readProductAnalysis(f.roots[0])).analysis;
+  assert.equal(fixed.scopes.find(r => r.id === duplicate.id).originalScopeId, first.id);
+  assert.deepEqual(fixed.candidates, protectedCandidates); assert.deepEqual(fixed.intervals, before.intervals);
+  assert.equal(visibleProducts(fixed).filter(isRecoveredProduct).length, 0);
+  await f.workflows[0].syncProductLayout(f.roots[0]);
+  assert.deepEqual((await readProductAnalysis(f.roots[0])).analysis, fixed);
+  await f.open(1);
+  await updateProductAnalysis(f.roots[1], a => { a.products.find(p => !p.sharedLayoutHidden).name = 'Colleague correction'; return a; }, probe);
+  await f.workflows[1].syncProductLayout(f.roots[1], true);
+  await f.workflows[0].syncProductLayout(f.roots[0]);
+  const returned = (await readProductAnalysis(f.roots[0])).analysis;
+  assert.ok(visibleProducts(returned).some(p => p.name === 'Colleague correction'));
+  assert.deepEqual(returned.candidates, protectedCandidates); assert.deepEqual(f.counts(), counts);
+});
 
 async function fixture(t, options = {}) {
   const base = resolve(import.meta.dirname, '../../../../.tmp/shared-folder-workflow-20261106');

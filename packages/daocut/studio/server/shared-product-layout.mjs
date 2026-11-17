@@ -6,12 +6,13 @@ import { sharedHash } from './shared-analysis.mjs';
 import { readProductAnalysis, updateProductAnalysis, validateProductAnalysis } from './product-analysis.mjs';
 import { writeAtomic } from './atomic.mjs';
 import { HttpError } from './http.mjs';
+import { associateOriginalAnalyses, readOriginalAnalysisReceipts } from './shared-original-associations.mjs';
 
 const read = async path => { try { return JSON.parse(await readFile(path, 'utf8')); } catch (e) { if (e.code === 'ENOENT') return null; throw e; } };
 const ranges = a => [...a.intervals, ...(a.scopes ?? [])];
 const failure = message => new HttpError(409, `商品关联同步：${message}；已有结果保留，没有重新分析`);
 const identity = (root, sourceId) => sharedHash([resolve(root), sourceId]);
-const clean = item => Object.fromEntries(Object.entries(item).filter(([key]) => !['sharedLayoutHidden', 'sharedOriginalId', 'savedResultScopeId'].includes(key)));
+const clean = item => Object.fromEntries(Object.entries(item).filter(([key]) => !['sharedLayoutHidden', 'sharedOriginalId', 'savedResultScopeId', 'originalScopeId'].includes(key)));
 
 export async function exportProductLayout(root, sourceId, analysis) {
   const source = analysis.sources.find(s => s.id === sourceId);
@@ -22,12 +23,13 @@ export async function exportProductLayout(root, sourceId, analysis) {
     const r = await read(join(root, '.film/shared-analysis', name));
     if (r?.sourceId === sourceId && r.status === 'complete' && r.snapshot?.action === 'analysis' && sharedHash(r.snapshot) === r.result?.sha256) records.push(r);
   }
-  const selected = ranges(analysis).filter(r => r.sourceId === sourceId && !r.sharedLayoutHidden);
+  const selected = ranges(analysis).filter(r => r.sourceId === sourceId && !r.sharedLayoutHidden && !r.originalScopeId);
   const ids = new Map([...analysis.products, ...selected].map(r => [r.id, r.sharedOriginalId ?? r.id]));
-  const products = analysis.products.filter(p => p.sourceIds.includes(sourceId) && !p.sharedLayoutHidden).map(p => ({ ...clean(p), id: ids.get(p.id), sourceIds: ['public-source'], ...(p.joinedInto ? { joinedInto: ids.get(p.joinedInto) } : {}) }));
+  const aliasesOnly = new Set(analysis.products.filter(p => ranges(analysis).some(r => r.productId === p.id && r.originalScopeId) && !selected.some(r => r.productId === p.id)).map(p => p.id));
+  const products = analysis.products.filter(p => p.sourceIds.includes(sourceId) && !p.sharedLayoutHidden && !aliasesOnly.has(p.id)).map(p => ({ ...clean(p), id: ids.get(p.id), sourceIds: ['public-source'], ...(p.joinedInto ? { joinedInto: ids.get(p.joinedInto) } : {}) }));
   const links = {};
   for (const range of selected) {
-    const actual = range.savedResultScopeId ? ranges(analysis).find(r => r.id === range.savedResultScopeId) : range;
+    const actual = range.savedResultScopeId && !live?.analyses?.[range.id] ? ranges(analysis).find(r => r.id === range.savedResultScopeId) : range;
     const saved = live?.analyses?.[actual?.id];
     const refs = records.filter(r => r.result.sha256 === (saved?.sharedRef?.sha256 ?? saved?.historicalRef?.sha256)
       || r.descriptor?.localScope?.intervalId === actual?.id
@@ -51,7 +53,8 @@ export function applyProductLayout(analysis, sourceId, document, live) {
   const all = ranges(next);
   const target = new Map();
   for (const [id, sha] of Object.entries(document.links)) {
-    const matches = all.filter(r => r.sourceId === sourceId && [live?.analyses?.[r.id]?.sharedRef?.sha256, live?.analyses?.[r.id]?.historicalRef?.sha256].includes(sha));
+    const matched = all.filter(r => r.sourceId === sourceId && [live?.analyses?.[r.id]?.sharedRef?.sha256, live?.analyses?.[r.id]?.historicalRef?.sha256].includes(sha));
+    const matches = matched.filter(r => !r.originalScopeId || !matched.some(o => o.id === r.originalScopeId));
     const original = ranges(document.layout).find(r => r.id === id);
     if (matches.length !== 1 || !original || matches[0].startMs !== original.startMs || matches[0].endMs !== original.endMs) throw failure(`原分析 ${id} 尚未完整读取`);
     target.set(id, matches[0].id);
@@ -84,6 +87,7 @@ export function applyProductLayout(analysis, sourceId, document, live) {
   next.scopes.push(...(incoming.scopes ?? []).map(convert));
   // Bind joined entries to the existing composition, identified by ordered result hashes.
   for (const r of ranges(next).filter(r => !r.sharedLayoutHidden && r.sharedOriginalId && r.joinedScopeIds?.length)) {
+    if (r.savedResultScopeId) continue;
     const parts = r.joinedScopeIds.map(id => ranges(next).find(p => p.id === id)?.savedResultScopeId);
     const matches = all.filter(p => p.sourceId === sourceId && p.joinedScopeIds?.length === 2 && p.joinedScopeIds.every((id, i) => id === parts[i]));
     if (matches.length === 1) r.savedResultScopeId = matches[0].id;
@@ -97,7 +101,17 @@ export function applyProductLayout(analysis, sourceId, document, live) {
 export function createSharedProductLayout({ shared, probeSource } = {}) {
   const active = new Map();
   async function operation(root, sourceId, { publish = false } = {}) {
-    const { analysis } = await readProductAnalysis(root), source = analysis.sources.find(s => s.id === sourceId);
+    let { analysis } = await readProductAnalysis(root);
+    const source = analysis.sources.find(s => s.id === sourceId);
+    const journal = await read(join(root, '.film/live-analysis', `${sharedHash(sourceId)}.json`));
+    const associated = associateOriginalAnalyses(analysis, sourceId, journal, await readOriginalAnalysisReceipts(root, sourceId));
+    if (sharedHash(associated) !== sharedHash(analysis)) {
+      const saved = await updateProductAnalysis(root, current => {
+        if (sharedHash(current) !== sharedHash(analysis)) throw failure('读取期间工程已修改');
+        return associated;
+      }, probeSource, { preserveHistory: true });
+      analysis = saved.analysis;
+    }
     if (!source || !shared?.layoutLocation) return { analysis };
     const location = await shared.layoutLocation(root, source);
     if (!location) return { analysis };

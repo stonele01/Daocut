@@ -87,7 +87,7 @@ import { ProductPanel } from './ProductPanel';
 import { structureColor } from '@/lib/structure-colors';
 import { displayStructureTags } from '@/lib/product-structure-tags';
 import { SharedMediaAddPanel } from './SharedMediaAddPanel';
-import { readProductAnalysis, writeProductAnalysis, ProductAnalysisConflict, productId, sourceTime, visibleProducts, savedStructureRange, productResultRanges, productResultCandidates, type ProductAnalysis, type ProductAnalysisState } from '@/lib/product-analysis';
+import { readProductAnalysis, writeProductAnalysis, ProductAnalysisConflict, productId, sourceTime, visibleProducts, savedStructureRange, productAnalysisRange, productResultRanges, productResultCandidates, type ProductAnalysis, type ProductAnalysisState } from '@/lib/product-analysis';
 import { applyProductEdit } from '@/lib/product-manual';
 import { ResourceInspector } from './ResourceInspector';
 import { FilmInspector } from './FilmInspector';
@@ -1493,8 +1493,7 @@ export function ProjectView({ projectId, onProject, onLeave, structure }: {
     const data = productData?.analysis;
     const product = data?.products.find(item => item.id === selectedProductId);
     const available = (sourceId: string) => listing?.files.some(file => file.path === data?.sources.find(source => source.id === sourceId)?.assetPath && !file.link?.missing && (!file.link?.source || file.link.source.status === 'available'));
-    const linked = new Set([...(data?.intervals ?? []), ...(data?.scopes ?? [])].filter(range => range.productId === selectedProductId).flatMap(range => range.joinedScopeIds ?? []));
-    const ranges = [...(data?.intervals ?? []), ...(data?.scopes ?? [])].filter(range => range.productId === selectedProductId || linked.has(range.id)).sort((a, b) => a.sourceId.localeCompare(b.sourceId) || a.startMs - b.startMs);
+    const ranges = [...(data ? productResultRanges(data, selectedProductId ?? '') : [])].sort((a, b) => a.sourceId.localeCompare(b.sourceId) || a.startMs - b.startMs);
     if (productRangeSelection && product?.sourceIds.includes(productRangeSelection.sourceId)
       && (!productRangeSelection.intervalId || ranges.some(range => range.id === productRangeSelection.intervalId && range.sourceId === productRangeSelection.sourceId))) return productRangeSelection;
     const first = ranges.find(range => range.productId === selectedProductId && range.joinedScopeIds?.length && available(range.sourceId)) ?? ranges.find(range => data?.intervals.some(interval => interval.id === range.id) && available(range.sourceId)) ?? ranges.find(range => available(range.sourceId));
@@ -1503,8 +1502,8 @@ export function ProjectView({ projectId, onProject, onLeave, structure }: {
   const chatProductRange = React.useMemo<StudioProductRange | null>(() => {
     if (assetsMode !== 'products') return null;
     const data = productData?.analysis;
-    const linked = new Set([...(data?.intervals ?? []), ...(data?.scopes ?? [])].filter(item => item.productId === selectedProductId).flatMap(item => item.joinedScopeIds ?? []));
-    const range = [...(data?.intervals ?? []), ...(data?.scopes ?? [])].find(item => item.id === selectedProductRange.intervalId && item.sourceId === selectedProductRange.sourceId && (item.productId === selectedProductId || linked.has(item.id)));
+    const viewing = data && productResultRanges(data, selectedProductId ?? '').find(item => item.id === selectedProductRange.intervalId && item.sourceId === selectedProductRange.sourceId);
+    const range = data && productAnalysisRange(data, selectedProductId ?? '', viewing);
     const product = data?.products.find(item => item.id === range?.productId);
     const saved = range && data ? savedStructureRange(data, range) : range;
     return saved && product ? { sourceId: saved.sourceId, productId: saved.productId, intervalId: saved.id, productName: product.name, startMs: saved.startMs, endMs: saved.endMs } : null;

@@ -1,6 +1,6 @@
 import React from 'react';
 import { api, type LiveAnalysisState, type ProductWorkflowStatus, type SharedProjectOpen } from '@/api';
-import { sourceTime, visibleProducts, savedStructureRange, productResultCandidates, isRecoveredProduct, type ProductAnalysis, type ProductInterval } from '@/lib/product-analysis';
+import { sourceTime, visibleProducts, savedStructureRange, productAnalysisRange, productResultRanges, productResultCandidates, isRecoveredProduct, type ProductAnalysis, type ProductInterval } from '@/lib/product-analysis';
 import { structureColor } from '@/lib/structure-colors';
 import { displayStructureTag, displayStructureTags, hasStructureTag, productStructureTags } from '@/lib/product-structure-tags';
 import type { WorkspaceResource } from '@/lib/workspace-resources';
@@ -40,15 +40,17 @@ function LiveAnalysis({ refreshKey, projectId, sources, ranges: productRanges, s
   const [tick, setTick] = React.useState(0);
   const refreshedRuns = React.useRef(new Set<string>());
   const refreshCompleted = async (next: LiveAnalysisState) => {
-    const runId = next.analysis.currentRunId;
-    if (next.analysis.status !== 'complete' || !runId || refreshedRuns.current.has(runId)) return;
-    refreshedRuns.current.add(runId);
+    const runs = Object.values(next.analyses ?? { selected: next.analysis }).filter(a => a.status === 'complete' && a.currentRunId && !refreshedRuns.current.has(a.currentRunId)).map(a => a.currentRunId!);
+    if (!runs.length) return;
+    runs.forEach(id => refreshedRuns.current.add(id));
     try { await onAnalysisComplete(); }
-    catch (error) { refreshedRuns.current.delete(runId); throw error; }
+    catch (error) { runs.forEach(id => refreshedRuns.current.delete(id)); throw error; }
   };
-  const scope = `${sourceId}:${selectedRange?.id ?? ''}:${selectedRange?.startMs ?? ''}:${selectedRange?.endMs ?? ''}`;
+  const scope = `${projectId}:${sourceId}:${selectedRange?.id ?? ''}:${selectedRange?.startMs ?? ''}:${selectedRange?.endMs ?? ''}`;
   const currentScope = React.useRef(scope);
   currentScope.current = scope;
+  const sourceKey = `${projectId}:${sourceId}`;
+  const currentSource = React.useRef(sourceKey); currentSource.current = sourceKey;
   React.useEffect(() => {
     setConfirm(null);
   }, [scope]);
@@ -58,7 +60,7 @@ function LiveAnalysis({ refreshKey, projectId, sources, ranges: productRanges, s
     let timer: ReturnType<typeof setTimeout> | undefined;
     const load = async () => {
       try {
-        const [next, prepared] = await Promise.all([api.liveAnalysis(projectId, sourceId, selectedRange && { productId: selectedRange.productId, intervalId: selectedRange.id }).then(next => { if (!cancelled) setState(next); return next; }), api.productWorkflowStatus(projectId, sourceId)]);
+        const [next, prepared] = await Promise.all([api.liveAnalysis(projectId, sourceId).then(next => { if (!cancelled) setState(next); return next; }), api.productWorkflowStatus(projectId, sourceId)]);
         if (cancelled) return;
         setState(next); setPreparation(prepared); setError('');
         await refreshCompleted(next);
@@ -68,35 +70,39 @@ function LiveAnalysis({ refreshKey, projectId, sources, ranges: productRanges, s
           try { await onAnalysisComplete(); } catch (error) { refreshedRuns.current.delete(splitKey); throw error; }
         }
         if (cancelled) return;
-        if (next.transcription.status === 'running' || next.analysis.status === 'running' || prepared.busy || prepared.discovery.status === 'running') timer = setTimeout(load, 1000);
+        if (next.transcription.status === 'running' || Object.values(next.analyses ?? { selected: next.analysis }).some(a => a.status === 'running') || prepared.busy || prepared.discovery.status === 'running') timer = setTimeout(load, 1000);
       } catch (e) { if (!cancelled) setError(e instanceof Error ? e.message : String(e)); }
     };
-    setState(null); setPreparation(null); void load();
+    void load();
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
-  }, [projectId, sourceId, selectedRange?.id, selectedRange?.productId, selectedRange?.startMs, selectedRange?.endMs, tick, refreshKey]);
+  }, [projectId, sourceId, tick, refreshKey]);
   const requestFinished = async () => {
     const submittedScope = scope;
     setStarting(true); setError('');
     try {
-      const next = await api.liveAnalysis(projectId, sourceId, selectedRange && { productId: selectedRange.productId, intervalId: selectedRange.id });
+      const next = await api.liveAnalysis(projectId, sourceId);
       await refreshCompleted(next);
-      if (currentScope.current !== submittedScope) return;
-      setState(next); setConfirm(null); onWorkflowStarted();
+      if (currentSource.current !== sourceKey) return;
+      setState(next);
+      if (currentScope.current === submittedScope) setConfirm(null);
+      onWorkflowStarted();
       setTick((n) => n + 1);
     } catch (e) { if (currentScope.current === submittedScope) { setError(e instanceof Error ? e.message : String(e)); setConfirm(null); } }
     finally { setStarting(false); }
   };
+  React.useEffect(() => { setState(null); setPreparation(null); }, [projectId, sourceId]);
+  const selectedAnalysis = state?.analyses?.[intervalId] ?? (state?.analysis.intervalId === intervalId ? state.analysis : undefined);
+  const runningAnalysis = Object.values(state?.analyses ?? { selected: state?.analysis }).find(a => a?.status === 'running');
   const status = (s: string) => ({ idle: '未开始', running: '进行中', complete: '已完成', failed: '失败' }[s] ?? s);
-  const selectedComplete = state?.analysis.status === 'complete' && state.analysis.intervalId === selectedRange?.id;
-  const analyzing = starting || (!!selectedRange && state?.analysis.intervalId === selectedRange.id && state.analysis.status === 'running');
+  const selectedComplete = selectedAnalysis?.status === 'complete' && selectedAnalysis?.intervalId === selectedRange?.id;
+  const analyzing = starting || !!runningAnalysis;
   const rangeLabel = selectedRange ? `${sourceTime(selectedRange.startMs)} – ${sourceTime(selectedRange.endMs)}` : '请先点选商品段';
   const historical = selectedRange?.kind === 'historical-analysis';
   const needsTranscript = !!state && state.transcription.status !== 'complete';
   const reviewTranscript = needsTranscript && !!(state?.transcription.boundaryReview || state?.transcription.code === 'ASR_BOUNDARY_REVIEW');
   const transcribing = state?.transcription.status === 'running';
-  const joined = !!selectedRange?.joinedScopeIds?.length;
-  const actionLabel = joined ? '选择原分析范围' : historical ? '历史结果' : selectedComplete ? '重新分析' : analyzing ? '分析中…' : state?.analysis.status === 'failed' ? '重试分析' : '分析';
-  const action = <button type="button" className="min-h-9 flex-1 rounded-md border border-[var(--accent)]/60 bg-[var(--accent)]/20 px-4 py-2 text-[12px] font-medium transition duration-150 hover:bg-[var(--accent)]/30 active:scale-[.98] disabled:opacity-50" aria-label={`${actionLabel} ${rangeLabel}`} title={joined ? '请选择下方原分析范围，以复用已有结果并避免重复提交' : needsTranscript ? '请先完成整条原视频的转写' : `${selectedComplete ? '重新分析此商品段' : '仅分析此商品段'}：${rangeLabel}`} disabled={joined || historical || !state || needsTranscript || analyzing || preparation?.busy || !!confirm || !selectedRange} onClick={() => setConfirm(selectedComplete ? 'rerun' : 'analyze')}>{actionLabel}</button>;
+  const actionLabel = historical ? '历史结果' : selectedAnalysis?.status === 'running' ? '分析中…' : selectedComplete ? '重新分析' : starting ? '提交中…' : selectedAnalysis?.status === 'failed' ? '重试分析' : '分析';
+  const action = <button type="button" className="min-h-9 flex-1 rounded-md border border-[var(--accent)]/60 bg-[var(--accent)]/20 px-4 py-2 text-[12px] font-medium transition duration-150 hover:bg-[var(--accent)]/30 active:scale-[.98] disabled:opacity-50" aria-label={`${actionLabel} ${rangeLabel}`} title={needsTranscript ? '请先完成整条原视频的转写' : `${selectedComplete ? '重新分析此商品段' : '仅分析此商品段'}：${rangeLabel}`} disabled={historical || !state || needsTranscript || analyzing || preparation?.busy || !!confirm || !selectedRange} onClick={() => setConfirm(selectedComplete ? 'rerun' : 'analyze')}>{actionLabel}</button>;
   const source = sources.find(item => item.id === sourceId);
   const preparing = transcribing || preparation?.preparation?.status === 'running' || preparation?.discovery.status === 'running';
   const reviewDiscovery = !needsTranscript && preparation?.needsReview;
@@ -113,23 +119,24 @@ function LiveAnalysis({ refreshKey, projectId, sources, ranges: productRanges, s
   </section>;
   const feedback = <>
     {sourceId && !state && !error && <p className="mt-2 text-[10.5px] text-[var(--text-muted)]">正在读取任务状态…</p>}
+    {runningAnalysis && <p role="status" className="mt-2 text-[11px] text-[var(--accent)]">分析中… · {runningAnalysis.rangeStartMs !== undefined && runningAnalysis.rangeEndMs !== undefined ? `${sourceTime(runningAnalysis.rangeStartMs)} – ${sourceTime(runningAnalysis.rangeEndMs)}` : '已提交范围'} · 切换查看范围不影响任务，请等待完成</p>}
     {historical && <p className="mt-2 text-[10.5px] text-[var(--text-muted)]">当前为保存的历史话术范围，可直接预览和选材；不代表当前商品切点。</p>}
     {error && <p role="alert" className="mt-2 text-red-400">{error} <button className={btn} onClick={() => setTick((n) => n + 1)}>重试读取</button></p>}
-    {state?.analysis.status === 'failed' && state.analysis.error && <p role="alert" className="mt-2 text-red-400">{state.analysis.error}</p>}
+    {selectedAnalysis?.status === 'failed' && selectedAnalysis?.error && <p role="alert" className="mt-2 text-red-400">{selectedAnalysis?.error}</p>}
     {confirm && state && <ProductWorkflowConfirmation key={`${scope}:${confirm}`} projectId={projectId}
-      request={{ sourceId, action: confirm === 'transcribe' ? needsTranscript ? 'transcription' : 'discovery' : 'analysis', ...(confirm === 'transcribe' && !needsTranscript ? { prepare: true } : {}), ...(confirm !== 'transcribe' && selectedRange ? { productId: selectedRange.productId, intervalId: selectedRange.id } : {}), rerun: confirm === 'rerun', retry: confirm === 'transcribe' ? needsTranscript ? state.transcription.status === 'failed' : preparation?.discovery.status === 'failed' : confirm !== 'rerun' && state.analysis.status === 'failed' }}
+      request={{ sourceId, action: confirm === 'transcribe' ? needsTranscript ? 'transcription' : 'discovery' : 'analysis', ...(confirm === 'transcribe' && !needsTranscript ? { prepare: true } : {}), ...(confirm !== 'transcribe' && selectedRange ? { productId: selectedRange.productId, intervalId: selectedRange.id } : {}), rerun: confirm === 'rerun', retry: confirm === 'transcribe' ? needsTranscript ? state.transcription.status === 'failed' : preparation?.discovery.status === 'failed' : confirm !== 'rerun' && selectedAnalysis?.status === 'failed' }}
       onDone={requestFinished} onClose={() => { setConfirm(null); setTick(n => n + 1); }} />}
   </>;
   const details = <details className="text-[11px] text-[var(--text-muted)]">
       <summary className="cursor-pointer transition-colors hover:text-[var(--accent)]">分析详情</summary>
     {sources.length > 0 ? <select aria-label="分析来源视频" value={sourceId} disabled={starting || !!confirm} onChange={(e) => onSelectSource(e.target.value)} className="mt-2 w-full rounded bg-[var(--dock-pane)] p-1">{sources.map((s) => <option key={s.id} value={s.id}>{s.assetPath}</option>)}</select> : <p className="mt-2">请先选择有关联视频的商品。</p>}
-    {sourceId && <label className="mt-2 block">文字分析范围<select aria-label="文字分析范围" value={selectedRange?.id ?? ''} disabled={starting || !!confirm || state?.analysis.status === 'running'} onChange={e => onSelectRange(e.target.value)} className="mt-1 w-full rounded bg-[var(--dock-pane)] p-1"><option value="">{ranges.length ? '请选择一个范围' : '当前商品暂无已确认范围'}</option>{ranges.map(r => <option key={r.id} value={r.id}>{sourceTime(r.startMs)} – {sourceTime(r.endMs)}</option>)}</select><span className="mt-1 block text-[11px] text-[var(--text-muted)]">每次仅分析所选范围。</span></label>}
+    {sourceId && <label className="mt-2 block">文字分析范围<select aria-label="文字分析范围" value={selectedRange?.id ?? ''} disabled={starting || !!confirm || selectedAnalysis?.status === 'running'} onChange={e => onSelectRange(e.target.value)} className="mt-1 w-full rounded bg-[var(--dock-pane)] p-1"><option value="">{ranges.length ? '请选择一个范围' : '当前商品暂无已确认范围'}</option>{ranges.map(r => <option key={r.id} value={r.id}>{sourceTime(r.startMs)} – {sourceTime(r.endMs)}</option>)}</select><span className="mt-1 block text-[11px] text-[var(--text-muted)]">每次仅分析所选范围。</span></label>}
     {state && <>
       <p className="mt-2">转写：{status(state.transcription.status)}{state.transcription.error ? ` · ${state.transcription.error}` : ''}</p>
       {state.transcription.status === 'complete' && <p className="mt-1 text-[var(--text-muted)]">已保存转写，将复用现有结果。</p>}
-      <p className="mt-2">文字分析：{status(state.analysis.status === 'complete' && !selectedComplete ? 'idle' : state.analysis.status)}{state.analysis.error ? ` · ${state.analysis.error}` : ''}</p>
-      {state.analysis.progress && <p className="mt-1 text-[10.5px] text-[var(--text-muted)]">已完成 {state.analysis.progress.completedWindows}/{state.analysis.progress.totalWindows} 段 · 复用 {state.analysis.progress.resumedWindows} 段 · 请求 {state.analysis.progress.requestAttempts} 次 · {Math.round(state.analysis.progress.elapsedMs / 1000)} 秒</p>}
-      {state.analysis.status === 'failed' && <p className="mt-1 text-[10.5px] text-[var(--warn)]">显式重试会复用已完成分段；失败或提交不确定的分段再次请求可能计费。</p>}
+      <p className="mt-2">文字分析：{status(selectedAnalysis?.status === 'complete' && !selectedComplete ? 'idle' : selectedAnalysis?.status ?? 'idle')}{selectedAnalysis?.error ? ` · ${selectedAnalysis?.error}` : ''}</p>
+      {selectedAnalysis?.progress && <p className="mt-1 text-[10.5px] text-[var(--text-muted)]">已完成 {selectedAnalysis?.progress.completedWindows}/{selectedAnalysis?.progress.totalWindows} 段 · 复用 {selectedAnalysis?.progress.resumedWindows} 段 · 请求 {selectedAnalysis?.progress.requestAttempts} 次 · {Math.round(selectedAnalysis?.progress.elapsedMs / 1000)} 秒</p>}
+      {selectedAnalysis?.status === 'failed' && <p className="mt-1 text-[10.5px] text-[var(--warn)]">显式重试会复用已完成分段；失败或提交不确定的分段再次请求可能计费。</p>}
       {state.transcription.segments.length > 0 && <details className="mt-2"><summary className="cursor-pointer">转写文本 · {state.transcription.segments.length} 条</summary><div className="mt-1 max-h-52 overflow-y-auto">{state.transcription.segments.map((s, i) => <button key={`${s.startMs}-${i}`} className="block w-full border-t border-[var(--border)] py-1 text-left" onClick={() => onLocate(sourceId, s.startMs)}><span className="text-[var(--text-muted)]">{sourceTime(s.startMs)} – {sourceTime(s.endMs)}</span><span className="block">{s.text}</span></button>)}</div></details>}
     </>}
   </details>;
@@ -207,8 +214,7 @@ function ProductPanelContent({ files, currentSourcePath, analysis, selectedProdu
   const [candidateScope, setCandidateScope] = React.useState<'range' | 'product'>('product');
   const [draggedCandidate, setDraggedCandidate] = React.useState<string>();
   const product = analysis.products.find((p) => p.id === selectedProductId);
-  const linkedScopes = new Set([...analysis.intervals, ...(analysis.scopes ?? [])].filter(r => r.productId === selectedProductId).flatMap(r => r.joinedScopeIds ?? []));
-  const ranges = [...analysis.intervals, ...(analysis.scopes ?? [])].filter(r => r.productId === selectedProductId || linkedScopes.has(r.id)).sort((a, b) => a.sourceId.localeCompare(b.sourceId) || a.startMs - b.startMs);
+  const ranges = [...productResultRanges(analysis, selectedProductId ?? '')].sort((a, b) => a.sourceId.localeCompare(b.sourceId) || a.startMs - b.startMs);
   const selectRange = (range: ProductInterval) => {
     setSelection({ sourceId: range.sourceId, intervalId: range.id });
     onLocate(range.sourceId, range.startMs);
@@ -234,6 +240,9 @@ function ProductPanelContent({ files, currentSourcePath, analysis, selectedProdu
   };
   const selectedRange = ranges.find(range => range.id === selected.intervalId && range.sourceId === selected.sourceId);
   const savedRange = selectedRange && savedStructureRange(analysis, selectedRange);
+  const analysisRange = productAnalysisRange(analysis, selectedProductId ?? '', selectedRange);
+  const currentRanges = analysis.intervals.filter(r => r.productId === selectedProductId && !r.sharedLayoutHidden);
+  const analysisRanges = currentRanges.length ? currentRanges : ranges;
   const selectedIds = new Set([selectedRange?.id, savedRange?.id, ...(selectedRange?.joinedScopeIds ?? []), ...(savedRange?.joinedScopeIds ?? [])]);
   const allCandidates = product ? productResultCandidates(analysis, product.id) : [];
   const candidates = allCandidates.filter(c => candidateScope === 'product' || c.sourceId === selected.sourceId && selectedIds.has(c.intervalId));
@@ -255,7 +264,7 @@ function ProductPanelContent({ files, currentSourcePath, analysis, selectedProdu
     setShowRecovered(value => !value);
   };
   const dailyEntry = !!analysis.sources.length && !analysis.intervals.length && !analysis.candidates.length;
-  return <LiveAnalysis refreshKey={transcriptRefresh} projectId={projectId} sources={analysis.sources.filter((s) => product?.sourceIds.includes(s.id))} ranges={ranges} sourceId={selected.sourceId} intervalId={selected.intervalId} onSelectSource={selectSource} onSelectRange={id => { const range = ranges.find(range => range.id === id); if (range) selectRange(range); else setSelection({ sourceId: selected.sourceId, intervalId: '' }); }} onLocate={onLocate} onAnalysisComplete={onAnalysisComplete} onWorkflowStarted={() => setTranscriptRefresh(value => value + 1)} onReviewTranscript={(discovery = false) => setTranscriptReviewRequest(previous => ({ sourceId: selected.sourceId, id: (previous?.id ?? 0) + 1, kind: discovery ? 'discovery' : 'transcript' }))}>{({ action, transcription, feedback, details }) => <div className="flex min-h-0 flex-1 flex-col overflow-y-auto text-[12px] text-[var(--text)]">
+  return <LiveAnalysis refreshKey={transcriptRefresh} projectId={projectId} sources={analysis.sources.filter((s) => product?.sourceIds.includes(s.id))} ranges={analysisRanges} sourceId={analysisRange?.sourceId ?? selected.sourceId} intervalId={analysisRange?.id ?? ''} onSelectSource={selectSource} onSelectRange={id => { const range = ranges.find(range => range.id === id); if (range) selectRange(range); else setSelection({ sourceId: selected.sourceId, intervalId: '' }); }} onLocate={onLocate} onAnalysisComplete={onAnalysisComplete} onWorkflowStarted={() => setTranscriptRefresh(value => value + 1)} onReviewTranscript={(discovery = false) => setTranscriptReviewRequest(previous => ({ sourceId: selected.sourceId, id: (previous?.id ?? 0) + 1, kind: discovery ? 'discovery' : 'transcript' }))}>{({ action, transcription, feedback, details }) => <div className="flex min-h-0 flex-1 flex-col overflow-y-auto text-[12px] text-[var(--text)]">
     {!onReturnToProject && transcription}
     <div className="shrink-0 border-b border-[var(--border)] px-3 pb-3 pt-3">
       <div className="mb-2 flex flex-wrap items-center gap-2"><strong className="flex-1">{showRecovered ? '待确认的已有分析' : '商品'}</strong>{pendingProducts.length > 0 && <button type="button" className={btn} aria-expanded={showRecovered} onClick={toggleRecovered}>{showRecovered ? '返回商品列表' : `待确认的已有分析 ${pendingProducts.length}`}</button>}</div>{showRecovered && <p className="mb-2 text-[11px] text-[var(--text-muted)]">这些原分析尚未对应到当前商品，内容已保留，可查看原话后确认归属。</p>}
@@ -279,7 +288,7 @@ function ProductPanelContent({ files, currentSourcePath, analysis, selectedProdu
               {!!candidateCounts.get(p.id) && <span className="text-[11px] text-[var(--accent)]">{candidateCounts.get(p.id)} 条话术</span>}
             </button>
 
-            {cardSelected && <div className="flex flex-wrap items-center gap-2 border-t border-[var(--accent)]/15 pt-2.5">{onReturnToProject ? <button type="button" className={btn} onClick={onReturnToProject}>返回工程分析</button> : recovered && allCandidates.length ? <button type="button" className={`${btn} min-h-9 flex-1`} onClick={showSavedAnalysis}>查看已有分析</button> : action}{onCompose && <button type="button" className={`${btn} min-h-9 rounded-md px-3 text-[12px]`} disabled={!ranges.some(range => range.id === selected.intervalId && range.sourceId === selected.sourceId)} onClick={() => { const range = ranges.find(range => range.id === selected.intervalId && range.sourceId === selected.sourceId); if (range) { const saved = savedStructureRange(analysis, range); onCompose({ sourceId: saved.sourceId, productId: saved.productId, intervalId: saved.id, startMs: saved.startMs, endMs: saved.endMs }); } }}>拼结构</button>}<button type="button" className={`${btn} min-h-9 shrink-0 rounded-md px-3 text-[12px]`} disabled={busy || !!onReturnToProject} aria-label={`编辑商品名称：${p.name}`} onClick={() => { setProductName(p.name); setError(''); setRenaming(true); }}>编辑</button></div>}
+            {cardSelected && <div className="flex flex-wrap items-center gap-2 border-t border-[var(--accent)]/15 pt-2.5">{onReturnToProject ? <button type="button" className={btn} onClick={onReturnToProject}>返回工程分析</button> : recovered && allCandidates.length && !analysisRange?.joinedScopeIds?.length ? <button type="button" className={`${btn} min-h-9 flex-1`} onClick={showSavedAnalysis}>查看已有分析</button> : action}{onCompose && <button type="button" className={`${btn} min-h-9 rounded-md px-3 text-[12px]`} disabled={!analysisRange} onClick={() => { const range = analysisRange; if (range) { const saved = savedStructureRange(analysis, range); onCompose({ sourceId: saved.sourceId, productId: saved.productId, intervalId: saved.id, startMs: saved.startMs, endMs: saved.endMs }); } }}>拼结构</button>}<button type="button" className={`${btn} min-h-9 shrink-0 rounded-md px-3 text-[12px]`} disabled={busy || !!onReturnToProject} aria-label={`编辑商品名称：${p.name}`} onClick={() => { setProductName(p.name); setError(''); setRenaming(true); }}>编辑</button></div>}
           </>}
         </div>;
       }} />

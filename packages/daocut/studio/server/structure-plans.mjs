@@ -37,7 +37,8 @@ export function createStructurePlanInputReader({ readAnalysis = readProductAnaly
     if (!source) throw new HttpError(404, '找不到原片');
     const parent = [...analysis.intervals, ...(analysis.scopes ?? [])].find(item => (!request.joinedParentId || item.id === request.joinedParentId) && item.joinedScopeIds?.includes(request.intervalId));
     const interval = [...analysis.intervals, ...(analysis.scopes ?? []).filter(item => parent || item.kind === 'historical-analysis')].find(item => item.id === request.intervalId && item.sourceId === source.id && item.productId === request.productId);
-    if (interval?.savedResultScopeId) {
+    const live = await read(join(root, '.film', 'live-analysis', `${sharedHash(source.id)}.json`));
+    if (interval?.savedResultScopeId && !live?.analyses?.[interval.id]) {
       const saved = [...analysis.intervals, ...(analysis.scopes ?? [])].find(r => r.id === interval.savedResultScopeId && r.sourceId === source.id && r.startMs === interval.startMs && r.endMs === interval.endMs);
       if (!saved || saved.savedResultScopeId) throw new HttpError(409, '原分析关联无效，已有结果保留');
       return readInput(root, { ...request, intervalId: saved.id, productId: saved.productId });
@@ -52,7 +53,8 @@ export function createStructurePlanInputReader({ readAnalysis = readProductAnaly
       throw new HttpError(409, '商品讲解范围已变化，请刷新当前段；未继续旧范围生成');
     }
     const scope = { ...context, ...bounds(interval) };
-    if (interval.joinedScopeIds?.length) {
+    const hasWholeAnalysis = !!live?.analyses?.[interval.id] || analysis.candidates.some(c => c.sourceId === source.id && c.intervalId === interval.id);
+    if (interval.joinedScopeIds?.length && !hasWholeAnalysis) {
       const parts = await Promise.all(interval.joinedScopeIds.map(intervalId => {
         const part = [...analysis.intervals, ...(analysis.scopes ?? [])].find(item => item.id === intervalId);
         return readInput(root, { sourceId: source.id, productId: part?.productId, intervalId, joinedParentId: interval.id });
@@ -86,7 +88,6 @@ export function createStructurePlanInputReader({ readAnalysis = readProductAnaly
         localCandidateIds: Object.assign({}, ...parts.map(part => part.localCandidateIds)), issues: [] };
     }
     const candidates = analysis.candidates.filter(item => item.sourceId === source.id && item.productId === product.id && item.intervalId === interval.id);
-    const live = await read(join(root, '.film', 'live-analysis', `${sharedHash(source.id)}.json`));
     const liveRef = live?.analyses?.[interval.id]?.sharedRef?.sha256;
     const dir = join(root, '.film', 'shared-analysis');
     const names = await readdir(dir).catch(error => { if (error.code === 'ENOENT') return []; throw error; });

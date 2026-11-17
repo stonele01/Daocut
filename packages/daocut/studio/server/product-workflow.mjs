@@ -179,7 +179,7 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
         expectedAnalysis: body.expectedAnalysis, expectedSourceFingerprint: selection.localSourceFingerprint,
         sourceSha: selection.descriptor.source.sha256, sharedWorkflow: payload,
       });
-      return { ...imported, needsReview: true, reason: '已有话术已完整读取；原记录缺少商品关联，保留为独立分析范围，可核对商品后使用。已有结构方案仍复用原共享底稿。' };
+      return { ...imported, ...(!imported.reusedOriginal ? { needsReview: true, reason: '已有话术已完整读取；原记录缺少商品关联，保留为独立分析范围，可核对商品后使用。已有结构方案仍复用原共享底稿。' } : {}) };
     };
     if (!reference) return restoreIndependent();
     const { analysis } = await readProductAnalysis(root), split = await discovery.view(root, source.id);
@@ -265,7 +265,6 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
     } else {
       const interval = [...analysis.intervals, ...(analysis.scopes ?? []).filter(item => item.kind === 'confirmed-inspection')].find(item => item.id === request.intervalId && item.productId === request.productId && item.sourceId === sourceId);
       if (!interval) throw new HttpError(409, '请先选择一个有效商品讲解段');
-      if (interval.joinedScopeIds?.length) throw new HttpError(409, '已连接的讲解保留原分析范围；请分别选择原范围复用已有结果或分析未处理部分，避免重复提交');
       scope = { sourceId, productId: interval.productId, intervalId: interval.id, startMs: interval.startMs, endMs: interval.endMs, lectureOnly: interval.kind !== 'confirmed-inspection' };
       const live = await liveAnalysis.view(root, sourceId, interval.id, interval.productId, scope);
       generation = { id: live.analysis.confirmationId ?? live.analysis.attemptId ?? null, status: live.analysis.status };

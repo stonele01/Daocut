@@ -1,7 +1,7 @@
 export type ProductSource = { id: string; assetPath: string; durationMs: number | null };
 export type ProductEvidence = string | { cue: number | string; text: string; startMs: number; endMs: number };
 export type Product = { sharedLayoutHidden?: boolean; id: string; name: string; sourceIds: string[]; aliases?: { name: string; evidence: ProductEvidence[] }[]; evidence?: ProductEvidence[]; review?: string[]; origin?: string; discoveryRunId?: string; joinedInto?: string };
-export type ProductInterval = { sharedLayoutHidden?: boolean; savedResultScopeId?: string; scopeStatus?: 'confirmed' | 'uncertain'; id: string; productId: string; sourceId: string; startMs: number; endMs: number; evidence?: ProductEvidence[]; review?: string[]; origin?: string; discoveryRunId?: string; kind?: 'confirmed-inspection' | 'historical-analysis'; joinedScopeIds?: string[]; joinedGapConfirmed?: boolean; shareJoinedPlans?: boolean };
+export type ProductInterval = { originalScopeId?: string; sharedLayoutHidden?: boolean; savedResultScopeId?: string; scopeStatus?: 'confirmed' | 'uncertain'; id: string; productId: string; sourceId: string; startMs: number; endMs: number; evidence?: ProductEvidence[]; review?: string[]; origin?: string; discoveryRunId?: string; kind?: 'confirmed-inspection' | 'historical-analysis'; joinedScopeIds?: string[]; joinedGapConfirmed?: boolean; shareJoinedPlans?: boolean };
 export type ProductCandidate = ProductInterval & { intervalId: string; text: string; tags: string[]; origin: string; version: string | number; runId?: string; details?: { subtypes: string[]; reason: string; evidence: string[]; context: string; repetition: string; review: string[] } };
 export type UnassignedProductRange = { id: string; sourceId: string; startMs: number; endMs: number; reason: string; kind: 'mixed' | 'mention' | 'uncertain' | 'transition'; evidence?: ProductEvidence[]; review?: string[]; origin?: string };
 export type ProductManualEdit = { id: string; createdAt: string; action: string; sourceIds: string[]; before: { products: Product[]; intervals: ProductInterval[]; unassigned?: UnassignedProductRange[] }; after: { products: Product[]; intervals: ProductInterval[]; unassigned?: UnassignedProductRange[] } };
@@ -25,6 +25,11 @@ export function visibleProducts(analysis: ProductAnalysis): Product[] {
   });
 }
 
+// Collapse only proven imported copies of the same original content, retaining all stored IDs.
+const canonicalContent = (value: unknown): unknown => Array.isArray(value) ? value.map(canonicalContent)
+  : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => [k, canonicalContent(v)])) : value;
+const candidateContent = (c: ProductCandidate) => JSON.stringify(canonicalContent({ startMs: c.startMs, endMs: c.endMs, text: c.text, tags: c.tags, details: c.details }));
+
 /** Reuse the immutable analysis snapshot's joins across card counts, filters and selection. */
 const resultIndexes = new WeakMap<ProductAnalysis, ReturnType<typeof buildResultIndex>>();
 function buildResultIndex(analysis: ProductAnalysis) {
@@ -32,20 +37,15 @@ function buildResultIndex(analysis: ProductAnalysis) {
   const byId = new Map(all.map(r => [r.id, r]));
   const occupied = new Set(analysis.candidates.map(c => `${c.sourceId}\0${c.intervalId}`));
   const byProduct = new Map<string, ProductInterval[]>();
-  const exact = new Map<string, ProductInterval[]>();
   const key = (r: ProductInterval) => `${r.sourceId}\0${r.startMs}\0${r.endMs}`;
   for (const r of all) {
     const group = byProduct.get(r.productId) ?? []; group.push(r); byProduct.set(r.productId, group);
-    if (r.kind === 'historical-analysis' && 'confirmed' in r && r.confirmed === true && ['shared-composition', 'shared-historical'].includes(r.origin ?? '')) {
-      const group = exact.get(key(r)) ?? []; group.push(r); exact.set(key(r), group);
-    }
   }
   const saved = (r: ProductInterval) => {
+    if (occupied.has(`${r.sourceId}\0${r.id}`)) return r;
     const explicit = r.savedResultScopeId && byId.get(r.savedResultScopeId);
     if (explicit && key(explicit) === key(r)) return explicit;
-    if (r.joinedScopeIds?.length || r.kind === 'historical-analysis' || occupied.has(`${r.sourceId}\0${r.id}`)) return r;
-    const matches = exact.get(key(r));
-    return matches?.length === 1 ? matches[0]! : r;
+    return r;
   };
   const ranges = new Map<string, ProductInterval[]>(), candidates = new Map<string, ProductCandidate[]>();
   for (const p of analysis.products) {
@@ -56,8 +56,16 @@ function buildResultIndex(analysis: ProductAnalysis) {
         ids.add(child); const part = byId.get(child); if (part) ids.add(saved(part).id);
       }
     }
+    for (const r of all) if (r.originalScopeId && ids.has(r.originalScopeId)) {
+      ids.add(r.id);
+      for (const child of r.joinedScopeIds ?? []) ids.add(child);
+    }
     ranges.set(p.id, all.filter(r => ids.has(r.id)));
-    candidates.set(p.id, analysis.candidates.filter(c => c.productId === p.id || ids.has(c.intervalId)));
+    const selected = analysis.candidates.filter(c => c.productId === p.id || ids.has(c.intervalId));
+    candidates.set(p.id, selected.filter(c => {
+      const originalId = byId.get(c.intervalId)?.originalScopeId;
+      return !originalId || !selected.some(original => original.intervalId === originalId && candidateContent(original) === candidateContent(c));
+    }));
   }
   return { saved, ranges, candidates, intervals: analysis.intervals, scopes: analysis.scopes, products: analysis.products, candidateArray: analysis.candidates,
     size: all.length + analysis.candidates.length + analysis.products.length };
@@ -73,6 +81,20 @@ function resultIndex(analysis: ProductAnalysis) {
 export function savedStructureRange(analysis: ProductAnalysis, range: ProductInterval): ProductInterval { return resultIndex(analysis).saved(range); }
 export function productResultRanges(analysis: ProductAnalysis, productId: string): ProductInterval[] { return resultIndex(analysis).ranges.get(productId) ?? []; }
 export function productResultCandidates(analysis: ProductAnalysis, productId: string): ProductCandidate[] { return resultIndex(analysis).candidates.get(productId) ?? []; }
+
+/** Viewing an original part does not replace the product's current complete lecture. */
+export function productAnalysisRange(analysis: ProductAnalysis, productId: string, viewing?: ProductInterval): ProductInterval | undefined {
+  const current = analysis.intervals.filter(r => r.productId === productId && !r.sharedLayoutHidden && (!viewing || r.sourceId === viewing.sourceId));
+  if (!current.length) return viewing;
+  const selected = current.find(r => r.id === viewing?.id);
+  if (selected) return selected;
+  const viewedIds = new Set([viewing?.id, viewing?.originalScopeId]);
+  const linked = current.filter(r => [r.id, r.savedResultScopeId, ...(r.joinedScopeIds ?? []).flatMap(id => {
+    const part = analysis.scopes?.find(p => p.id === id);
+    return [id, part?.savedResultScopeId];
+  })].some(id => !!id && viewedIds.has(id)));
+  return linked.length === 1 ? linked[0] : current.length === 1 ? current[0] : undefined;
+}
 
 export const productId = () => globalThis.crypto.randomUUID();
 

@@ -1,14 +1,32 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { savedStructureRange, productResultCandidates, visibleProducts, type ProductAnalysis } from './product-analysis.ts';
+import { savedStructureRange, productAnalysisRange, productResultCandidates, visibleProducts, type ProductAnalysis } from './product-analysis.ts';
 
 const seed = (): ProductAnalysis => ({ version: 1, sources: [{ id: 's', assetPath: 'assets/a.mp4', durationMs: 6000000 }],
   products: [{ id: 'jacket', name: '羽绒服', sourceIds: ['s'] }, { id: 'saved', name: '已有拼结构', sourceIds: ['s'] }],
-  intervals: [{ id: 'lecture', productId: 'jacket', sourceId: 's', startMs: 4141200, endMs: 5172760 }],
+  intervals: [{ id: 'lecture', savedResultScopeId: 'original-composition', productId: 'jacket', sourceId: 's', startMs: 4141200, endMs: 5172760 }],
   scopes: [{ id: 'original-composition', productId: 'saved', sourceId: 's', startMs: 4141200, endMs: 5172760,
     kind: 'historical-analysis', confirmed: true, origin: 'shared-composition', joinedScopeIds: ['first', 'second'] }], candidates: [] });
 
-test('ordinary product entry uses the unique exact saved scope and keeps all persisted identities', () => {
+test('viewing either old part keeps the current complete lecture as the analysis target', () => {
+  const a = seed();
+  a.intervals[0]!.joinedScopeIds = ['first', 'second'];
+  for (const id of ['first', 'second']) {
+    const part = { ...a.intervals[0]!, id, joinedScopeIds: undefined, kind: 'confirmed-inspection' as const };
+    assert.equal(productAnalysisRange(a, 'jacket', part)?.id, 'lecture');
+  }
+  assert.equal(productAnalysisRange(a, 'jacket', a.scopes![0])?.id, 'lecture');
+});
+
+test('separate return lectures keep their own identity and an unrelated historical view cannot merge them', () => {
+  const a = seed();
+  a.intervals.push({ ...a.intervals[0]!, id: 'return', savedResultScopeId: undefined, startMs: 5500000, endMs: 5900000 });
+  assert.equal(productAnalysisRange(a, 'jacket', a.intervals[1])?.id, 'return');
+  assert.equal(productAnalysisRange(a, 'jacket', a.scopes![0])?.id, 'lecture');
+  assert.equal(productAnalysisRange(a, 'jacket', { ...a.scopes![0]!, id: 'unrelated' }), undefined);
+});
+
+test('ordinary product entry uses the explicit saved scope and keeps all persisted identities', () => {
   const analysis = seed(), before = structuredClone(analysis);
   assert.equal(savedStructureRange(analysis, analysis.intervals[0]!).id, 'original-composition');
   assert.deepEqual(analysis, before);
@@ -19,7 +37,7 @@ test('partial overlap, other video, duplicate versions and private candidates ne
   for (const change of [
     (a: ProductAnalysis) => { a.scopes![0]!.startMs++; },
     (a: ProductAnalysis) => { a.scopes![0]!.sourceId = 'other'; },
-    (a: ProductAnalysis) => { a.scopes!.push({ ...a.scopes![0]!, id: 'other-version' }); },
+    (a: ProductAnalysis) => { delete a.intervals[0]!.savedResultScopeId; },
     (a: ProductAnalysis) => { a.candidates.push({ ...a.intervals[0]!, id: 'private', intervalId: 'lecture', text: '个人修改', tags: ['卖点'], origin: 'manual', version: 1 }); },
   ]) {
     const analysis = seed(); change(analysis);
