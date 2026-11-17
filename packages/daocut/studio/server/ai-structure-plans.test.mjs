@@ -9,6 +9,16 @@ import { COMPOSE_STRUCTURE_PROMPT, PREVIOUS_COMPOSE_STRUCTURE_PROMPT } from './a
 import { inspectAiCompositionInput } from './structure-composition.mjs';
 import { createAiStructurePlans } from './ai-structure-plans.mjs';
 import { sharedHash } from './shared-analysis.mjs';
+
+test('a stale selection after sharing is explicitly refreshable without a model call', async t => {
+  const f = await fixture(t, async () => { throw Error('must not generate'); });
+  const service = f.make();
+  const old = await service.status(f.root, f.material.scope);
+  f.material.visibility = 'shared';
+  await assert.rejects(service.status(f.root, { ...f.material.scope, taskKey: old.taskKey }), error =>
+    error.status === 409 && error.extra?.code === 'STRUCTURE_SELECTION_CHANGED');
+  assert.equal(f.calls(), 0);
+});
 import { createHash } from 'node:crypto';
 import { createDesktopAnalysisServices } from './desktop-analysis-services.mjs';
 
@@ -382,7 +392,63 @@ test('a missing legacy public artifact reports a recovery issue and cannot fall 
   assert.equal(claims, 0); assert.equal(f.calls(), 0);
 });
 
+for (const legacyMode of ['publish', 'busy', 'reuse']) test(`oversized legacy lookup preserves the old ledger check without blocking compact current input (${legacyMode})`, async t => {
+  const f = await currentFixture(t, async args => {
+    assert.equal(args.system, AI_STRUCTURE_PROMPT);
+    assert.ok(Buffer.byteLength(args.system + args.input, 'utf8') <= 128000);
+    return orderResponse();
+  }, { shared: true });
+  const oldRequest = createAiStructureRequest(f.material, { version: 'ai-structure-plans-v3' });
+  f.material.engineInput.cues[0].words = Array.from({ length: 7000 }, (_, index) => ({ word: '这', startMs: index, endMs: index + 1 }));
+  const oldBody = JSON.parse(oldRequest.input), { cue: oldCueIndex, ...oldCue } = oldBody.transcript[0];
+  oldBody.transcript[0] = { ...oldCue, words: f.material.engineInput.cues[0].words, cue: oldCueIndex };
+  oldRequest.input = JSON.stringify(oldBody);
+  assert.throws(() => createAiStructureRequest(f.material, { version: 'ai-structure-plans-v3' }), { code: 'AI_STRUCTURE_INPUT_TOO_LARGE' });
+  assert.ok(Buffer.byteLength(JSON.stringify(createAiStructureRequest(f.material)), 'utf8') < 128000);
+  const probes = [], tasks = new Map(); let claims = 0;
+  const shared = { validateSource: async () => {}, prepareExisting: async (_root, _source, artifact) => {
+    probes.push(artifact.payload.kind);
+    if (legacyMode === 'busy' && artifact.payload.kind === 'ai-structure-plans-v3') return { mode: 'busy', taskKey: 'old-submitted' };
+    if (legacyMode === 'reuse' && artifact.payload.kind === 'ai-structure-plans-v3') return { mode: 'reuse', taskKey: 'old-complete' };
+    const taskKey = sharedHash(artifact.payload);
+    return { taskKey, mode: tasks.has(taskKey) ? 'reuse' : 'publish' };
+  }, acquire: async () => { claims++; return { attemptId: 'current-attempt' }; },
+  complete: async (_root, descriptor, _attempt, payload) => { tasks.set(descriptor.taskKey, payload); },
+  read: async (_root, descriptor) => ({ payload: descriptor.taskKey === 'old-complete'
+    ? { schema: 'ai-structure-plans-v3', requestHash: sharedHash(oldRequest), response: rangeResponse() }
+    : tasks.get(descriptor.taskKey) }) };
+  const service = f.make({ sharedAnalysis: shared }), state = await service.status(f.root, f.material.scope);
+  assert.equal(f.calls(), 0);
+  assert.ok(probes.includes('ai-structure-plans-v3'), 'read the actual old ledger identity even when its send budget is exceeded');
+  if (legacyMode === 'reuse') {
+    assert.equal(state.status, 'complete'); assert.equal(state.version, 'ai-structure-plans-v3');
+    assert.equal(state.plans.length, 1); assert.equal(f.calls(), 0); assert.equal(claims, 0);
+  } else if (legacyMode === 'busy') {
+    assert.ok(['busy', 'unavailable'].includes(state.status));
+    assert.equal(state.confirmation, undefined);
+    await service.generate(f.root, { ...f.material.scope, confirmed: true, confirmationId: 'invalid' });
+    assert.equal(f.calls(), 0); assert.equal(claims, 0);
+  } else {
+    assert.equal(state.status, 'idle'); assert.equal(state.confirmation.enabled, true);
+    assert.ok(probes.includes('ai-structure-plans-v1'));
+    await service.generate(f.root, { ...f.material.scope, confirmed: true, confirmationId: state.confirmation.id });
+    await service.wait(); assert.equal(f.calls(), 1); assert.equal(claims, 1);
+    assert.equal((await service.status(f.root, f.material.scope)).status, 'complete');
+  }
+});
+
 const currentRules = aiStructure.AI_STRUCTURE_VERSION, oldRules = 'ai-structure-plans-v1';
+test('HTTP failure status survives saving and reopening without another model request', async t => {
+  const f = await currentFixture(t, async () => { throw Object.assign(Error('模型服务返回 HTTP 错误'), { code: 'MODEL_HTTP', httpStatus: 402 }); });
+  const service = f.make(); await f.confirm(service); await service.wait();
+  const state = await f.make().status(f.root, f.material.scope);
+  assert.equal(state.status, 'failed');
+  assert.ok(state.issues.some(i => /HTTP 错误 402/.test(i.message)));
+  const saved = JSON.parse(await readFile(join(f.root, '.film/ai-structure-plans', `${state.taskKey}.json`), 'utf8'));
+  assert.match(saved.rounds.at(-1).error, /HTTP 错误 402/);
+  assert.equal(f.calls(), 1);
+});
+
 test('an explicit new-rules request previews confirmation read-only, keeps v1 bytes, and lets both versions reopen by key', async t => {
   const f = await currentFixture(t, async () => orderResponse()), old = await seedLegacy(f, 'complete'), service = f.make();
   const before = await readFile(old.path, 'utf8');

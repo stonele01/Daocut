@@ -118,6 +118,37 @@ test('a reviewed first-window checkpoint resumes without repeating its request o
   assert.deepEqual(final.indexCorrection, entry.indexCorrection);
 });
 
+for (const mode of ['complete', 'missing-window', 'invalid-response']) test(`offline recovery never calls a provider: ${mode}`, async t => {
+  const c = await setup(t); let calls = 0;
+  const options = { ...c.options, ...(mode === 'missing-window' ? {} : { structureWindowPolicy: { maxInputBytes: 100000, contextCues: 0 } }) };
+  const first = createLiveAnalysis({ ...options, modelClient: async req => {
+    calls++;
+    const response = mode === 'invalid-response' ? { candidates: [{ firstCue: 999, lastCue: 999, tags: ['卖点'], details }], issues: [] } : modelOutput(req.input);
+    const rawText = JSON.stringify(response), hash = v => createHash('sha256').update(v).digest('hex');
+    await req.onReceipt({ provider: 'deepseek', status: 'completed', httpStatus: 200, responseVersion: 'deepseek-text-receipt-v1', rawText,
+      rawTextSha256: hash(rawText), inputSha256: hash(JSON.stringify([req.system, req.input])) });
+    throw Object.assign(Error('old parser rejected this saved response'), { code: 'MODEL_CONSTRAINT' });
+  } });
+  await request(first, c.root, 'POST'); const failed = await finish(first, c.root);
+  const journal = join(c.root, '.film/live-analysis', `${createHash('sha256').update('s').digest('hex')}.json`);
+  const before = JSON.parse(await readFile(journal, 'utf8')).attempts[failed.analysis.attemptId];
+  const reopened = createLiveAnalysis({ ...options, modelClient: () => { calls++; assert.fail('offline recovery called a provider'); } });
+  const req = Readable.from([Buffer.from(JSON.stringify({ sourceId: 's', intervalId: 'a1', productId: 'a', confirmed: true, startMs: 10000, endMs: 18000, lectureOnly: true }))]); req.method = 'POST';
+  assert.equal(await reopened(req, { writeHead() {}, end() {} }, c.root, 'live-analysis/recover'), true);
+  const result = await finish(reopened, c.root);
+  assert.equal(calls, 1);
+  assert.equal(result.analysis.status, mode === 'complete' ? 'complete' : 'failed');
+  const after = JSON.parse(await readFile(journal, 'utf8')).attempts[failed.analysis.attemptId];
+  assert.deepEqual(after.windows[0].receipt, before.windows[0].receipt);
+  assert.equal(after.windows.reduce((n,w)=>n+w.requests,0), 1);
+  if (mode === 'missing-window') {
+    assert.equal(after.windows[0].status, 'complete');
+    assert.equal(after.windows[1].requests, 0);
+    assert.equal((await readProductAnalysis(c.root)).analysis.candidates.length, 0);
+    assert.match(result.analysis.error, /未发送模型请求/);
+  }
+});
+
 test('structure windows use complete cue boundaries, bounded bytes and overlapping context', () => {
   const windows = textStructureWindows(args);
   assert.ok(windows.length > 1);

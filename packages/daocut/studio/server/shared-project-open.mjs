@@ -30,6 +30,59 @@ export function openNewSharedProject(root, input, dependencies) {
   const work = open(root, input, dependencies).finally(() => openings.delete(root));
   openings.set(root, work); return work;
 }
+
+/** Explicitly fill missing public results in an existing personal project.
+ * Keep the current transcript, product edits and film; do not restart discovery. */
+export function resumeSharedAnalyses(root, sourceId, publication) {
+  if (openings.has(root)) throw new HttpError(409, '正在读取共享结果，请稍候');
+  const work = (async () => {
+    let expected = (await readProductAnalysis(root)).analysis;
+    if (!expected.sources.some(source => source.id === sourceId)) throw new HttpError(404, '来源不存在');
+    const privateBefore = await privateFiles(root);
+    const unchanged = async () => {
+      if (sharedHash((await readProductAnalysis(root)).analysis) !== sharedHash(expected) || sharedHash(await privateFiles(root)) !== sharedHash(privateBefore)) throw changeError();
+    };
+    const { results } = await publication.catalog(root, sourceId);
+    await unchanged();
+    const report = { readerRevision: 3, status: 'ready', imported: { transcription: 0, discovery: 0, analysis: 0 }, warnings: [], requestCount: 0, skippedRecords: 0, failedRecords: 0 };
+    let live;
+    try { live = JSON.parse(await readFile(join(root, '.film/live-analysis', `${sharedHash(sourceId)}.json`), 'utf8')); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    const present = new Set(Object.values(live?.analyses ?? {}).flatMap(value => [value.sharedRef?.sha256, value.historicalRef?.sha256]).filter(Boolean));
+    const rows = results.filter(row => row.action === 'analysis');
+    for (const row of rows) {
+      await unchanged();
+      if (present.has(row.resultSha)) { report.skippedRecords++; continue; }
+      if (rows.filter(other => sharedHash(other.scope) === sharedHash(row.scope)).length > 1) {
+        report.warnings.push('同一范围有多个历史版本，请在已有分析记录中选择采用'); report.skippedRecords++; continue;
+      }
+      try {
+        const imported = await publication.importResult(root, { sourceId, taskKey: row.taskKey, resultSha: row.resultSha, confirmed: true, expectedAnalysis: expected,
+          productName: `已有话术（商品待核对） ${Math.floor(row.scope.startMs / 1000)}–${Math.ceil(row.scope.endMs / 1000)}秒` });
+        expected = imported.analysis;
+        report.imported.analysis += row.count ?? imported.count ?? 0;
+        if (imported.needsReview && imported.reason && !report.warnings.includes(imported.reason)) report.warnings.push(imported.reason);
+      } catch (error) {
+        await unchanged();
+        report.failedRecords++;
+        report.warnings.push(`范围 ${Math.floor(row.scope.startMs / 1000)}–${Math.ceil(row.scope.endMs / 1000)}秒未导入：${error.message}`);
+      }
+    }
+    await unchanged();
+    if (publication.restoreCompositions) expected = (await publication.restoreCompositions(root, sourceId, expected)).analysis;
+    await unchanged();
+    if (publication.restoreLayout) {
+      const restored = await publication.restoreLayout(root, sourceId);
+      expected = restored.analysis;
+      if (expected.sharedLayouts?.[sourceId]) report.warnings = report.warnings.filter(w => !/商品关联|独立分析范围|商品待核对/.test(w));
+    }
+    report.status = report.warnings.length ? 'review-required' : 'ready';
+    await writeAtomic(fileFor(root), `${JSON.stringify({ version: 1, sourceId, sharedRead: report })}\n`);
+    return report;
+  })().finally(() => openings.delete(root));
+  openings.set(root, work);
+  return work;
+}
 /** Only new empty records with an unchanged private baseline may be retried on an ordinary reopen. */
 export function refreshEmptySharedProject(root, dependencies) {
   const pending = openings.get(root); if (pending) return pending;
@@ -49,7 +102,7 @@ export function refreshEmptySharedProject(root, dependencies) {
 }
 async function open(root, { assetPath, sourceId, expectedAnalysis, expectedPrivateFiles, refreshEmpty = false }, { registerSource, publication, discovery }) {
   const saved = await readSharedProjectOpen(root); if (saved && !refreshEmpty) return saved;
-  const report = { status: 'opening', imported: { transcription: 0, discovery: 0, analysis: 0 }, warnings: [], requestCount: 0 };
+  const report = { readerRevision: 3, status: 'opening', imported: { transcription: 0, discovery: 0, analysis: 0 }, warnings: [], requestCount: 0 };
   const persist = async () => { await writeAtomic(fileFor(root), `${JSON.stringify({ version: 1, sourceId, sharedRead: report, ...(report.status === 'empty' ? { emptyBaseline: { analysisHash: sharedHash(expected), privateFiles: privateBefore } } : {}) }, null, 2)}\n`); return report; };
   let expected = expectedAnalysis;
   const privateBefore = expectedPrivateFiles ?? await privateFiles(root);
@@ -109,12 +162,29 @@ async function open(root, { assetPath, sourceId, expectedAnalysis, expectedPriva
       }
       await unchanged();
       const suffix = analyses.length > 1 ? ` ${Math.floor((row.scope?.startMs ?? 0) / 1000)}–${Math.ceil((row.scope?.endMs ?? 0) / 1000)}秒` : '';
-      const imported = await publication.importResult(root, { ...request(row), expectedAnalysis: expected, productName: `已有话术（商品待核对）${suffix}` });
+      let imported;
+      try {
+        imported = await publication.importResult(root, { ...request(row), expectedAnalysis: expected, productName: `已有话术（商品待核对）${suffix}` });
+      } catch (error) {
+        // A bad record must not hide unrelated completed work. If an import
+        // changed the project before failing, or a user edited it, stop safely.
+        await unchanged();
+        report.warnings.push(`话术范围 ${suffix.trim() || row.taskKey} 未导入：${error.message}`);
+        continue;
+      }
       // Use the exact snapshot committed by the importer. A later user edit
       // must fail the next guard, never become the next automatic baseline.
       expected = imported.analysis;
       report.imported.analysis += row.count ?? 1;
+      if (imported.needsReview && imported.reason && !report.warnings.includes(imported.reason)) report.warnings.push(imported.reason);
       if (row.provenance?.kind !== 'shared-workflow-v1') historicalAnalyses++;
+    }
+    await unchanged();
+    if (publication.restoreCompositions) expected = (await publication.restoreCompositions(root, sourceId, expected)).analysis;
+    await unchanged();
+    if (publication.restoreLayout) {
+      expected = (await publication.restoreLayout(root, sourceId)).analysis;
+      if (expected.sharedLayouts?.[sourceId]) { historicalAnalyses = 0; report.warnings = report.warnings.filter(w => !/商品关联|独立分析范围|商品待核对/.test(w)); }
     }
     if (historicalAnalyses) report.warnings.push('历史话术未记录原商品关联，已完整显示为“已有话术（商品待核对）”；商品讲解边界保持原样');
     report.status = report.warnings.length ? 'review-required' : 'ready';

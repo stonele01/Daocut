@@ -9,7 +9,7 @@ import { createLiveAnalysis, structureTranscriptHash } from './live-analysis.mjs
 import { createExistingAnalysisPublication } from './existing-analysis-publication.mjs';
 import { createProductDiscovery } from './product-discovery-route.mjs';
 import { createSharedAnalysis as createLedger } from '../../../../apps/company-service/src/shared-analysis.mjs';
-import { transcriptionLocation } from './product-transcription.mjs';
+import { transcriptionLocation, readProductTranscript } from './product-transcription.mjs';
 import { sharedHash } from './shared-analysis.mjs';
 import { readTranscriptReview } from './transcript-review.mjs';
 import { applyProductEdit } from '../ui/src/lib/product-manual.ts';
@@ -59,6 +59,20 @@ async function fixture(t, extra = {}) {
   const make = () => { const shared = createSharedAnalysis(storeOptions), live = createLiveAnalysis({ modelClient: () => { calls++; throw Error('MODEL FORBIDDEN'); }, probeSource: async () => ({ duration: 20 }) }); return { shared, live, publication: createExistingAnalysisPublication({ sharedAnalysis: shared, liveAnalysis: live, probeSource: async () => ({ duration: 20 }) }) }; };
   return { roots, tasks, source, range, raw, statePath, make, calls: () => calls };
 }
+test('restored sampled identity does not replace verified full content provenance', async t => {
+  const f=await fixture(t),root=f.roots[0],service=f.make();
+  const contentHash=sha(await readFile(join(root,f.source.assetPath)));
+  const provenance={sources:[{sourceId:f.source.id,contentHash,identityKind:'sampled-sha256-v1',identitySha256:'a'.repeat(64)}]};
+  await writeFile(join(root,'.film/restore-provenance.json'),JSON.stringify(provenance));
+  const request={sourceId:f.source.id,action:'analysis',runId:'run-original',intervalId:'old-range'};
+  const plan=await service.publication.plan(root,request);
+  assert.equal(plan.source.sha256,contentHash);assert.equal(plan.count,40);assert.equal(plan.requestCount,0);
+  provenance.sources[0].contentHash='b'.repeat(64);
+  await writeFile(join(root,'.film/restore-provenance.json'),JSON.stringify(provenance));
+  await assert.rejects(service.publication.plan(root,request),/身份依据不足或不一致/);
+  assert.equal(f.calls(),0);assert.equal(f.tasks.size,0);
+});
+
 test('publish-only exports original 40 candidates despite current model configuration and imports without changing B lecture ranges', async t => {
   const f = await fixture(t), a = f.make(), b = f.make();
   const plan = await a.publication.plan(f.roots[0], { sourceId: f.source.id, action: 'analysis', runId: 'run-original', intervalId: 'old-range' });
@@ -148,9 +162,14 @@ test('two isolated clients publish and reuse all three historical artifacts thro
   for (const row of rows) {
     const req = { ...row, sourceId: 'source-b', confirmed: true, ...(row.action === 'analysis' ? { productId: 'product-b' } : {}) };
     const preview = await publication.preview(other, req); assert.doesNotMatch(JSON.stringify(preview), /PRIVATE-SECRET|PRIVATE EDIT DO NOT SHARE/); assert.equal(preview.canImport, true);
-    const result = await publication.importResult(other, req); if (row.action === 'transcription') assert.equal(result.needsReview, true);
+    const result = await publication.importResult(other, req); if (row.action === 'transcription') assert.equal(result.needsReview, false);
   }
-  assert.equal((await readTranscriptReview(other, 'source-b')).pendingCount, 1);
+  const review = await readTranscriptReview(other, 'source-b');
+  assert.equal(review.pendingCount, 0); assert.equal(review.seams[0].status, 'automatic');
+  assert.deepEqual(review.seams[0].left, [c('交界截断因为', 9500, 10900)]);
+  assert.deepEqual(review.seams[0].right, [c('交界不同后文', 9500, 11500)]);
+  const importedTranscript = await readProductTranscript(other, { ...f.source, id: 'source-b' });
+  assert.deepEqual(importedTranscript.cues, [c('原始前文', 0, 9000), c('交界不同后文', 9500, 11500), c('完整后文', 12000, 19000)]);
   const data = JSON.parse(await readFile(join(other, '.film/product-analysis.json'))); assert.equal(data.candidates.length, 40); assert.equal(data.intervals[0].startMs, 5000);
   assert.equal((await discovery.view(other, 'source-b')).proposal.products[0].name, '原AI商品'); assert.equal(f.calls(), 0);
   assert.equal((await b.shared.versions(other, 'source-b')).groups.length, 0);

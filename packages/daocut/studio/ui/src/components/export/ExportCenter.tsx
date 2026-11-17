@@ -24,7 +24,7 @@ import { MenuSelect } from '@/components/MenuSelect';
 import { CustomFrame } from '@/components/FramePicker';
 import { FRAME_RATES } from '@/lib/timecode';
 import { api } from '@/api';
-import type { StructureBatchExportSelection } from '@/lib/structure-export-selection';
+import { StructureExportSelectionChangedError, type StructureBatchExportSelection } from '@/lib/structure-export-selection';
 import { relevantExportSourceIssues, type ExportSourceIssue } from '@/lib/export-source-issues';
 import {
   CODEC_LABEL,
@@ -552,7 +552,10 @@ export function ExportCenter(props: ExportCenterProps) {
       try {
         await batch.onExport({ name: exportName.trim() || batch.title, folder, destination: batchDestination });
         onClose();
-      } catch (e) { setResult({ ok: false, text: e instanceof Error ? e.message : String(e) }); }
+      } catch (e) {
+        if (e instanceof StructureExportSelectionChangedError) onClose();
+        else setResult({ ok: false, text: e instanceof Error ? e.message : String(e) });
+      }
       finally { setWorking(null); }
       return;
     }

@@ -1,9 +1,11 @@
 import { createHash } from 'node:crypto';
-import { DISCOVER_PRODUCTS_PROMPT, PREVIOUS_DISCOVER_PRODUCTS_PROMPT } from './approved-prompts.mjs';
+import { DISCOVER_PRODUCTS_PROMPT, PREVIOUS_DISCOVER_PRODUCTS_PROMPT, PREVIOUS_CHAT_DISCOVER_PRODUCTS_PROMPT, PREVIOUS_BOUNDARY_DISCOVER_PRODUCTS_PROMPT } from './approved-prompts.mjs';
 
 export const DISCOVERY_VERSION = 'product-discovery-v1';
 export const PREVIOUS_DISCOVERY_PROMPT = `你只检查直播转写，没有检查原音或画面。识别完整商品讲解，不将简短提及、闲聊、过渡、混讲当作完整讲解。相同商品返场保留独立范围，不包住中间其他商品。不同规格或套装、证据不足的别名不能强行合并。时间由程序按原片 cue 恢复，只输出输入中的全局 cue 索引。跨窗口可以引用上下文，不能臆造窗口外索引。已知商品只供核对：复用 key 必须同名同规格；不同叫法合并必须给 matchKey、matchEvidence 和 matchReason，规格不明则 identityUncertain:true。所有 evidence 是输入中的 cue 索引。输出 JSON {products:[{key,name,variant:"",aliases:[{name,evidence:[0]}],evidence:[0],identityUncertain:false,matchKey?,matchEvidence?:[0],matchReason?:""}],ranges:[{key:"商品key或null",firstCue:0,lastCue:1,kind:"lecture|mixed|mention|uncertain|transition",reason:"依据",evidence:[0]}],issues:["问题"]}。lecture 才可关联商品，其他内容 key 必须 null。每个范围至少有一句证据。名称不明确或身份存疑可保留待确认商品，但必须说明。不得声称看到了画面或确认了画面内容。`;
 export const PREVIOUS_CONTEXT_DISCOVERY_PROMPT = PREVIOUS_DISCOVER_PRODUCTS_PROMPT;
+export const PREVIOUS_CHAT_DISCOVERY_PROMPT = PREVIOUS_CHAT_DISCOVER_PRODUCTS_PROMPT;
+export const PREVIOUS_BOUNDARY_DISCOVERY_PROMPT = PREVIOUS_BOUNDARY_DISCOVER_PRODUCTS_PROMPT;
 export const DISCOVERY_PROMPT = DISCOVER_PRODUCTS_PROMPT;
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const id = (kind, value) => `${kind}-${hash(value).slice(0, 24)}`;
@@ -58,6 +60,29 @@ export function combineDiscoveryWindows({ sourceId, runId, durationMs, cues, win
     return first - last <= 4 && cues[first].startMs - cues[last].endMs <= 2000
       && gap.every(cue => /^(?:嗯+|啊+|哦+|呃+|对|对的|是|是的|好的|好|没错)[。！!，,？?\s]*$/u.test(cue.text.trim()));
   };
+  const switchProduct = { test(value) {
+    const pattern = /过品|过款|换品|(?:切换|换)(?:到)?(?:下(?:一个|一款|一件)|另(?:一个|一款|一件)|一(?:个|款|件)|款|商品|产品)|下(?:一个|一款|一件)|接下来(?:看|讲|介绍)|开始介绍另一/gu;
+    for (const match of value.matchAll(pattern)) {
+      const before = value.slice(0, match.index).split(/[。！!？?；;]/u).at(-1);
+      const after = value.slice(match.index + match[0].length);
+      // Preview, negation and a different colour/size are not an actual switch.
+      const qualifier = [...before.matchAll(/等会儿?|一会儿?|待会儿?|稍后|等下|后面|先不|不要|别|还没|不(?:要)?急着|想不想|要不要/gu)].at(-1);
+      if (qualifier && !/(?:现在|马上|这就)(?:开始|我们|咱们|来)?[，,、\s]*$/u.test(before.slice(qualifier.index + qualifier[0].length))) continue;
+      if (/^\s*(?:颜色|色号|尺码|码数|规格|问题|话题|福利)/u.test(after)) continue;
+      return true;
+    }
+    return false;
+  } };
+  // A transition may mean a product switch, not just chat. Only bridge an
+  // explicitly described conversational interruption; other transitions stay separate.
+  const chatTransition = range => range.kind === 'transition'
+    && /闲聊|聊天|感谢|互动|寒暄/u.test(range.reason)
+    && !/换品|换款|切换|转入|返场|结束.*讲解|讲解.*结束/u.test(range.reason);
+  const chatGap = (last, first) => {
+    const gap = cues.slice(last + 1, first);
+    const acknowledgement = /^(?:嗯+|啊+|哦+|呃+|对|对的|是|是的|好的|好|没错)[。！!，,？?\s]*$/u;
+    return gap.some(cue => text(cue.text) && !acknowledgement.test(cue.text.trim())) && !gap.some(cue => switchProduct.test(cue.text));
+  };
   const evidenceFor = (indices, window) => {
     if (!Array.isArray(indices) || !indices.length || indices.some(n => !Number.isInteger(n) || n < window.firstCue || n > window.lastCue)) invalid('拆品证据不属于当前转写窗口');
     return [...new Set(indices)].map(n => ({ cue: n, text: cues[n].text, startMs: cues[n].startMs, endMs: cues[n].endMs }));
@@ -74,20 +99,90 @@ export function combineDiscoveryWindows({ sourceId, runId, durationMs, cues, win
         if (!text(alias?.name)) invalid('商品别名无效');
         return { name: alias.name, evidence: evidenceFor(alias.evidence, window) };
       });
-      let previous = known.get(item.matchKey ?? item.key);
+      const baseKey = item.key.replace(/@\d+$/u, '');
+      let previous = known.get(item.matchKey ?? item.key) ?? (baseKey !== item.key ? known.get(baseKey) : undefined);
+      // Window boundaries are transport details, not evidence of a new sale.
+      // A continuous confirmed lecture keeps its identity even if the model
+      // changes a key/name/specification in the next batch. Keep observations.
+      const boundary = w > 0 && ranges.findLast(old => old.scopeStatus === 'confirmed' && old.windowIndices.at(-1) === w - 1
+        && continuous(old.lastCue, windows[w - 1].coreLast + 1)
+        && result.ranges.some(next => next.key === item.key && next.kind === 'lecture' && next.scopeStatus === 'confirmed'
+          && next.firstCue <= window.coreFirst && next.lastCue >= window.coreFirst && continuous(old.lastCue, next.firstCue)
+          && !cues.slice(Math.min(old.lastCue, next.firstCue), Math.max(old.lastCue, next.firstCue) + 1).some(cue => switchProduct.test(cue.text))
+          && ![...unassigned, ...result.ranges.filter(other => other !== next)].some(other => other.kind !== 'lecture' && !chatTransition(other) && other.firstCue <= Math.max(old.lastCue, next.firstCue) && other.lastCue >= Math.min(old.lastCue, next.firstCue))
+          && !result.ranges.some(other => other !== next && other.kind === 'lecture' && other.key !== next.key && other.firstCue <= window.coreFirst && other.lastCue >= window.coreFirst)));
+      const boundaryPrevious = boundary && products.find(product => product.id === boundary.productId);
+      if (boundaryPrevious) previous = boundaryPrevious;
+      const productNames = product => [product.name, ...(product.aliases ?? []).map(alias => alias.name)].map(norm);
       const sameName = previous && norm(previous.name) === norm(item.name) && norm(previous.variant) === norm(item.variant);
       const explicit = previous && item.matchKey && text(item.matchReason) && Array.isArray(item.matchEvidence) && item.matchEvidence.length;
       if (explicit) evidenceFor(item.matchEvidence, window);
       // The model can keep the same sale across a transport window even when its
       // formal product name is unknown. This is not evidence for merging a later return.
-      const continuation = previous && item.key === previous.key && norm(previous.variant) === norm(item.variant)
+      const adjacentLecture = previous && item.key === previous.key
         && ranges.some(old => old.productId === previous.id && old.scopeStatus === 'confirmed' && old.windowIndices.at(-1) === w - 1
           && continuous(old.lastCue, windows[w - 1].coreLast + 1)
           && result.ranges.some(next => next.key === item.key && next.kind === 'lecture' && next.scopeStatus === 'confirmed'
             && continuous(old.lastCue, next.firstCue) && next.lastCue >= window.coreFirst
+            && !switchProduct.test(`${cues[old.lastCue].text} ${cues[next.firstCue].text}`)
             && ![...unassigned, ...result.ranges.filter(other => other !== next)].some(other => other.firstCue > old.lastCue && other.firstCue < next.firstCue)));
-      const merge = continuation || (previous && !item.nameUncertain && !previous.nameUncertain && !item.identityUncertain && !previous.identityUncertain && norm(previous.variant) === norm(item.variant) && (sameName || explicit));
+      // Compare the same measurement, not an unlabelled bag of numbers: an
+      // outfit's length does not contradict its fill weight. Approximate spoken
+      // quantities retain their stated precision (150多克 includes 153克).
+      const measurements = value => {
+        const found = new Map();
+        for (const [key, pattern] of [
+          ['fill', /充绒(?:量)?\s*(\d+(?:\.\d+)?)(多)?\s*(?:克|g)/giu],
+          ['loft', /蓬松度\s*(\d+(?:\.\d+)?)(多)?/gu],
+          ['length', /衣长\s*(\d+(?:\.\d+)?)(多)?\s*(?:公分|厘米|cm)/giu],
+          ['down', /绒子含量\s*(\d+(?:\.\d+)?)(多)?\s*%/gu],
+          ['down', /(\d+(?:\.\d+)?)(多)?\s*%\s*绒子/gu],
+        ]) for (const match of value.matchAll(pattern)) {
+          const amount = Number(match[1]);
+          found.set(key, [amount, amount + (match[2] ? (amount % 100 === 0 ? 99 : 9) : 0)]);
+        }
+        return found;
+      };
+      const oldMeasures = measurements(previous?.variant ?? ''), newMeasures = measurements(item.variant);
+      const compatibleVariant = previous && !/另一(?:款|个|套)|不同规格|另一个规格/u.test(`${previous.variant} ${item.variant}`)
+        && ![...oldMeasures].some(([key, [min, max]]) => newMeasures.has(key)
+          && (newMeasures.get(key)[0] > max || newMeasures.get(key)[1] < min));
+      const continuation = adjacentLecture && (norm(previous.variant) === norm(item.variant) || norm(previous.name) === norm(item.name) && compatibleVariant);
+      const chatContinuation = previous && compatibleVariant && item.key === previous.key && (norm(previous.name) === norm(item.name) || aliases.some(alias => norm(alias.name) === norm(previous.name)))
+        && ranges.some(old => old.productId === previous.id && old.scopeStatus === 'confirmed' && old.windowIndices.at(-1) === w - 1
+          && result.ranges.some(next => next.key === item.key && next.kind === 'lecture' && next.scopeStatus === 'confirmed' && next.lastCue >= window.coreFirst && chatGap(old.lastCue, next.firstCue)
+            && !ranges.some(other => other.productId !== old.productId && other.firstCue < next.firstCue && other.lastCue > old.lastCue)
+            && !result.ranges.some(other => other !== next && other.kind === 'lecture' && other.key !== item.key && other.firstCue < next.firstCue && other.lastCue > old.lastCue)
+            && !switchProduct.test(`${cues[old.lastCue].text} ${cues[next.firstCue].text}`)
+            && ![...unassigned, ...result.ranges].some(other => other.kind !== 'lecture' && !chatTransition(other) && other.firstCue < next.firstCue && other.lastCue > old.lastCue)));
+      const ambiguousBoundary = adjacentLecture && !continuation && norm(previous.name) === norm(item.name) && norm(previous.variant) !== norm(item.variant);
+      if (ambiguousBoundary) {
+        const warning = '相邻窗口可能是同一次商品讲解，但规格描述不同；请核对后连接，已有分析将按原范围保留';
+        if (!previous.review.includes(warning)) previous.review.push(warning);
+        issues.push(warning);
+      }
+      const overlapContinuation = previous && compatibleVariant && (productNames(previous).includes(norm(item.name)) || baseKey !== item.key && baseKey === previous.key)
+        && ranges.some(old => old.productId === previous.id && old.scopeStatus === 'confirmed' && old.windowIndices.at(-1) === w - 1
+          && result.ranges.some(next => next.key === item.key && next.kind === 'lecture' && next.scopeStatus === 'confirmed'
+            && next.firstCue <= old.lastCue && next.lastCue >= old.lastCue
+            && !cues.slice(next.firstCue, old.lastCue + 1).some(cue => switchProduct.test(cue.text))
+            && !ranges.some(other => other.productId !== old.productId && other.firstCue <= old.lastCue && other.lastCue >= next.firstCue)
+            && !result.ranges.some(other => other !== next && other.kind === 'lecture' && other.key !== item.key && other.firstCue <= old.lastCue && other.lastCue >= next.firstCue)
+            && !result.ranges.some(other => other.kind === 'mixed' && other.firstCue <= old.lastCue && other.lastCue >= next.firstCue)
+            && !unassigned.some(other => other.kind === 'mixed' && other.firstCue <= old.lastCue && other.lastCue >= next.firstCue)));
+      const merge = boundaryPrevious || continuation || chatContinuation || overlapContinuation || (previous && !item.nameUncertain && !previous.nameUncertain && !item.identityUncertain && !previous.identityUncertain && norm(previous.variant) === norm(item.variant) && (sameName || explicit));
       if (merge) {
+        if (boundaryPrevious && (norm(previous.name) !== norm(item.name) || norm(previous.variant) !== norm(item.variant))) {
+          previous.identityUncertain = true;
+          const warning = '跨批次连续讲解未发现实际换品信号，保留同一讲解；名称或规格差异待核对';
+          if (!previous.review.includes(warning)) previous.review.push(warning);
+        }
+        if ((boundaryPrevious || chatContinuation || continuation || overlapContinuation) && norm(previous.variant) !== norm(item.variant)) {
+          previous.variantObservations ??= [];
+          previous.variantObservations.push({ variant: item.variant, evidence });
+          const warning = '同一讲解中的规格描述有差异，原话已保留，请核对具体规格';
+          if (!previous.review.includes(warning)) previous.review.push(warning);
+        }
         if (norm(previous.name) !== norm(item.name)) aliases.push({ name: item.name, evidence, reason: item.matchReason });
         previous.aliases.push(...aliases.filter(alias => !previous.aliases.some(old => norm(old.name) === norm(alias.name))));
         previous.evidence.push(...evidence);
@@ -95,7 +190,7 @@ export function combineDiscoveryWindows({ sourceId, runId, durationMs, cues, win
         known.set(item.key, previous);
       } else {
         const collision = Boolean(previous);
-        previous = { id: id('product', [sourceId, item.key, collision ? w : '', item.name, item.variant]), key: collision ? `${item.key}@${w}` : item.key, name: item.name, variant: item.variant, sourceIds: [sourceId], aliases, evidence, mergeEvidence: [], identityUncertain: Boolean(item.identityUncertain || collision), ...(item.nameUncertain !== undefined ? { nameUncertain: item.nameUncertain } : {}), review: ['仅依据转写，画面待核实', ...(item.identityUncertain || collision ? ['商品身份或规格待确认，未自动归并'] : [])], origin: 'ai-discovery', discoveryRunId: runId };
+        previous = { id: id('product', [sourceId, item.key, collision ? w : '', item.name, item.variant]), key: collision ? `${item.key}@${w}` : item.key, name: item.name, variant: item.variant, sourceIds: [sourceId], aliases, evidence, mergeEvidence: [], identityUncertain: Boolean(item.identityUncertain || collision), ...(item.nameUncertain !== undefined ? { nameUncertain: item.nameUncertain } : {}), review: ['仅依据转写，画面待核实', ...(item.identityUncertain || collision ? ['商品身份或规格待确认，未自动归并'] : []), ...(ambiguousBoundary ? ['相邻窗口可能是同一次商品讲解，但规格描述不同；请核对后连接，已有分析将按原范围保留'] : [])], origin: 'ai-discovery', discoveryRunId: runId };
         products.push(previous);
         known.set(previous.key, previous);
       }
@@ -118,19 +213,83 @@ export function combineDiscoveryWindows({ sourceId, runId, durationMs, cues, win
     }
     issues.push(...result.issues);
   }
-  // Conflicting window evidence becomes reviewable, rather than choosing a product silently.
-  const conflicts = new Set();
-  for (let a = 0; a < ranges.length; a++) for (let b = a + 1; b < ranges.length; b++) if (ranges[a].productId !== ranges[b].productId && ranges[a].firstCue <= ranges[b].lastCue && ranges[b].firstCue <= ranges[a].lastCue) { conflicts.add(a); conflicts.add(b); }
-  ranges.forEach((range, index) => { if (unassigned.some(item => item.firstCue <= range.lastCue && range.firstCue <= item.lastCue)) conflicts.add(index); });
-  const accepted = ranges.filter((range, index) => {
-    if (!conflicts.has(index)) return true;
-    const { productId: ignored, ...base } = range;
-    unassigned.push({ ...base, kind: 'mixed', reason: '跨窗口商品归属冲突，需人工核对' });
-    return false;
+  // A disputed context cue must not discard minutes of otherwise confirmed speech.
+  // Keep only the disputed overlap unassigned; old, unconfirmed ranges still need review in full.
+  const conflicts = new Map();
+  const conflict = (index, other) => {
+    const range = ranges[index];
+    if (range.firstCue > other.lastCue || other.firstCue > range.lastCue) return;
+    const spans = conflicts.get(index) ?? [];
+    spans.push([Math.max(range.firstCue, other.firstCue), Math.min(range.lastCue, other.lastCue)]);
+    conflicts.set(index, spans);
+  };
+  for (let a = 0; a < ranges.length; a++) for (let b = a + 1; b < ranges.length; b++) if (ranges[a].productId !== ranges[b].productId) { conflict(a, ranges[b]); conflict(b, ranges[a]); }
+  ranges.forEach((range, index) => unassigned.forEach(item => conflict(index, item)));
+  const fragment = (range, firstCue, lastCue) => ({ ...range, firstCue, lastCue, startMs: cues[firstCue].startMs,
+    endMs: Math.max(...cues.slice(firstCue, lastCue + 1).map(cue => cue.endMs)),
+    evidence: range.evidence.filter(item => item.cue >= firstCue && item.cue <= lastCue) });
+  const accepted = ranges.flatMap((range, index) => {
+    if (!conflicts.has(index)) return [range];
+    const spans = range.scopeStatus === 'confirmed' ? conflicts.get(index).sort((a, b) => a[0] - b[0]) : [[range.firstCue, range.lastCue]];
+    const cuts = [];
+    for (const span of spans) {
+      const previous = cuts.at(-1);
+      if (previous && span[0] <= previous[1] + 1) previous[1] = Math.max(previous[1], span[1]);
+      else cuts.push([...span]);
+    }
+    const kept = [];
+    const keep = (first, last) => {
+      const part = fragment(range, first, last);
+      part.review = [...part.review, '相邻边界有归属冲突，本段保留原模型已确认的非冲突内容'];
+      if (!part.evidence.length) {
+        part.scopeStatus = 'uncertain';
+        part.evidence = [{ cue: first, text: cues[first].text, startMs: cues[first].startMs, endMs: cues[first].endMs }];
+      }
+      kept.push(part);
+    };
+    let first = range.firstCue;
+    for (const [start, end] of cuts) {
+      if (start > first) keep(first, start - 1);
+      const { productId: ignored, ...base } = fragment(range, start, end);
+      unassigned.push({ ...base, kind: 'mixed', scopeStatus: 'uncertain', reason: '跨窗口商品归属冲突，需人工核对' });
+      first = end + 1;
+    }
+    if (first <= range.lastCue) keep(first, range.lastCue);
+    return kept;
   }).sort((a, b) => a.firstCue - b.firstCue || a.lastCue - b.lastCue);
+  // A model may switch product keys or use a shorter name at a window edge.
+  // Flag likely continuity for review; names alone cannot prove matching SKUs.
+  const sharedName = (left, right) => {
+    const a = norm(left).replace(/\s+/g, ''), b = norm(right).replace(/\s+/g, '');
+    for (let n = 0; n <= a.length - 3; n++) if (b.includes(a.slice(n, n + 3))) return true;
+    return false;
+  };
+  for (let index = 1; index < accepted.length; index++) {
+    const old = accepted[index - 1], next = accepted[index];
+    if (old.productId === next.productId || old.scopeStatus !== 'confirmed' || next.scopeStatus !== 'confirmed' || old.windowIndices.at(-1) + 1 !== next.windowIndices[0] || !continuous(old.lastCue, next.firstCue)) continue;
+    const first = products.find(product => product.id === old.productId), second = products.find(product => product.id === next.productId);
+    if (!first || !second || !sharedName(first.name, second.name)) continue;
+    const warning = '相邻窗口可能是同一次商品讲解，但名称或规格不同；请核对后连接，已有分析将按原范围保留';
+    for (const product of [first, second]) if (!product.review.includes(warning)) product.review.push(warning);
+    issues.push(warning);
+  }
   const merged = [];
   for (const range of accepted) {
-    const prev = merged.findLast(old => old.productId === range.productId && (range.firstCue <= old.lastCue || continuous(old.lastCue, range.firstCue) && old.windowIndices.at(-1) + 1 === range.windowIndices[0] && old.scopeStatus === 'confirmed' && range.scopeStatus === 'confirmed') && !unassigned.some(u => u.firstCue <= range.firstCue && u.lastCue >= old.lastCue));
+    const prev = merged.findLast(old => {
+      if (old.productId !== range.productId) return false;
+      if (cues.slice(Math.min(old.lastCue, range.firstCue), Math.max(old.lastCue, range.firstCue) + 1).some(cue => switchProduct.test(cue.text))) return false;
+      const adjacent = old.windowIndices.at(-1) + 1 === range.windowIndices[0] && old.scopeStatus === 'confirmed' && range.scopeStatus === 'confirmed'
+        && !switchProduct.test(`${cues[old.lastCue].text} ${cues[range.firstCue].text}`);
+      const sameWindow = old.windowIndices.at(-1) === range.windowIndices[0]
+        && old.scopeStatus !== 'uncertain' && range.scopeStatus !== 'uncertain'
+        && continuous(old.lastCue, range.firstCue)
+        && !switchProduct.test(`${cues[old.lastCue].text} ${cues[range.firstCue].text}`)
+        && !accepted.some(other => other.productId !== old.productId && other.firstCue < range.firstCue && other.lastCue > old.lastCue);
+      const throughChat = (adjacent || old.windowIndices.at(-1) === range.windowIndices[0] && old.scopeStatus === 'confirmed' && range.scopeStatus === 'confirmed') && chatGap(old.lastCue, range.firstCue)
+        && !accepted.some(other => other.productId !== old.productId && other.firstCue < range.firstCue && other.lastCue > old.lastCue)
+        && !unassigned.some(other => !chatTransition(other) && other.firstCue < range.firstCue && other.lastCue > old.lastCue);
+      return throughChat || (range.firstCue <= old.lastCue || sameWindow || adjacent && continuous(old.lastCue, range.firstCue)) && !unassigned.some(u => u.firstCue <= range.firstCue && u.lastCue >= old.lastCue);
+    });
     if (prev) { prev.lastCue = Math.max(prev.lastCue, range.lastCue); prev.endMs = Math.max(prev.endMs, range.endMs); prev.windowIndices = [...new Set([...prev.windowIndices, ...range.windowIndices])]; prev.evidence.push(...range.evidence); if (prev.scopeStatus === 'uncertain' || range.scopeStatus === 'uncertain') prev.scopeStatus = 'uncertain'; else if (prev.scopeStatus !== range.scopeStatus) delete prev.scopeStatus; }
     else merged.push({ ...range });
   }

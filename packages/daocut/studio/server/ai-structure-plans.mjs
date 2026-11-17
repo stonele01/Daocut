@@ -19,6 +19,8 @@ const read = async file => { try { return JSON.parse(await readFile(file, 'utf8'
 const save = async (root, key, data) => { await mkdir(directory(root), { recursive: true }); await writeAtomic(join(directory(root), `${key}.json`), JSON.stringify(data)); };
 const publicModel = m => m ? { model: typeof m === 'string' ? m : m.model, provider: m.provider, endpoint: m.endpoint } : null;
 const errorIssue = message => ({ code: 'AI_STRUCTURE_FAILED', message });
+const failureMessage = error => error?.code === 'MODEL_HTTP' && Number.isInteger(error.httpStatus) && error.httpStatus >= 400 && error.httpStatus <= 599
+  ? `${error.message} ${error.httpStatus}` : error.message;
 const OPENING_BATCH_SIZE = 8;
 const OPENING_BATCH_ATTEMPTS = 2;
 const isCurated = m => [AI_STRUCTURE_CURATED_VERSION, AI_STRUCTURE_REQUIRED_VERSION, AI_STRUCTURE_PRICED_VERSION].includes(m.version);
@@ -73,7 +75,7 @@ export function createAiStructurePlans({ readInput = createStructurePlanInputRea
     }
     for (const item of versions) if (item.saved?.seed) item.seed = item.saved.seed;
     const keyed = request.taskKey === undefined ? null : versions.find(item => item.key === request.taskKey);
-    if (request.taskKey !== undefined && (!keyed || request.rulesVersion !== undefined && request.rulesVersion !== keyed.version)) throw new HttpError(409, '方案标识不属于当前讲解和规则版本，请重新读取；未使用其他输入的结果');
+    if (request.taskKey !== undefined && (!keyed || request.rulesVersion !== undefined && request.rulesVersion !== keyed.version)) throw new HttpError(409, '方案标识不属于当前讲解和规则版本，请重新读取；未使用其他输入的结果', { code: 'STRUCTURE_SELECTION_CHANGED' });
     const explicit = keyed ?? versions.find(item => item.version === request.rulesVersion);
     // A colleague may have only a published v5 result, including its v4 seed.
     // Its first request cannot be reconstructed until the saved seed is read.
@@ -116,7 +118,7 @@ export function createAiStructurePlans({ readInput = createStructurePlanInputRea
     if (input.visibility === 'shared') for (const legacy of prior) {
       if (legacy.saved || legacy.blocked) continue;
       try {
-        legacy.prepared = await nextRound(legacy);
+        legacy.prepared = await nextRound(legacy, { lookupOnly: true });
         if (legacy.prepared.descriptor?.mode !== 'publish') {
           legacy.publicExists = true;
           if (explicit !== current) return attach(legacy);
@@ -137,8 +139,23 @@ export function createAiStructurePlans({ readInput = createStructurePlanInputRea
   }
   const allPlans = saved => (saved?.rounds ?? []).flatMap(r => r.result?.plans ?? []);
   const previous = saved => (saved?.rounds ?? []).flatMap(r => r.result?.sequences ?? []);
-  const plansFor = m => [...(isVariants(m) ? m.seed?.plans ?? [] : []), ...allPlans(m.saved)];
-  const previousFor = m => [...(isVariants(m) ? m.seed?.sequences ?? [] : []), ...previous(m.saved)];
+  // Recheck completed replies only when the old validator rejected condition
+  // metadata. This is read-only: the paid receipt and published result remain
+  // unchanged, and no model request is made.
+  function effectiveResult(m, round) {
+    const original = round?.result;
+    if (m.version !== AI_STRUCTURE_PRICED_VERSION || round?.status !== 'complete' || !round.request || !round.response || !round.receipt || !original?.issues?.some(item => item.code === 'AI_ORDER_CONDITIONS')) return original;
+    try {
+      const response = recoverDeepSeekTextResponse(round.receipt, round.request);
+      if (response === undefined || sharedHash(response) !== sharedHash(round.response)) return original;
+      const checked = validateRound(m, response, round.request);
+      const ids = new Set(checked.plans.map(plan => plan.id));
+      if ((original.plans ?? []).some(plan => !ids.has(plan.id))) return original;
+      return checked;
+    } catch { return original; }
+  }
+  const plansFor = m => [...(isVariants(m) ? m.seed?.plans ?? [] : []), ...(m.saved?.rounds ?? []).flatMap(round => effectiveResult(m, round)?.plans ?? [])];
+  const previousFor = m => [...(isVariants(m) ? m.seed?.sequences ?? [] : []), ...(m.saved?.rounds ?? []).flatMap(round => effectiveResult(m, round)?.sequences ?? [])];
   function variantCoverage(m, nextPass = false) {
     const coverage = m.version === AI_STRUCTURE_PRICED_VERSION ? getAiPricedCoverage(m.input, previousFor(m))
       : m.version === AI_STRUCTURE_REQUIRED_VERSION ? getAiRequiredCoverage(m.input, previousFor(m))
@@ -196,6 +213,7 @@ export function createAiStructurePlans({ readInput = createStructurePlanInputRea
   const roundIdentity = (m, request, passNumber, correction = false) => ({ kind: m.version, key: m.key, requestHash: sharedHash(request),
     ...(isVariants(m) ? { passNumber, correction } : {}) });
   const publicRound = (version, round, seed, key) => ({ schema: version, requestHash: sharedHash(round.request), response: round.response,
+    ...(round.retryFeedback ? { retryFeedback: round.retryFeedback } : {}),
     ...(version === AI_STRUCTURE_VARIANTS_VERSION && seed ? { compositionKey: key, seed } : {}),
     ...(round.receipt?.usage?.output_tokens > 0 ? { budgetSample: {
       model: { ...publicModel(round.model), reasoningEffort: round.model?.reasoningEffort },
@@ -207,17 +225,22 @@ export function createAiStructurePlans({ readInput = createStructurePlanInputRea
     const budget = isVariants(m) ? variantBudget(m, coverage, await identity(m)) : undefined;
     const openingIds = options?.openingIds ?? (isVariants(m) ? budget.batches[0]?.openingIds : coverage?.remainingIds.slice(0, OPENING_BATCH_SIZE));
     const feedback = options?.feedback ?? (m.version === AI_STRUCTURE_ORDER_VERSION ? m.saved?.rounds.at(-1)?.result?.issues ?? [] : []);
-    const request = createAiStructureRequest(m.input, { previous: previousFor(m), version: m.version, openingIds, feedback });
+    let request, lookupOnly = false;
+    try { request = createAiStructureRequest(m.input, { previous: previousFor(m), version: m.version, openingIds, feedback }); }
+    catch (error) {
+      if (options?.lookupOnly !== true || error.code !== 'AI_STRUCTURE_INPUT_TOO_LARGE' || !error.lookupRequest) throw error;
+      request = error.lookupRequest; lookupOnly = true;
+    }
     const passNumber = isVariants(m) ? options?.passNumber ?? (m.saved?.pass ? (m.saved.pass.number ?? 1) + (finished(m) ? 1 : 0) : 1) : undefined;
     const correction = isVariants(m) && options?.correction === true;
     let descriptor;
     if (m.input.visibility === 'shared') {
       if (!sharedAnalysis) throw new HttpError(409, '共享协调服务未接通，未发起本机付费请求');
-      await sharedAnalysis.validateSource(m.root, m.input.source, m.input.baselineDescriptor);
+      for (const descriptor of m.input.baselineDescriptors ?? [m.input.baselineDescriptor]) await sharedAnalysis.validateSource(m.root, m.input.source, descriptor);
       descriptor = await sharedAnalysis.prepareExisting(m.root, m.input.source, { action: 'structure-plans', scope: { startMs: m.input.scope.startMs, endMs: m.input.scope.endMs }, count: 0,
-        provenance: { kind: 'structure-plans-v1', inputRevision: m.input.analysisVersion }, payload: roundIdentity(m, request, passNumber, correction) });
+        provenance: { kind: 'structure-plans-v1', inputRevision: m.input.analysisVersion }, payload: roundIdentity(m, request, passNumber, correction) }, { allowRetry: options?.retry === true });
     }
-    return { request, descriptor, ...(isVariants(m) ? { passNumber, correction } : {}) };
+    return { request, descriptor, ...(lookupOnly ? { lookupOnly: true } : {}), ...(isVariants(m) ? { passNumber, correction } : {}) };
   }
   function view(m, status, extra = {}) {
     const rounds = m.saved?.rounds ?? [], last = rounds.at(-1);
@@ -235,11 +258,12 @@ export function createAiStructurePlans({ readInput = createStructurePlanInputRea
         return { ...item, ...(candidate ? { startMs: candidate.startMs, endMs: candidate.endMs, text: candidate.text } : {}) };
       }), m.input) } : coverage;
     return { status, taskKey: m.key, version: m.version, currentRulesVersion: AI_STRUCTURE_VERSION, savedVersions, ...(m.blockedBy ? { blockedBy: m.blockedBy } : {}), generationMethod: 'ai', plans: localize(plans, m.input), complete: status === 'complete' && (!coverage || coverage.remainingIds.length === 0), allValidCombinationsEnumerated: false,
-      ...(coverage ? { coverage: displayCoverage, usablePlanIds: [...new Set([...(m.seed?.plans ?? []).map(plan => plan.id), ...rounds.filter(round => round.status === 'complete').flatMap(round => (round.result?.plans ?? []).map(plan => plan.id))])] } : {}),
+      ...(coverage ? { coverage: displayCoverage, usablePlanIds: [...new Set([...(m.seed?.plans ?? []).map(plan => plan.id), ...rounds.filter(round => round.status === 'complete').flatMap(round => (effectiveResult(m, round)?.plans ?? []).map(plan => plan.id))])] } : {}),
       materialComplete: m.inspected?.materialComplete === true, context: { ...m.input.context, visibility: m.input.visibility },
-      issues: [...m.issues, ...rounds.flatMap(r => r.result?.issues ?? []), ...(last?.error ? [errorIssue(last.error)] : []), ...(m.saved?.operationError ? [errorIssue(m.saved.operationError)] : [])],
+      issues: [...m.issues, ...rounds.flatMap(r => effectiveResult(m, r)?.issues ?? []), ...(last?.error ? [errorIssue(last.error)] : []), ...(m.saved?.operationError ? [errorIssue(m.saved.operationError)] : [])],
       canContinue: status === 'complete' && (m.version === AI_STRUCTURE_PRICED_VERSION ? coverage?.perOpening.some(item => item.distinctCount < MAX_OPENING_VARIANTS) : isVariants(m) ? (coverage?.total ?? 0) > 0 : coverage ? coverage.remainingIds.length > 0 : last?.result?.modelComplete === false),
       recoverable: status === 'failed' && !!(last?.response || last?.receipt?.status === 'completed'),
+      retryable: status === 'failed' && !m.blocked && isVariants(m) && last?.status === 'failed' && !!last?.request,
       requestCount: rounds.filter(r => r.submitted).length, mediaReview: m.input.mediaReview, mediaReviewOrigin: m.input.mediaReviewOrigin,
       visualReview: m.input.visualReview, visualReviewOrigin: m.input.visualReviewOrigin, visualReviewStale: m.input.visualReviewStale, ...extra };
   }
@@ -267,7 +291,7 @@ export function createAiStructurePlans({ readInput = createStructurePlanInputRea
   }
   async function importPublishedVariants(m) {
     if (!isVariants(m) || m.input.visibility !== 'shared' || !sharedAnalysis?.history || !sharedAnalysis?.historicalArtifact) return false;
-    await sharedAnalysis.validateSource(m.root, m.input.source, m.input.baselineDescriptor);
+    for (const descriptor of m.input.baselineDescriptors ?? [m.input.baselineDescriptor]) await sharedAnalysis.validateSource(m.root, m.input.source, descriptor);
     const known = new Set((m.saved?.rounds ?? []).map(round => round.descriptor?.taskKey));
     const catalog = await sharedAnalysis.history(m.root, m.input.source);
     const available = [];
@@ -321,6 +345,17 @@ export function createAiStructurePlans({ readInput = createStructurePlanInputRea
       const remaining = requestCoverage(m).remainingIds;
       const passNumber = m.saved?.pass ? m.saved.pass.number + (finished(m) ? 1 : 0) : 1;
       for (let size = 1; size <= remaining.length; size++) if (!add(remaining.slice(0, size), passNumber)) break;
+      // Corrective retries retain the approved prompt and material. Replay the
+      // published feedback only when the rebuilt request and artifact hashes match.
+      const baseChoices = [...choices];
+      for (const selected of available) {
+        const feedback = selected.snapshot.payload.retryFeedback;
+        if (!Array.isArray(feedback)) continue;
+        for (const choice of baseChoices) {
+          const body = JSON.parse(choice.request.input);
+          add(body.openingIds, choice.passNumber, choice.correction, feedback, body.previous, choice.insertAfter);
+        }
+      }
       let match;
       for (const choice of choices) {
         const index = available.findIndex(item => item.snapshot.dataHash === choice.dataHash
@@ -341,6 +376,7 @@ export function createAiStructurePlans({ readInput = createStructurePlanInputRea
     catch (error) { return view(m, fallback, { issues: [...m.issues, errorIssue(`已有公共方案无法读取或补存：${error.message}；原记录保留，未重新请求模型`)] }); }
   }
   async function confirmation(m, prepared, model = undefined) {
+    if (prepared.lookupOnly) return { enabled: false, rulesVersion: m.version, message: '旧版请求超出发送预算，仅可查询或恢复已有结果，不会重新发送' };
     model ??= await identity(m);
     if (!model || typeof modelClient !== 'function') return { enabled: false, rulesVersion: m.version, message: '请先配置拼结构使用的文字模型；已有分析和草稿保留' };
     const coverage = isVariants(m) ? requestCoverage(m) : orderCoverage(m);
@@ -410,7 +446,7 @@ export function createAiStructurePlans({ readInput = createStructurePlanInputRea
         await finish(m, round, response);
       } catch (e) {
         if (round.status !== 'publish-pending') {
-          round.status = 'failed'; round.error = `AI 拼结构未完成：${e.message}；已有分析和原返回保留，不会自动重发`;
+          round.status = 'failed'; round.error = `AI 拼结构未完成：${failureMessage(e)}；已有分析和原返回保留，不会自动重发`;
           if (round.descriptor) await sharedAnalysis?.fail?.(round.descriptor, round.attemptId).catch(() => {});
         } else round.error = `公共保存未完成：${e.message}；本机 AI 返回已保留，请补存`;
         await persist(root, m.key, m.saved);
@@ -461,7 +497,7 @@ export function createAiStructurePlans({ readInput = createStructurePlanInputRea
             round.status = 'failed';
             if (round.descriptor) await sharedAnalysis?.fail?.(round.descriptor, round.attemptId).catch(() => {});
           }
-          round.error = `本批未完成：${error.message}；已有方案和返回保留，不自动重发`;
+          round.error = `本批未完成：${failureMessage(error)}；已有方案和返回保留，不自动重发`;
           await persist(root, m.key, m.saved);
           return;
         }
@@ -528,7 +564,7 @@ export function createAiStructurePlans({ readInput = createStructurePlanInputRea
               round.status = 'failed';
               if (round.descriptor) await sharedAnalysis?.fail?.(round.descriptor, round.attemptId).catch(() => {});
             }
-            round.error = `本批未完成：${error.message}；已有方案和返回保留，不自动重发`;
+            round.error = `本批未完成：${failureMessage(error)}；已有方案和返回保留，不自动重发`;
             await persist(root, m.key, m.saved); return;
           }
         }
@@ -547,6 +583,67 @@ export function createAiStructurePlans({ readInput = createStructurePlanInputRea
     if (starting) return starting.selector === selector ? starting.pending : starting.pending.then(() => generate(root, request), () => generate(root, request));
     const pending = generateOne(root, request).finally(() => starts.delete(key)); starts.set(key, { selector, pending }); return pending;
   }
+  // An explicit retry sends one batch, with precise validation feedback when
+  // available. Original requests and receipts stay immutable in their rounds.
+  async function retryOne(root, request) {
+    const m = await material(root, request), key = lockKey(root, request), last = m.saved?.rounds.at(-1);
+    if (jobs.has(key)) return view(m, 'running');
+    if (m.blocked || !isVariants(m) || !last || last.status !== 'failed' || request.taskKey !== m.key) throw new HttpError(409, '没有可重试的失败批次，请刷新当前方案');
+    const body = JSON.parse(last.request.input);
+    const options = { openingIds: body.openingIds, passNumber: last.passNumber, correction: last.correction === true, feedback: body.feedback ?? [], retry: true };
+    let prepared = await nextRound(m, options);
+    if (sharedHash(prepared.request) !== sharedHash(last.request)) throw new HttpError(409, '失败批次的输入已变化，未重新发送');
+    const existing = last.response ?? recoverDeepSeekTextResponse(last.receipt, last.request);
+    let valid = false, retryFeedback;
+    if (existing !== undefined) {
+      try { validateRound(m, existing, last.request); valid = true; }
+      catch (error) {
+        if (error.retryFeedback) {
+          retryFeedback = [...options.feedback.filter(item => item?.code !== error.retryFeedback.code), error.retryFeedback];
+          prepared = await nextRound(m, { ...options, feedback: retryFeedback });
+        }
+      }
+    }
+    if (prepared.descriptor?.mode === 'reuse') return reuse(m, prepared);
+    if (prepared.descriptor && !['publish', 'retry-required'].includes(prepared.descriptor.mode)) return view(m, 'busy');
+    const model = await identity(m);
+    const plan = { enabled: !!model && typeof modelClient === 'function', retry: true, taskKey: m.key, rulesVersion: m.version,
+      id: sharedHash({ key: m.key, failedRound: last, request: prepared.request, roundCount: m.saved.rounds.length, model, attemptId: prepared.descriptor?.attemptId }),
+      service: publicModel(model), requestCount: 1, openingCount: body.openingIds.length, existingPlanCount: plansFor(m).length };
+    if (request.confirmed !== true) return view(m, 'failed', { confirmation: plan });
+    if (!plan.enabled || request.confirmationId !== plan.id) throw new HttpError(409, '重试确认已失效，请重新核对失败批次，未发送');
+    // A locally saved valid reply must be recovered without another paid call.
+    if (valid) return recover(root, request);
+    const claim = prepared.descriptor ? await sharedAnalysis.acquire(prepared.descriptor, { retryAcknowledged: true }) : undefined;
+    const round = { status: 'running', request: prepared.request, descriptor: prepared.descriptor, attemptId: claim?.attemptId,
+      model, submitted: true, openingIds: body.openingIds, passNumber: last.passNumber, correction: last.correction === true,
+      ...(retryFeedback || last.retryFeedback ? { retryFeedback: retryFeedback ?? last.retryFeedback } : {}),
+      retryOf: { roundIndex: m.saved.rounds.length - 1, requestHash: sharedHash(last.request) } };
+    m.saved.rounds.push(round); delete m.saved.operationError; storageErrors.delete(key);
+    await persist(root, m.key, m.saved);
+    const job = Promise.resolve().then(async () => {
+      try {
+        const response = await modelClient({ ...round.request, ...purposeFor(m), expectedIdentity: model,
+          onReceipt: async receipt => { round.receipt = receipt; await persist(root, m.key, m.saved); } });
+        await finish(m, round, response);
+      } catch (error) {
+        if (round.status !== 'publish-pending') {
+          round.status = 'failed';
+          if (round.descriptor) await sharedAnalysis?.fail?.(round.descriptor, round.attemptId).catch(() => {});
+        }
+        round.error = `本批未完成：${failureMessage(error)}；已有方案和返回保留，不自动重发`;
+        await persist(root, m.key, m.saved);
+      }
+    }).catch(error => storageErrors.set(key, error.message)).finally(() => jobs.delete(key));
+    jobs.set(key, job);
+    return view(m, 'running');
+  }
+  function retry(root, request) {
+    const key = lockKey(root, request), selector = JSON.stringify(['retry', request.taskKey, request.confirmed, request.confirmationId]);
+    const starting = starts.get(key);
+    if (starting) return starting.selector === selector ? starting.pending : starting.pending.then(() => retry(root, request), () => retry(root, request));
+    const pending = retryOne(root, request).finally(() => starts.delete(key)); starts.set(key, { selector, pending }); return pending;
+  }
   async function recover(root, request) {
     const m = await material(root, request), round = m.saved?.rounds.at(-1);
     if (!round || m.blocked || jobs.has(lockKey(root, request)) || round.status === 'complete') return status(root, request);
@@ -555,7 +652,7 @@ export function createAiStructurePlans({ readInput = createStructurePlanInputRea
       if (response === undefined) return view(m, 'failed', { issues: [...m.issues, errorIssue('没有完整且匹配输入的已保存返回，请核查请求记录；不会重发模型')] });
       await finish(m, round, response);
       storageErrors.delete(lockKey(root, request));
-    } catch (e) { round.error = e.message; await persist(root, m.key, m.saved); }
+    } catch (e) { round.error = failureMessage(e); await persist(root, m.key, m.saved); }
     return view(m, round.status === 'running' ? 'failed' : round.status);
   }
   async function publish(root, request) {
@@ -566,5 +663,5 @@ export function createAiStructurePlans({ readInput = createStructurePlanInputRea
     round.status = 'complete'; delete round.error; await persist(root, saved.key, saved);
     return { status: 'complete', taskKey: saved.key, requestCount: 0 };
   }
-  return { status, generate, recover, publish, wait: async () => { await Promise.all([...starts.values()].map(item => item.pending)); await Promise.all([...jobs.values()]); } };
+  return { status, generate, retry, recover, publish, wait: async () => { await Promise.all([...starts.values()].map(item => item.pending)); await Promise.all([...jobs.values()]); } };
 }

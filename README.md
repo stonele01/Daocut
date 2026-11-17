@@ -19,7 +19,7 @@ Daocut is a local AI video editing workspace for livestream product clips. It co
 
 The editor also supports footage, images, audio, HTML scenes, subtitles and its existing export formats. A project is a folder containing `film.html` and its assets; see the [manual](packages/daocut/MANUAL.md) and [film format](packages/daocut/SPEC.md).
 
-Current version: **0.2.51**. Packaged tests and actual desktop playback, seeking, subtitle reopening and a real analysis/composition sample have been checked. Broader machine, long-video and shared-storage coverage remain release acceptance work. See the [release handoff](docs/HANDOFF-0.2.51.md) for the exact scope and [development guide](docs/DEVELOPMENT.md) for implementation paths.
+Current version: **0.2.70**, published to the configured company update feed. Shared product/analysis/plan recovery, selected-range previews and the actual updater download have been verified. Second-machine acceptance remains outstanding. See the [release handoff](docs/HANDOFF-0.2.70.md) for measurements and validation limits, and the [development guide](docs/DEVELOPMENT.md) for implementation paths.
 
 ## Use or develop
 

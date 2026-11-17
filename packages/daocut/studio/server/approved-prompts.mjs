@@ -4,6 +4,8 @@ import { readFile } from 'node:fs/promises';
 // with the user-approved review copy so judgment requirements cannot disappear.
 const read = async name => (await readFile(new URL(`./prompts/${name}`, import.meta.url), 'utf8')).replace(/\r\n/g, '\n').trim();
 export const PREVIOUS_DISCOVER_PRODUCTS_PROMPT = await read('01-discover-products-v1.txt');
+export const PREVIOUS_CHAT_DISCOVER_PRODUCTS_PROMPT = await read('01-discover-products-v2.txt');
+export const PREVIOUS_BOUNDARY_DISCOVER_PRODUCTS_PROMPT = await read('01-discover-products-v3.txt');
 export const PREVIOUS_CURATED_ANALYZE_SPEECH_PROMPT = await read('02-analyze-speech-curated-v1.txt');
 export const PREVIOUS_ATTRIBUTED_ANALYZE_SPEECH_PROMPT = await read('02-analyze-speech-curated-v2.txt');
 export const DISCOVER_PRODUCTS_PROMPT = await read('01-discover-products.txt');

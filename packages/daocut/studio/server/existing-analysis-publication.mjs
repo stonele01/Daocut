@@ -7,6 +7,7 @@ import { readProductAnalysis } from './product-analysis.mjs';
 import { productSourcePath, readProductTranscript } from './product-transcription.mjs';
 import { sharedHash } from './shared-analysis.mjs';
 import { structureTranscriptHash } from './live-analysis.mjs';
+import { restoreSharedCompositionScopes } from './shared-composition-scopes.mjs';
 import { readExistingTranscriptArtifact, readHistoricalTranscriptInput, extractOriginalTranscriptScope } from './existing-transcript-artifact.mjs';
 const hashId = id => createHash('sha256').update(id).digest('hex');
 const read = async path => { try { return JSON.parse(await readFile(path, 'utf8')); } catch (e) { if (e.code === 'ENOENT') return null; throw new HttpError(409, '已有分析文件无法完整读取，没有重新分析'); } };
@@ -81,7 +82,10 @@ export function createExistingAnalysisPublication({ sharedAnalysis: shared, live
     const restoration = await read(join(root, '.film/restore-provenance.json'));
     const provenance = await read(join(root, '.film/source-provenance.json'));
     const restoredSource = restoration?.sources?.find(s => s.sourceId === source.id);
-    const recordedSha = (restoredSource?.identitySha256 ?? restoredSource?.contentHash) ?? ((provenance?.sourceId === source.id || provenance?.assetPath === source.assetPath) ? provenance.sha256 : undefined);
+    const restoredSha = descriptor.source.identityKind
+      ? (restoredSource?.identityKind === descriptor.source.identityKind ? restoredSource.identitySha256 : undefined)
+      : restoredSource?.contentHash;
+    const recordedSha = restoredSha ?? ((provenance?.sourceId === source.id || provenance?.assetPath === source.assetPath) ? provenance.sha256 : undefined);
     const resolvedPath = await realpath(await productSourcePath(root, source.assetPath)), info = await stat(resolvedPath);
     const fingerprint = `${info.size}:${info.mtimeMs}:${info.ctimeMs}:${info.ino}`;
     const discoveryFingerprint = sharedHash({ sourceId: source.id, assetPath: source.assetPath, resolvedPath, size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs, ino: info.ino, durationMs: source.durationMs });
@@ -105,17 +109,23 @@ export function createExistingAnalysisPublication({ sharedAnalysis: shared, live
   async function catalog(root, sourceId) {
     const { source } = await sourceFor(root, sourceId); if (!shared) throw new HttpError(409, '共享协调服务未接通');
     const state = await shared.history(root, source);
-    const results = [];
+    const results = [], warnings = [];
     for (const item of state.results) {
       if (item.catalog?.action === 'structure-plans') continue;
       const row = { taskKey: item.taskKey, resultSha: item.result.sha256, ...item.catalog, requestCount: 0 };
       if (row.provenance?.kind === 'shared-workflow-v1') {
-        const { snapshot } = await shared.historicalArtifact(root, source, item.taskKey, item.result.sha256);
-        row.count = completedCount(item.catalog, snapshot.payload);
+        try {
+          const { snapshot } = await shared.historicalArtifact(root, source, item.taskKey, item.result.sha256);
+          row.count = completedCount(item.catalog, snapshot.payload);
+        } catch (error) {
+          // Keep the row for an explicit import error, and continue listing
+          // other completed results. Never reinterpret this as an empty cache.
+          warnings.push(`已有结果 ${item.taskKey.slice(0, 8)} 暂不能读取：${error.message}`);
+        }
       }
       results.push(row);
     }
-    return { results };
+    return { results, warnings };
   }
   async function selection(root, body) {
     const { source } = await sourceFor(root, body.sourceId); if (!shared) throw new HttpError(409, '共享协调服务未接通');
@@ -150,5 +160,9 @@ export function createExistingAnalysisPublication({ sharedAnalysis: shared, live
       return { imported: true, needsReview: true, runId: imported.runId, reason: '原始 AI 商品建议已保存，请在拆品建议中核对并明确采用；没有替换当前商品和人工范围', requestCount: 0 };
     }
   }
-  return { inventory, plan, publish, catalog, preview, importResult };
+  return { inventory, plan, publish, catalog, preview, importResult,
+    restoreCompositions: async (root, sourceId, expected) => {
+      const { source } = await sourceFor(root, sourceId);
+      return restoreSharedCompositionScopes(root, source, expected, shared);
+    } };
 }

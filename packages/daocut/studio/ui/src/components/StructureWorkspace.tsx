@@ -1,7 +1,7 @@
 import * as React from 'react';
 import { createPortal } from 'react-dom';
 import { ArrowUpRight, ChevronDown, ListVideo, Play, X } from 'lucide-react';
-import { api } from '@/api';
+import { api, ApiError } from '@/api';
 import { requestFeedback } from '@/lib/feedback-request';
 import { useHostPanel } from '@/lib/host';
 import { groupStructurePlansByOpening, isSavedStructurePlanUsable, needsStructureGeneration, structureRole, type StructurePlan, type StructurePlansState, type StructureScope, type StructureWorkspaceState } from '@/lib/structure-workspace';
@@ -10,7 +10,7 @@ import { structureDraftLabel, structurePlanCard } from '@/lib/structure-plan-car
 import { ProjectView } from './ProjectView';
 import { VirtualList } from './VirtualList';
 import { StructureExportBatches } from './StructureExportBatches';
-import { selectedStructurePlanIds, toggleStructurePlan, type StructureBatchExportSelection, type StructureBatchExportOptions } from '@/lib/structure-export-selection';
+import { selectedStructurePlanIds, toggleStructurePlan, StructureExportSelectionChangedError, type StructureBatchExportSelection, type StructureBatchExportOptions } from '@/lib/structure-export-selection';
 
 export interface StructureEditorBridge {
   ownerId: string; scope: StructureScope | null; rightWidth: number; preview: StructurePlan | null; previewFolder: string;
@@ -33,8 +33,8 @@ function StructureComposeConfirmation({ plan, onConfirm, onClose }: { plan: NonN
       if (event.key === 'Escape') { event.preventDefault(); onClose(); }
       if (event.key === 'Tab') { const buttons = dialog.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'); if (!buttons?.length) return; const first = buttons[0]!, last = buttons[buttons.length - 1]!; if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); } else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); } }
     }}>
-      <strong className="text-[14px]">拼结构</strong>
-      <p className="mt-3">根据当前商品的话术生成视频方案，完成后可预览和导出。</p>
+      <strong className="text-[14px]">{plan.retry ? '重试失败批次' : '拼结构'}</strong>
+      <p className="mt-3">{plan.retry ? '只重新请求这一个失败批次，已有方案保留。' : '根据当前商品的话术生成视频方案，完成后可预览和导出。'}</p>
       {plan.openingCount != null && <p className="mt-2">本次处理 {plan.openingCount} 个开头。</p>}
       <p className="mt-2 text-[var(--text-muted)]">本次最多调用模型 {plan.requestCount ?? 1} 次，可能产生费用。完成后自动保存。</p>
       {!plan.enabled && <p role="alert" className="mt-3 text-[var(--warn)]">{plan.message}</p>}
@@ -48,6 +48,7 @@ export function StructureWorkspace({ projectId, onProject, onLeave }: { projectI
   const [scope, setScope] = React.useState<StructureScope | null>(null);
   const currentScope = React.useRef(scope); currentScope.current = scope;
   const [plans, setPlans] = React.useState<StructurePlansState | null>(null);
+  const [readingPlans, setReadingPlans] = React.useState(false);
   const [rulesVersion, setRulesVersion] = React.useState<string | undefined>();
   const currentRules = React.useRef<string | undefined>(undefined);
   const [preview, setPreview] = React.useState<StructurePlan | null>(null);
@@ -117,15 +118,17 @@ export function StructureWorkspace({ projectId, onProject, onLeave }: { projectI
     setScope(previous => scopeKey(previous) === scopeKey(next) ? previous : next);
   }, []);
   const refreshPlans = async (selected: StructureScope, version = currentRules.current) => {
-    const token = ++request.current;
+    const token = ++request.current; setReadingPlans(true);
     try { const next = await api.structurePlans(projectId, selected, version); if (token === request.current && scopeKey(currentScope.current) === scopeKey(selected)) { acceptPlans(next, version); setError(''); } }
     catch (e) { if (token === request.current) setError(e instanceof Error ? e.message : String(e)); }
+    finally { if (token === request.current) setReadingPlans(false); }
   };
   React.useEffect(() => {
     const token = ++request.current; generation.current += 1; setWorking(false); setPlans(null); setPreview(null); setOpeningTypeFilter(''); setConfirmation(null); currentRules.current = undefined; setRulesVersion(undefined);
+    setReadingPlans(!!scope);
     if (!scope) return;
     const composeOnLoad = composeAfterSelection.current === scopeKey(scope); composeAfterSelection.current = '';
-    void api.structurePlans(projectId, scope).then(value => { if (request.current !== token) return; acceptPlans(value); if (composeOnLoad && value.confirmation && needsStructureGeneration(value)) setConfirmation({ scope, plan: value.confirmation }); }, e => { if (request.current === token) setError(String(e.message ?? e)); });
+    void api.structurePlans(projectId, scope).then(value => { if (request.current !== token) return; setReadingPlans(false); acceptPlans(value); if (composeOnLoad && value.confirmation && needsStructureGeneration(value)) setConfirmation({ scope, plan: value.confirmation }); }, e => { if (request.current === token) { setReadingPlans(false); setError(String(e.message ?? e)); } });
   }, [projectId, scopeKey(scope)]);
   // Once submitted, polling and reopening only read progress; they never resubmit AI work.
   React.useEffect(() => {
@@ -141,7 +144,7 @@ export function StructureWorkspace({ projectId, onProject, onLeave }: { projectI
     showPlans(); setError('');
     // A card click carries the exact lecture even if React has not yet applied its selection.
     if (scopeKey(currentScope.current) !== scopeKey(selected)) { composeAfterSelection.current = scopeKey(selected); onScope(selected); return; }
-    const token = ++generation.current; request.current += 1; setWorking(true);
+    const token = ++generation.current; request.current += 1; setWorking(true); setReadingPlans(true);
     try {
       const next = await api.structurePlans(projectId, selected);
       if (generation.current !== token) return;
@@ -150,14 +153,14 @@ export function StructureWorkspace({ projectId, onProject, onLeave }: { projectI
       acceptPlans(next);
       if (needsConfirmation) setConfirmation({ scope: selected, plan: next.confirmation! });
     } catch (e) { if (generation.current === token) setError(e instanceof Error ? e.message : String(e)); }
-    finally { if (generation.current === token) setWorking(false); }
+    finally { if (generation.current === token) { setWorking(false); setReadingPlans(false); } }
   };
   const confirmComposition = async () => {
     if (!confirmation?.plan.id || submitLock.current) return;
     submitLock.current = true;
     const selected = confirmation.scope, plan = confirmation.plan, version = plan.rulesVersion ?? currentRules.current, token = ++generation.current;
     setConfirmation(null); setWorking(true); setError('');
-    try { const next = await api.generateStructurePlans(projectId, selected, plan.id!, !!plan.continuation, version); if (generation.current === token) acceptPlans(next, version); }
+    try { const next = plan.retry && plan.taskKey ? await api.retryStructurePlans(projectId, selected, plan.taskKey, version, plan.id!) : await api.generateStructurePlans(projectId, selected, plan.id!, !!plan.continuation, version); if (generation.current === token) acceptPlans(next, version); }
     catch (e) { if (generation.current === token) { await refreshPlans(selected, version); if (generation.current === token) setError(e instanceof Error ? e.message : String(e)); } }
     finally { submitLock.current = false; if (generation.current === token) setWorking(false); }
   };
@@ -204,7 +207,23 @@ export function StructureWorkspace({ projectId, onProject, onLeave }: { projectI
       await save.current();
       await api.exportStructurePlans(projectId, selection.scope, selection.taskKey, selection.planIds, requestId, options);
       setSelectedPlans(new Set()); pendingExport.current = null;
-    } catch (e) { setError(e instanceof Error ? e.message : String(e)); throw e; }
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409 && e.body.code === 'STRUCTURE_SELECTION_CHANGED') {
+        // The server rejected this request before creating a batch. Refresh only
+        // the saved results; never replay an export or a paid generation request.
+        pendingExport.current = null;
+        try {
+          const next = await api.structurePlans(projectId, selection.scope);
+          acceptPlans(next); setSelectedPlans(new Set());
+        } catch (readError) {
+          const message = `方案版本已变化，重新读取失败：${readError instanceof Error ? readError.message : String(readError)}。本次未导出，请稍后重新打开方案。`;
+          setError(message); throw new Error(message);
+        }
+        const message = '方案保存位置或版本已更新，已重新读取已有结果；请重新勾选后导出。本次未导出，也未重新分析。';
+        setError(message); throw new StructureExportSelectionChangedError(message);
+      }
+      setError(e instanceof Error ? e.message : String(e)); throw e;
+    }
     finally { setBatchRevision(value => value + 1); switchLock.current = false; setSwitching(false); setBatchPreparing(false); }
   };
   const activeDraft = workspace?.drafts.find(item => item.projectId === active);
@@ -222,13 +241,14 @@ export function StructureWorkspace({ projectId, onProject, onLeave }: { projectI
       <div className="p-3 text-[12px]">
         {!scope ? <p>先在左侧选择一次商品讲解</p> : <>
           {plans?.status === 'unavailable' && <p role="alert" className="mt-2 text-[var(--warn)]">暂时不能拼结构：{plans.issues?.[0]?.message ?? '当前话术信息不足，请核对已有分析'}</p>}
-          <p className="font-medium">{groups.length} 个开头 · {plans?.plans.length ?? 0} 条方案</p>
+          <p className="font-medium" role="status">{readingPlans ? '正在读取已有方案…' : `${groups.length} 个开头 · ${plans?.plans.length ?? 0} 条方案`}</p>
           {plans?.coverage && <div role="status" aria-label="开头覆盖进度" className="mt-1 text-[11px] text-[var(--text-muted)] animate-in fade-in duration-150">{['ai-structure-plans-v5', 'ai-structure-plans-v6', 'ai-structure-plans-v7', 'ai-structure-plans-v8'].includes(plans.version ?? '') ? <><p>本轮已处理 {plans.coverage.total - plans.coverage.remainingIds.length}/{plans.coverage.total} 个开头</p>{!!plans.coverage.remainingIds.length && <p className="mt-1">待补充 {plans.coverage.remainingIds.length} 个开头</p>}{plans.coverage.openingCovered != null && plans.coverage.openingCovered < plans.coverage.total && <p className="mt-1">其中 {plans.coverage.total - plans.coverage.openingCovered} 个开头暂未生成可用方案</p>}</> : <><p>开头已覆盖 {plans.coverage.covered}/{plans.coverage.total}</p>{plans.coverage.remainingIds.length > 0 ? <p className="mt-1">还有 {plans.coverage.remainingIds.length} 个开头未生成有效方案</p> : plans.coverage.total > 0 && <p className="mt-1">全部可用开头已有有效方案</p>}</>}</div>}
           {needsStructureGeneration(plans) && <button className={`${button} mt-2 w-full border-transparent bg-[var(--accent)] text-[var(--accent-text,#fff)] hover:brightness-110`} disabled={working || switching} onClick={() => void compose(scope)}>{working ? '正在读取…' : plans?.status === 'idle' ? '拼结构' : '继续拼结构'}</button>}
           {plans?.status === 'busy' && <p className="mt-2">公共任务正在处理或等待恢复，未重复生成</p>}
           {plans?.status === 'running' && <p className="mt-2 text-[var(--text-muted)]">AI 正在拼结构，返回后自动保存；切换或重开只读取进度，不重复发送</p>}
           {plans?.status === 'failed' && <p role="alert" className="mt-2 text-[var(--warn)]">本次生成失败，已有方案已保留</p>}
           {plans?.status === 'failed' && plans.recoverable && <button className={`${button} mt-2`} disabled={working} onClick={async () => { const selected = scope, version = currentRules.current, token = ++generation.current; setWorking(true); try { const next = await api.recoverStructurePlans(projectId, selected, version); if (token === generation.current) acceptPlans(next, version); } catch (e) { if (token === generation.current) setError(String(e)); } finally { if (token === generation.current) setWorking(false); } }}>恢复已保存返回</button>}
+          {plans?.status === 'failed' && plans.retryable && plans.taskKey && <button className={`${button} mt-2 ml-2`} disabled={working} onClick={async () => { const selected = scope, version = currentRules.current, token = ++generation.current; setWorking(true); try { const next = await api.retryStructurePlans(projectId, selected, plans.taskKey!, version); if (token === generation.current) { acceptPlans(next, version); if (next.confirmation?.retry) setConfirmation({ scope: selected, plan: next.confirmation }); } } catch (e) { if (token === generation.current) setError(String(e)); } finally { if (token === generation.current) setWorking(false); } }}>重试失败批次</button>}
           {plans?.status === 'publish-pending' && <p className="mt-2 text-[var(--warn)]">本机结果已保留，公共保存尚未完成；补存只保存已有结果</p>}
           {plans?.status === 'publish-pending' && <button className={`${button} mt-2`} disabled={working} onClick={async () => { const selected = scope, token = ++generation.current; setWorking(true); try { await api.publishStructurePlans(projectId, selected.sourceId, plans.taskKey!); if (token === generation.current) await refreshPlans(selected); } catch (e) { if (token === generation.current) setError(String(e)); } finally { if (token === generation.current) setWorking(false); } }}>补存已有公共结果</button>}
         </>}

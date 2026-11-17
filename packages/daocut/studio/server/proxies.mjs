@@ -28,6 +28,29 @@ const LIGHT_CODECS = new Set(['h264', 'vp8', 'vp9', 'av1']);
 const LIGHT_PIXFMTS = new Set(['yuv420p', 'yuvj420p']);
 /** A key frame every half second. */
 const GOP_S = 0.5;
+const LONG_RECORDING = 600;
+/** @type {Map<string, Promise<void>>} */
+const clipJobs = new Map();
+let clipQueue = Promise.resolve();
+
+/** Only the selected frames are encoded. Callers map this local clock back to the
+ * original source using max(0, floor(from) - 1), without changing saved edits.
+ * @param {string} root @param {string} rel @param {number} from @param {number} to @param {number} height */
+export async function clipProxy(root, rel, from, to, height) {
+  if (![from, to].every(Number.isFinite) || from < 0 || to <= from || to - from > LONG_RECORDING) throw new Error('预览选段无效');
+  const facts = await probe(root, rel), file = proxyFile(root, rel, height);
+  const start = Math.max(0, Math.floor(from) - 1), end = Math.min(Number(facts.duration), Math.ceil(to) + 1);
+  if (!(end > from && to <= Number(facts.duration) + 0.1)) throw new Error('预览选段超出原片');
+  const out = file.out.replace(/\.mp4$/, `-clip-v2-${start}-${end}.mp4`);
+  if (existsSync(out)) return out;
+  if (!clipJobs.has(out)) {
+    const job = clipQueue.then(() => proxy(existsSync(file.out) ? file.out : file.abs, out, proxySize(Number(facts.width), Number(facts.height), Math.min(height, 540)), Number(facts.fps) || 30, end - start, () => {}, start));
+    clipQueue = job.catch(() => {});
+    clipJobs.set(out, job.finally(() => clipJobs.delete(out)));
+  }
+  await clipJobs.get(out);
+  return out;
+}
 
 /**
  * Whether footage is heavy to play: past 1080p (its long side over 1920 or its short over 1080), or not 8-bit H.264,
@@ -121,6 +144,9 @@ export async function ensureProxies(root, rels, height) {
     // A local, frequently keyed preview avoids repeating remote reads at every cut.
     if (!heavy(facts) && !file.referenced) continue;
     if (existsSync(out)) { states[rel] = { state: 'ready' }; continue; }
+    // A 30-second edit must not wait for hours of unused recording to be converted.
+    // Long footage is prepared by clipProxy when an actual preview asks for a range.
+    if (Number(facts.duration) > LONG_RECORDING) continue;
     /* Bad footage is not retried. A full cache drive is checked without starting an encoder,
        then retried once sufficient space has actually become available. */
     let job = jobs.get(out);
@@ -148,11 +174,11 @@ export async function ensureProxies(root, rels, height) {
 /**
  * Make one proxy, decoded and written on the graphics chip when it can, else (or when it fails) by x264.
  * @param {string} abs @param {string} out @param {{ w: number, h: number }} size @param {number} fps @param {number} seconds
- * @param {(ratio: number) => void} progress
+ * @param {(ratio: number) => void} progress @param {number} [start]
  */
-async function proxy(abs, out, size, fps, seconds, progress) {
+async function proxy(abs, out, size, fps, seconds, progress, start) {
   const chip = await hardwareEncoder('h264', await encoders());
-  await onTheChip(chip, (encoder, decoding) => make(abs, out, size, fps, seconds, progress, encoder, decoding));
+  await onTheChip(chip, (encoder, decoding) => make(abs, out, size, fps, seconds, progress, encoder, decoding, start));
 }
 
 /**
@@ -160,9 +186,9 @@ async function proxy(abs, out, size, fps, seconds, progress) {
  * which is the size asked for. `encoder`: the graphics chip's (about x264's quality at crf 23), with the source's
  * color tags, which it keeps only when told them; null for x264. `decoding`: the input options that decode on the chip.
  * @param {string} abs @param {string} out @param {{ w: number, h: number }} size @param {number} fps @param {number} seconds
- * @param {(ratio: number) => void} progress @param {string | null} encoder @param {string[]} decoding
+ * @param {(ratio: number) => void} progress @param {string | null} encoder @param {string[]} decoding @param {number} [start]
  */
-async function make(abs, out, size, fps, seconds, progress, encoder, decoding) {
+async function make(abs, out, size, fps, seconds, progress, encoder, decoding, start) {
   mkdirSync(join(out, '..'), { recursive: true });
   // A long shared recording must not exhaust the drive holding the editor's data.
   // This is a preview only: if it cannot fit, playback continues from the original.
@@ -175,9 +201,10 @@ async function make(abs, out, size, fps, seconds, progress, encoder, decoding) {
   const gop = Math.max(1, Math.round(fps * GOP_S));
   const codec = encoder
     ? ['-pix_fmt', 'nv12', ...hardwareOptions(encoder, Math.max(2e6, size.w * size.h * fps * 0.1), { gop }), ...h264ColorTags(await colorTagsOf(abs))]
-    : ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-g', String(gop), '-keyint_min', String(gop), '-pix_fmt', 'yuv420p'];
+    : ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', ...(start !== undefined ? ['-threads', '2'] : []), '-g', String(gop), '-keyint_min', String(gop), '-pix_fmt', 'yuv420p'];
   return new Promise((done, fail) => {
-    const proc = spawn('ffmpeg', ['-hide_banner', '-nostdin', '-loglevel', 'error', '-y', ...decoding, '-i', abs,
+    const proc = spawn('ffmpeg', ['-hide_banner', '-nostdin', '-loglevel', 'error', '-y', ...decoding, ...(start !== undefined ? ['-ss', String(start)] : []), '-i', abs,
+      ...(start !== undefined ? ['-t', String(seconds)] : []),
       '-map', '0:v:0', '-map', '0:a:0?', '-c:a', 'aac', '-b:a', '128k', '-sn', '-dn', '-fps_mode', 'passthrough', '-vf', `scale=${size.w}:${size.h}`, ...codec,
       '-movflags', '+faststart', '-progress', 'pipe:1', '-nostats', part], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     let err = '', lastSpaceCheck = 0, spaceLow = false;

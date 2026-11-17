@@ -210,12 +210,13 @@ const makingSound = new Map();
  * own; any other (a video, a WAV, a long recording) gets a copy of its sound in `.film/cache/audio/`, AAC in .m4a:
  * the file's own AAC as it is, any other sound encoded at 128 kb/s, stereo at most. Made once per version of the
  * file; returns the path to play, or null when there is no sound in it. Exports mix from the files themselves.
- * @param {string} root @param {string} rel
+ * @param {string} root @param {string} rel @param {number[]} [range] Selected source seconds, returned from time zero.
  */
-export async function soundOf(root, rel) {
+export async function soundOf(root, rel, range) {
+  if (range && (!range.every(Number.isFinite) || range[0] < 0 || range[1] <= range[0] || range[1] - range[0] > 600)) throw new MediaError('invalid sound range', 400);
   const { abs, key } = await source(root, rel);
-  if (COMPACT.test(rel) && (await stat(abs)).size <= COMPACT_BYTES) return abs;
-  const out = join(root, TOOL_DIR, 'cache', 'audio', `${key}.m4a`);
+  if (!range && COMPACT.test(rel) && (await stat(abs)).size <= COMPACT_BYTES) return abs;
+  const out = join(root, TOOL_DIR, 'cache', 'audio', range ? `${key}-clip-v3-${range.join('-')}.wav` : `${key}.m4a`);
   if (existsSync(out)) return out;
   let made = makingSound.get(out);
   if (!made) {
@@ -225,11 +226,12 @@ export async function soundOf(root, rel) {
       const stream = info.streams?.[0] ?? {};
       const channels = Number(stream.channels) || 2;
       /* AAC is what a browser decodes everywhere: kept as it is when it is that already (no loss, no time) */
-      const codec = stream.codec_name === 'aac' && channels <= 2 ? ['-c:a', 'copy'] : ['-c:a', 'aac', '-b:a', '128k', '-ac', String(Math.min(2, channels))];
+      const codec = range ? ['-af', 'aresample=async=1:first_pts=0,apad', '-c:a', 'pcm_s16le', '-ar', '48000', '-ac', String(Math.min(2, channels))]
+        : stream.codec_name === 'aac' && channels <= 2 ? ['-c:a', 'copy'] : ['-c:a', 'aac', '-b:a', '128k', '-ac', String(Math.min(2, channels))];
       await mkdir(join(root, TOOL_DIR, 'cache', 'audio'), { recursive: true });
       const part = `${out}.part`;
       try {
-        await tool('ffmpeg', ['-v', 'error', '-nostdin', '-y', '-i', abs, '-map', '0:a:0', '-vn', '-sn', '-dn', ...codec, '-f', 'mp4', part], SOUND_SLOTS);
+        await tool('ffmpeg', ['-v', 'error', '-nostdin', '-y', ...(range ? ['-ss', String(range[0])] : []), '-i', abs, ...(range ? ['-t', String(range[1] - range[0])] : []), '-map', '0:a:0', '-vn', '-sn', '-dn', ...codec, '-f', range ? 'wav' : 'mp4', part], SOUND_SLOTS);
         await rename(part, out);
       } catch (e) {
         await rm(part, { force: true });

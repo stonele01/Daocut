@@ -234,8 +234,9 @@ export async function importSharedProductTranscript(root, source, payload, share
 }
 
 function extractAudio(input, signal, range) {
-  const trim = range ? ['-ss', String(range.startMs / 1000), '-t', String((range.endMs - range.startMs) / 1000)] : [];
-  return new Promise((resolve, reject) => execFile('ffmpeg', ['-nostdin', '-v', 'error', '-i', input, ...trim, '-vn', '-map', '0:a:0', '-ac', '1', '-ar', '16000', '-af', 'aresample=async=1:first_pts=0', '-c:a', 'libmp3lame', '-b:a', '32k', '-f', 'mp3', 'pipe:1'], { signal, windowsHide: true, encoding: 'buffer', maxBuffer: 48 << 20 }, (error, out) => error ? reject(new Error('Could not prepare audio. No audio was uploaded.')) : resolve(out)));
+  const seek = range ? ['-ss', String(range.startMs / 1000)] : [];
+  const duration = range ? ['-t', String((range.endMs - range.startMs) / 1000)] : [];
+  return new Promise((resolve, reject) => execFile('ffmpeg', ['-nostdin', '-v', 'error', ...seek, '-i', input, ...duration, '-vn', '-map', '0:a:0', '-ac', '1', '-ar', '16000', '-af', 'aresample=async=1:first_pts=0', '-c:a', 'libmp3lame', '-b:a', '32k', '-f', 'mp3', 'pipe:1'], { signal, windowsHide: true, encoding: 'buffer', maxBuffer: 48 << 20 }, (error, out) => error ? reject(new Error('Could not prepare audio. No audio was uploaded.')) : resolve(out)));
 }
 
 /** The provider calls this before parsing/validating the response; no request headers or audio are stored. */
@@ -253,7 +254,7 @@ function rawResponseWriter(loc, requestId) {
   };
 }
 
-export async function transcribeProductSource(root, source, { getKey, signal = new AbortController().signal, retryUncertain = false, runProvider = doubao.run.bind(doubao), readAudio = extractAudio, audioPolicy = AUDIO_SEGMENT_POLICY, probeSource = probe } = {}) {
+export async function transcribeProductSource(root, source, { getKey, signal = new AbortController().signal, retryUncertain = false, runProvider = doubao.run.bind(doubao), readAudio = extractAudio, audioPolicy = AUDIO_SEGMENT_POLICY, probeSource = probe, onProgress } = {}) {
   const key = `${root}\0${source?.id}`;
   if (running.has(key)) return running.get(key);
   const job = (async () => {
@@ -281,7 +282,7 @@ export async function transcribeProductSource(root, source, { getKey, signal = n
       if (!Number.isFinite(durationMs) || durationMs <= 0) throw notSubmitted('source');
       source = { ...source, durationMs }; loc.durationMs = durationMs;
     }
-    if (Number.isFinite(source.durationMs) && source.durationMs > audioPolicy.targetMs) return transcribeSegments(root, source, loc, { getKey, signal, retryUncertain, runProvider, readAudio, audioPolicy });
+    if (Number.isFinite(source.durationMs) && source.durationMs > audioPolicy.targetMs) return transcribeSegments(root, source, loc, { getKey, signal, retryUncertain, runProvider, readAudio, audioPolicy, onProgress });
     if (previous?.status === 'pending' && !retryUncertain) throw new Error('The previous transcription may have been submitted. Check the service before retrying.');
     if (typeof getKey !== 'function') throw notSubmitted('configuration');
     let credential;
@@ -312,7 +313,7 @@ export async function transcribeProductSource(root, source, { getKey, signal = n
   try { return await job; } finally { if (running.get(key) === job) running.delete(key); }
 }
 
-async function transcribeSegments(root, source, loc, { getKey, signal, retryUncertain, runProvider, readAudio, audioPolicy }) {
+async function transcribeSegments(root, source, loc, { getKey, signal, retryUncertain, runProvider, readAudio, audioPolicy, onProgress }) {
   const plan = planAudioSegments(source.durationMs, audioPolicy);
   const identity = digest(JSON.stringify({ sourceId: source.id, assetPath: source.assetPath, fingerprint: loc.fingerprint, durationMs: source.durationMs, plan, policyVersion: AUDIO_SEGMENT_POLICY.version, model: 'volc.bigasr.auc_turbo', audio: 'mp3-16k-mono-32k' }));
   const manifestPath = `${loc.path}.segments.json`;
@@ -326,10 +327,12 @@ async function transcribeSegments(root, source, loc, { getKey, signal, retryUnce
   const state = { version: 1, status: 'pending', sourceId: source.id, assetPath: source.assetPath, durationMs: source.durationMs, fingerprint: loc.fingerprint, segmented: true };
   for (const segment of manifest.segments) {
     if (segment.status === 'complete') continue;
+    const progress = phase => onProgress?.({ phase, currentSegment: manifest.segments.indexOf(segment) + 1, completedSegments: manifest.segments.filter(s => s.status === 'complete').length, totalSegments: manifest.segments.length });
     if (signal.aborted) throw notSubmitted('audio');
     let credential, audio;
     try { credential = await getKey?.(); } catch { throw notSubmitted('configuration'); }
     if (typeof credential !== 'string' || !credential.trim()) throw notSubmitted('configuration');
+    await progress('extracting');
     try { audio = await readAudio(loc.input, signal, segment); } catch { throw notSubmitted('audio'); }
     if (!audio?.length || audio.length > (48 << 20)) throw notSubmitted('audio');
     const now = await stat(loc.input);
@@ -337,6 +340,7 @@ async function transcribeSegments(root, source, loc, { getKey, signal, retryUnce
     segment.status = 'pending'; segment.requestId = randomUUID(); segment.startedAt = new Date().toISOString();
     segment.attempts ??= []; segment.attempts.push({ requestId: segment.requestId, startedAt: segment.startedAt, status: 'submitted' });
     await persist(); await save(loc, state);
+    await progress('transcribing');
     let result;
     try { result = await runProvider('asr', { src: source.assetPath, requestId: segment.requestId }, { key: credential, signal, read: async () => audio, say: () => {}, root, onResponse: rawResponseWriter(loc, segment.requestId) }); }
     catch (error) { if (error.code === 'ASR_RESPONSE_SAVE_FAILED') throw error; throw new Error('Transcription failed or was interrupted after submission may have begun. Check the service before retrying.'); }

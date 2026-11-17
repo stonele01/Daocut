@@ -18,6 +18,7 @@ async function fixture(t) {
 const row = (text, startMs = 200) => ({ index: [{ text, words: [{ token: text, start: startMs / 1000, end: (startMs + 600) / 1000 }], cues: [{ text, startMs, endMs: startMs + 600 }] }] });
 const options = { getKey: async () => 'isolated-test-key', audioPolicy: { targetMs: 2000, overlapMs: 1000 }, readAudio: async (_path, _signal, range) => Buffer.from(range.id) };
 
+
 test('audio segment cache resumes only explicit failed request and preserves completed work', async t => {
   const { root, source } = await fixture(t);
   const calls = [];
@@ -34,7 +35,12 @@ test('audio segment cache resumes only explicit failed request and preserves com
   await assert.rejects(transcribeProductSource(root, source, { ...options, runProvider }), /may have been submitted/);
   assert.deepEqual(calls, ['audio-1', 'audio-2']);
   fail = false;
-  const value = await transcribeProductSource(root, source, { ...options, runProvider, retryUncertain: true });
+  const progress = [];
+  const value = await transcribeProductSource(root, source, { ...options, runProvider, retryUncertain: true, onProgress: p => progress.push(p) });
+  assert.deepEqual(progress, [
+    { phase: 'extracting', currentSegment: 2, completedSegments: 1, totalSegments: 2 },
+    { phase: 'transcribing', currentSegment: 2, completedSegments: 1, totalSegments: 2 },
+  ]);
   assert.deepEqual(calls, ['audio-1', 'audio-2', 'audio-2']);
   assert.deepEqual(value.cues.map(c => c.startMs), [200, 3100]);
   const reopened = await readProductTranscript(root, source);

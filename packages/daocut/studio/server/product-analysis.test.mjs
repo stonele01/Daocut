@@ -2,8 +2,24 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { readProductAnalysis, updateProductAnalysis, writeProductAnalysis, PRODUCT_ANALYSIS_FILE } from './product-analysis.mjs';
+import { join, resolve } from 'node:path';
+import { Readable } from 'node:stream';
+import { productAnalysisRoute, readProductAnalysis, updateProductAnalysis, writeProductAnalysis, PRODUCT_ANALYSIS_FILE } from './product-analysis.mjs';
+
+test('manual save accepts a long-project document and its expected snapshot over 4 MiB', async () => {
+  const base = resolve('../../.tmp/product-large-save'); await mkdir(base, { recursive: true });
+  const root = await mkdtemp(join(base, 'case-'));
+  const data = { version: 1, sources: [], products: [], intervals: [], candidates: [], padding: '长'.repeat(800000) };
+  try {
+    await writeProductAnalysis(root, data);
+    const body = JSON.stringify({ analysis: data, expected: data });
+    assert.ok(Buffer.byteLength(body) > 4 << 20);
+    const req = Readable.from([Buffer.from(body)]); req.method = 'PUT';
+    let status, output; const res = { writeHead(value) { status = value; }, end(value) { output = JSON.parse(value); } };
+    assert.equal(await productAnalysisRoute(req, res, root, 'product-analysis'), true);
+    assert.equal(status, 200); assert.equal(output.analysis.padding, data.padding);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 test('validates probed durations and references, preserves offline data and durable undo', async () => {
   const root = await mkdtemp(join(tmpdir(), 'product-analysis-'));

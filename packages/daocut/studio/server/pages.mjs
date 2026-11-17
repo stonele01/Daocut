@@ -29,7 +29,7 @@ import { readableLink } from '../../src/media-links.mjs';
 import { prepareMediaReferences, withMediaReferenceSnapshot } from '../../src/shared-media-reference.mjs';
 import { clipKind } from '../../src/film-doc.mjs';
 import { readPrefs } from './prefs.mjs';
-import { readyProxy } from './proxies.mjs';
+import { readyProxy, clipProxy } from './proxies.mjs';
 import { madeCopy } from '../../src/seekable.mjs';
 import { isPreviewKey, previewDir } from './preview-cache.mjs';
 import { soundOf } from './derived.mjs';
@@ -131,7 +131,7 @@ export async function startPages({ port, editorOrigin, secret, projects }) {
      play one on its own (the media pane's viewer) — inside the timeline it stays quiet: its parent is not the editor */
   const filesOf = (/** @type {string} */ root) => folderFiles(root, {
     inject: `<script>${HOST_FLAG}${PAGE_SCALE}</script>${scripts(BRIDGE)}`,
-    timelineInject: `<script>${HOST_FLAG}</script>${scripts(BRIDGE, STAGE)}`,
+    timelineInject: `<script>${HOST_FLAG}window.__filmClipPreview=true;</script>${scripts(BRIDGE, STAGE)}`,
     headers: policy(),
     /* heavy footage is played from its proxy once it is made, while proxies are on (proxies.mjs); else from a copy made
        for footage the browser does not decode, or that seeks slowly (src/seekable.mjs), when there is one */
@@ -179,9 +179,24 @@ export async function startPages({ port, editorOrigin, secret, projects }) {
     try { await prepareMediaReferences(entry.root, plain.replace(/^\/+/, '')); }
     catch { res.writeHead(409, headers).end('Media identity unavailable or changed; check the material library.'); return; }
     if (!servable(entry.root, plain)) { res.writeHead(404, headers).end('not found'); return; }
+    if (url.searchParams.has('film-clip') && clipKind(plain) === 'video') {
+      const bounds = /^([\d.]+),([\d.]+)$/.exec(url.searchParams.get('film-clip') ?? '');
+      const from = Number(bounds?.[1]), to = Number(bounds?.[2]);
+      if (!bounds || !Number.isFinite(from) || !Number.isFinite(to) || from < 0 || to <= from || to - from > 600) { res.writeHead(400, headers).end('invalid preview range'); return; }
+      const { proxies } = readPrefs();
+      {
+        try {
+          const file = await clipProxy(entry.root, plain.replace(/^\/+/, ''), from, to, proxies.height);
+          if (file) { folderFiles(dirname(file), { headers: policy() })(req, res, `/${basename(file)}`, url.searchParams); return; }
+        } catch { res.writeHead(503, headers).end('选段预览准备失败，请重试'); return; }
+      }
+    }
     if (url.searchParams.has('film-sound')) {
+      const selected = url.searchParams.get('film-sound-range');
+      const soundRange = selected?.split(',').map(Number);
+      if (soundRange && (soundRange.length !== 2 || !soundRange.every(Number.isFinite) || soundRange[0] < 0 || soundRange[1] <= soundRange[0] || soundRange[1] - soundRange[0] > 600)) { res.writeHead(400, headers).end('invalid sound range'); return; }
       /* waited for while it is made (a few seconds for a long recording): the mixer plays the film without it meanwhile */
-      const file = await soundOf(entry.root, plain.replace(/^\/+/, '')).catch((/** @type {any} */ e) => (e?.status === 404 ? undefined : null));
+      const file = await soundOf(entry.root, plain.replace(/^\/+/, ''), soundRange).catch((/** @type {any} */ e) => (e?.status === 404 ? undefined : null));
       if (file === undefined) { res.writeHead(404, headers).end('not found'); return; }
       if (!file) { res.writeHead(204, headers).end(); return; }
       if (!folderFiles(dirname(file), { headers: policy() })(req, res, `/${basename(file)}`, url.searchParams)) res.writeHead(403, headers).end();

@@ -77,6 +77,23 @@ test('completed previous-prompt discovery is reused and applied without rewritin
   assert.equal(await readFile(join(root, 'film.html'), 'utf8'), 'unchanged-film');
 });
 
+test('completed pre-chat-rule discovery keeps its original contract and never resubmits', async t => {
+  const root = await setup(t); let calls = 0;
+  const options = { modelClient: async input => { calls++; return response(input); } };
+  const first = route(options); await start(first, root); await finish(first, root);
+  const { file, state } = await savedRun(root);
+  state.runs[0].contractHash = discoveryContract(discoveryRules.PREVIOUS_CHAT_DISCOVERY_PROMPT);
+  state.runs[0].promptHash = hash(discoveryRules.PREVIOUS_CHAT_DISCOVERY_PROMPT);
+  await writeFile(file, JSON.stringify(state));
+  const before = await readFile(file, 'utf8'), reopened = route(options);
+  assert.equal((await get(reopened, root)).stale, false);
+  assert.equal((await reopened.plan(root, 's')).cached, true);
+  assert.equal((await reopened.existingSharedContract(root, 's')).prompt, hash(discoveryRules.PREVIOUS_CHAT_DISCOVERY_PROMPT));
+  await start(reopened, root);
+  assert.equal(calls, 1);
+  assert.equal(await readFile(file, 'utf8'), before);
+});
+
 test('previous-prompt incomplete windows remain blocked until an explicitly new run and never mix rules', async t => {
   const root = await setup(t), systems = []; let calls = 0;
   const policy = { maxBytes: 500, contextCues: 1 };

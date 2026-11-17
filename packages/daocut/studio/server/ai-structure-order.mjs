@@ -114,7 +114,14 @@ function checkedSequences(input, sequences, inspected) {
       }
       for (const previous of chosen) {
         if ((review.excludes ?? []).includes(previous.candidateId) || (previous.review.excludes ?? []).includes(id)) { reject('AI_ORDER_EXCLUDED', '已有记录明确这两段不能合用。', part, id); return; }
-        const conflict = Object.entries(review.conditions).find(([key, value]) => Object.hasOwn(previous.review.conditions, key) && previous.review.conditions[key] !== value);
+        const conflict = Object.entries(review.conditions).find(([key, value]) => {
+          if (!Object.hasOwn(previous.review.conditions, key)) return false;
+          const old = previous.review.conditions[key];
+          // Presence of a coupon or gift does not contradict a more specific
+          // name. Two different specifics and explicit absence still conflict.
+          if (['coupon', 'gift'].includes(key) && ((old === true && typeof value === 'string' && value.trim()) || (value === true && typeof old === 'string' && old.trim()))) return false;
+          return old !== value;
+        });
         if (conflict) {
           const [key, value] = conflict, old = previous.review.conditions[key];
           reject(key === 'price' ? 'AI_ORDER_PRICE_METADATA' : 'AI_ORDER_CONDITIONS', key === 'price'

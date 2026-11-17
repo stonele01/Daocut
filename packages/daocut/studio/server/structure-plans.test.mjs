@@ -45,7 +45,7 @@ async function fixture(t, { publicSemantics = true, confirmedDependencies = true
   const scope = { sourceId: source.id, productId: 'product', intervalId: 'lecture', startMs: 0, endMs: 120000 };
   const cues = [{ startMs: 0, endMs: 10000, text: '完整钩子' }, { startMs: 10000, endMs: 25000, text: '完整核心卖点' }, { startMs: 25000, endMs: 40000, text: '完整购买指令' }];
   const candidates = completeSpeech ? (await analyzeTextStructure({ ...scope, rangeStartMs: scope.startMs, rangeEndMs: scope.endMs, cues, client: async () => ({
-    schema: 'complete-speech-v1', candidates: [['痛点'], ['卖点'], ['福利机制', '行动指令']].map((tags, index) => ({ firstCue: index, lastCue: index, tags })), issues: [],
+    schema: 'complete-speech-v1', candidates: [['痛点'], ['卖点'], ['福利机制', '行动指令']].map((tags, index) => ({ firstCue: index, lastCue: index, tags, subject: { kind: 'self', evidence: [index] } })), issues: [],
   }) })).candidates : cues.map((cue, n) => ({ ...cue, id: `candidate-${n}`, sourceId: source.id, productId: scope.productId, intervalId: scope.intervalId, cueRange: [n, n], tags: [['钩子'], ['卖点'], ['行动指令']][n], details: {}, origin: 'ai-text', version: 1 }));
   if (completeSpeech) publicSemantics = false;
   if (emptyCandidates) candidates.length = 0;

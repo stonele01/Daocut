@@ -43,6 +43,22 @@ const plan = (f, action, extra = {}) => f.workflow.plan(f.root, { sourceId: f.so
 const execute = (f, p, extra = {}) => f.workflow.execute(f.root, { confirmed: true, plan: p, ...extra });
 const settle = f => f.workflow.wait(f.root, f.source.id);
 
+test('standalone transcription needs no text service and never starts discovery or analysis', async t => {
+  const f = await fixture(t); f.service.text.enabled = false;
+  const transcription = await plan(f, 'transcription');
+  assert.equal(transcription.enabled, true); assert.equal(transcription.nextStage, undefined);
+  await execute(f, transcription); await settle(f);
+  const saved = (await readProductAnalysis(f.root)).analysis;
+  assert.deepEqual(f.counts(), { asr: 1, text: 0 });
+  assert.equal(saved.products.length, 0); assert.equal(saved.intervals.length, 0); assert.equal(saved.candidates.length, 0);
+  const reopened = f.make(), state = await reopened.status(f.root, f.source.id);
+  assert.equal(state.transcription.status, 'complete'); assert.equal(state.discoveryReady, false);
+  const reused = await reopened.plan(f.root, { sourceId: f.source.id, action: 'transcription' });
+  assert.equal(reused.cached, true);
+  await reopened.execute(f.root, { confirmed: true, plan: reused }); await reopened.wait(f.root, f.source.id);
+  assert.deepEqual(f.counts(), { asr: 1, text: 0 });
+});
+
 for (const count of [1, 2]) test(`one preparation confirmation transcribes the full source and applies ${count} actual products`, async t => {
   const f = await fixture(t, { twoProducts: count === 2 });
   const preparation = await plan(f, 'transcription', { prepare: true });

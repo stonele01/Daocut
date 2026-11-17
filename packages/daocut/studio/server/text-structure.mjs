@@ -269,6 +269,7 @@ function completeSpeechDetails(item, tags, lines, openingPolicy, subjectRequired
     || !Array.isArray(subject.evidence) || subject.evidence.some(cue => !Number.isInteger(cue) || cue < (context ? 0 : item.firstCue) || cue > (context ? context.count - 1 : item.lastCue))
     || (subject.kind !== 'unknown' && !subject.evidence.length))) throw failure('MODEL_CONSTRAINT', '话术归属必须引用允许范围内的真实字幕编号');
   const subjectReview = subject?.kind === 'unknown' ? ['这句话说的是哪个商品尚不明确，暂不自动拼接'] : [];
+  if (!tags.length) subjectReview.push('模型未标注话术类型，需人工核对');
   const roles = [...new Set(tags.map(tag => roleForTag[tag]))];
   const price = item.price;
   if (price !== undefined && (!roles.includes('price') || !record(price) || !['current', 'reference', 'future'].includes(price.kind)
@@ -304,7 +305,7 @@ export async function analyzeTextStructure({ sourceId, productId, intervalId, cu
         cueIssue: { row: candidateIndex + 1, first: typeof firstCue === 'number' ? firstCue : showIndex(firstCue), last: typeof lastCue === 'number' ? lastCue : showIndex(lastCue), min: 0, max: cues.length - 1 },
       });
     }
-    if (!Array.isArray(item.tags) || !item.tags.length || item.tags.some(t => !TEXT_STRUCTURE_TAGS.includes(t) || t === '产品演示')) throw failure('MODEL_CONSTRAINT', '模型结果违反格式或来源约束');
+    if (!Array.isArray(item.tags) || (!item.tags.length && !completeSpeech && item.details?.composition?.contract !== COMPLETE_SPEECH_SCHEMA) || item.tags.some(t => !TEXT_STRUCTURE_TAGS.includes(t) || t === '产品演示')) throw failure('MODEL_CONSTRAINT', '模型结果违反格式或来源约束');
     const lines = cues.slice(firstCue, lastCue + 1);
     const tags = completeSpeech ? item.tags.map(tag => tag === '价格锚点' ? '福利机制' : tag === '逼单' ? '行动指令' : tag) : item.tags;
     const details = completeSpeech ? completeSpeechDetails(item, tags, lines,

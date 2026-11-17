@@ -31,11 +31,17 @@ export function needsProductScopeConfirmation(product, interval) {
 }
 
 export function createStructurePlanInputReader({ readAnalysis = readProductAnalysis, readTranscript = readProductTranscript, liveAnalysis } = {}) {
-  return async (root, request) => {
+  return async function readInput(root, request) {
     const { analysis } = await readAnalysis(root);
     const source = analysis.sources.find(item => item.id === request?.sourceId);
     if (!source) throw new HttpError(404, '找不到原片');
-    const interval = analysis.intervals.find(item => item.id === request.intervalId && item.sourceId === source.id && item.productId === request.productId);
+    const parent = [...analysis.intervals, ...(analysis.scopes ?? [])].find(item => (!request.joinedParentId || item.id === request.joinedParentId) && item.joinedScopeIds?.includes(request.intervalId));
+    const interval = [...analysis.intervals, ...(analysis.scopes ?? []).filter(item => parent || item.kind === 'historical-analysis')].find(item => item.id === request.intervalId && item.sourceId === source.id && item.productId === request.productId);
+    if (interval?.savedResultScopeId) {
+      const saved = [...analysis.intervals, ...(analysis.scopes ?? [])].find(r => r.id === interval.savedResultScopeId && r.sourceId === source.id && r.startMs === interval.startMs && r.endMs === interval.endMs);
+      if (!saved || saved.savedResultScopeId) throw new HttpError(409, '原分析关联无效，已有结果保留');
+      return readInput(root, { ...request, intervalId: saved.id, productId: saved.productId });
+    }
     const product = analysis.products.find(item => item.id === request.productId && item.sourceIds.includes(source.id));
     const context = { sourceId: source.id, productId: request.productId, intervalId: request.intervalId, ...(interval ? bounds(interval) : {}) };
     const unavailable = (code, message, visibility = 'unavailable') => ({ source, context, visibility, issues: [issue(code, message)] });
@@ -46,6 +52,39 @@ export function createStructurePlanInputReader({ readAnalysis = readProductAnaly
       throw new HttpError(409, '商品讲解范围已变化，请刷新当前段；未继续旧范围生成');
     }
     const scope = { ...context, ...bounds(interval) };
+    if (interval.joinedScopeIds?.length) {
+      const parts = await Promise.all(interval.joinedScopeIds.map(intervalId => {
+        const part = [...analysis.intervals, ...(analysis.scopes ?? [])].find(item => item.id === intervalId);
+        return readInput(root, { sourceId: source.id, productId: part?.productId, intervalId, joinedParentId: interval.id });
+      }));
+      const unavailablePart = parts.find(part => !['local', 'shared'].includes(part.visibility) || !part.engineInput);
+      if (unavailablePart) return unavailable('JOINED_ANALYSIS_REQUIRED', `连接讲解中的原范围尚未完成或无法核验：${unavailablePart.issues?.map(item => item.message).join('；') || '请先核对'}；不会重新提交已有结果`);
+      if (interval.analysisRevision && sharedHash(parts.map(part => part.analysisVersion)) !== interval.analysisRevision) return unavailable('PUBLIC_BASELINE_INVALID', '已有拼结构绑定的原分析版本已变化，请核对；没有重新生成');
+      let selected, transcript;
+      try { transcript = await readTranscript(root, source); selected = productTranscriptRange(transcript, scope, source.durationMs); }
+      catch { return unavailable('TRANSCRIPT_REQUIRED', '连接讲解的字幕或来源待核对，不能确认完整原话'); }
+      const allCandidates = parts.flatMap(part => part.engineInput.candidates);
+      if (new Set(allCandidates.map(item => item.id)).size !== allCandidates.length) return unavailable('JOINED_CANDIDATE_CONFLICT', '连接讲解的原话身份重复，请先核对；已有结果未更改');
+      const entries = parts.flatMap(part => part.engineInput.semanticReview?.entries ?? []);
+      const coreLabels = {};
+      for (const part of parts) for (const [key, value] of Object.entries(part.engineInput.semanticReview?.coreLabels ?? {})) {
+        if (Object.hasOwn(coreLabels, key) && sharedHash(coreLabels[key]) !== sharedHash(value)) return unavailable('JOINED_SEMANTIC_CONFLICT', '连接讲解的语义标注冲突，请先核对；已有结果未更改');
+        coreLabels[key] = value;
+      }
+      const semanticReview = { version: 1, entries, ...(Object.keys(coreLabels).length ? { coreLabels } : {}) };
+      const segmentIssues = parts.flatMap(part => part.engineInput.analysisIssues ?? []);
+      const currentPrice = allCandidates.some(item => item.tags.includes('价格机制') && item.details?.composition?.price?.kind === 'current' && item.details.composition.price.evidence?.length);
+      const purchase = allCandidates.some(item => item.tags.includes('行动指令') || item.tags.includes('逼单'));
+      // A window-local absence can be resolved by evidenced material in the
+      // joined lecture; preserve the original notice in compositionEvidence.
+      const analysisIssues = segmentIssues.filter(message => !(currentPrice && purchase && /^本窗口未出现当前实际成交价、上链接或改价指令/.test(message)));
+      const publishJoined = interval.shareJoinedPlans === true && parts.every(part => part.visibility === 'shared' && part.baselineDescriptor) && !transcript.localReconciled;
+      if (interval.shareJoinedPlans === true && !publishJoined) return unavailable('JOINED_PUBLIC_ANALYSIS_REQUIRED', '请先把连接范围的两段原分析补存到共享盘；当前不能完整核验共享底稿，未改成本机付费生成');
+      return { source, scope, context, visibility: publishJoined ? 'shared' : 'local', ...(publishJoined ? { baselineDescriptors: parts.map(part => part.baselineDescriptor) } : {}), analysisVersion: sharedHash(parts.map(part => part.analysisVersion)), semanticVersion: sharedHash(semanticReview),
+        compositionEvidence: { segmentIssues },
+        engineInput: { sourceIdentity: sharedHash(parts.map(part => part.engineInput.sourceIdentity)), scope: { ...bounds(scope), sourceId: 'public-source', productId: 'public-product', intervalId: 'public-lecture' }, candidates: allCandidates, cues: selected.segments, cueIndices: selected.cueIndices, semanticReview, ...(analysisIssues.length ? { analysisIssues } : {}) },
+        localCandidateIds: Object.assign({}, ...parts.map(part => part.localCandidateIds)), issues: [] };
+    }
     const candidates = analysis.candidates.filter(item => item.sourceId === source.id && item.productId === product.id && item.intervalId === interval.id);
     const live = await read(join(root, '.film', 'live-analysis', `${sharedHash(source.id)}.json`));
     const liveRef = live?.analyses?.[interval.id]?.sharedRef?.sha256;
@@ -69,7 +108,7 @@ export function createStructurePlanInputReader({ readAnalysis = readProductAnaly
     const visibility = baseline ? 'shared' : 'local';
     if (!baseline) {
       if (!liveAnalysis) return unavailable('PUBLIC_BASELINE_REQUIRED', '此讲解段尚未绑定可核验的公共话术底稿');
-      const verified = (await liveAnalysis.view(root, source.id, interval.id, product.id, { ...scope, lectureOnly: true })).analysis;
+      const verified = (await liveAnalysis.view(root, source.id, interval.id, product.id, { ...scope, lectureOnly: !parent && !interval.kind })).analysis;
       const saved = live?.analyses?.[interval.id];
       if (verified.status !== 'complete' || verified.stale || !saved?.currentRunId || verified.currentRunId !== saved.currentRunId
         || saved.status !== 'complete' || saved.transcriptHash !== structureTranscriptHash(transcript)) {
@@ -168,7 +207,7 @@ export function createStructurePlans({ sharedAnalysis, readInput = createStructu
   }
   async function prepare(root, value) {
     const { input, keyInput } = value;
-    await sharedAnalysis.validateSource(root, input.source, input.baselineDescriptor);
+    for (const descriptor of input.baselineDescriptors ?? [input.baselineDescriptor]) await sharedAnalysis.validateSource(root, input.source, descriptor);
     return sharedAnalysis.prepareExisting(root, input.source, { action: 'structure-plans', scope: bounds(input.scope), count: 0, provenance: { kind: 'structure-plans-v1', inputRevision: input.analysisVersion }, payload: keyInput });
   }
   async function reuse(root, value, descriptor) {

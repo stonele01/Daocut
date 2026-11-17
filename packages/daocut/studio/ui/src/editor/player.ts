@@ -38,6 +38,14 @@ const SETTLE_MS = 1000;
 /** `fade`: its fades in and out, film seconds, already fitted to its length (src/timeline.mjs). */
 export type Sound = { src: string; at: number; from: number; to: number; volume: number; speed: number; clip?: string; fade?: [number, number] };
 
+/** Decode only the sound used by the edit, rather than hours from its recording. */
+export function previewSound(s: Sound, origin: string): Sound {
+  if (!(s.to > s.from && s.to - s.from <= 600)) return s;
+  const url = new URL(s.src, origin);
+  url.searchParams.set('film-sound-range', `${s.from},${s.to}`);
+  return { ...s, src: url.href, from: 0, to: s.to - s.from };
+}
+
 /**
  * Where the film is while it plays: film second `t` at `at` (ms on the page's clock, performance.now()), moving on
  * `rate` film seconds a second.
@@ -132,6 +140,7 @@ export class Player {
   private origin = '';
   private versionOf: (src: string) => number | undefined = () => undefined;
   private sounds: Sound[] = [];
+  private originalSources = new Map<string, string>();
   private playingNodes: AudioScheduledSourceNode[] = [];
   /** the sounds heard faster or slower, each played by a media element (see stretchRate) */
   private voices: Voice[] = [];
@@ -168,7 +177,10 @@ export class Player {
   /** The film's sounds, fetched from `origin` (the film's origin) and decoded once each (once per version). */
   load(origin: string, sounds: Sound[], duration: number) {
     this.origin = origin;
-    this.sounds = sounds;
+    this.originalSources.clear();
+    this.sounds = sounds.map(s => { const preview = previewSound(s, origin); this.originalSources.set(preview.src, s.src); return preview; });
+    const used = new Set(this.sounds.map(s => s.src));
+    for (const src of this.buffers.keys()) if (!used.has(src)) this.buffers.delete(src);
     this.duration = duration;
     this.fetchSounds();
     if (this.playing) this.restart();
@@ -192,8 +204,8 @@ export class Player {
     const ctx = this.context();
     let fetched = false;
     const t = this.time();
-    for (const s of [...this.sounds].filter((x) => x.speed === 1).sort((a, b) => awayFrom(a, t) - awayFrom(b, t))) {
-      const version = this.versionOf(s.src);
+    for (const s of [...this.sounds].filter((x) => x.speed === 1 && x.to - x.from <= 600).sort((a, b) => awayFrom(a, t) - awayFrom(b, t))) {
+      const version = this.versionOf(this.originalSources.get(s.src) ?? s.src);
       const had = this.buffers.get(s.src);
       /* a version not known on one side is taken as the same: the file was not seen to change */
       if (had && (had.version === version || had.version === undefined || version === undefined)) {
@@ -217,7 +229,7 @@ export class Player {
   private soundUrl(src: string): string {
     const url = new URL(src, this.origin);
     url.searchParams.set('film-sound', '1');
-    const version = this.versionOf(src);
+    const version = this.versionOf(this.originalSources.get(src) ?? src);
     if (version !== undefined) url.searchParams.set('v', String(version));
     return url.href;
   }
@@ -420,7 +432,7 @@ export class Player {
     for (const i of soundsDue(this.sounds, now, now + AHEAD * this.rate, this.started, this.heard)) {
       this.started.add(i);
       const s = this.sounds[i];
-      if (stretchRate(s.speed, this.rate) != null) { this.voice(s, heard); continue; }
+      if (stretchRate(s.speed, this.rate) != null || s.to - s.from > 600) { this.voice(s, heard); continue; }
       void this.buffers.get(s.src)?.buffer.then((buffer) => {
         if (!buffer || !this.playing || this.heardLine !== heard) return;
         this.schedule(buffer, s, heard);

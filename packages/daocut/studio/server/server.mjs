@@ -630,7 +630,7 @@ export async function startStudio({ port = 4747, key, openBrowser = systemBrowse
     /* ── end subtitles ── */
     /* the editor's settings of the project: its frame rate, its tracks' names (see project-settings.mjs) */
     if (await projectSettingsRoute(req, res, project.path, rest)) return;
-    if (await productAnalysisRoute(req, res, project.path, rest)) return;
+    if (await productAnalysisRoute(req, res, project.path, rest, { afterSave: productWorkflowRoute.syncProductLayout })) return;
     if (await sourceTakesRoute(req, res, project.path, rest)) return;
     if (await productChatContextRoute(req, res, project.path, rest)) return;
     if (await transcriptReviewRoute(req, res, project.path, rest)) return;

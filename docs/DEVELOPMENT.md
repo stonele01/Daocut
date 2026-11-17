@@ -1,13 +1,15 @@
 # Development handoff
 
-Current implementation: **0.2.51**. Read [the current release handoff](HANDOFF-0.2.51.md) for composition rules, playback fixes and validation scope. [The 0.2.29 handoff](HANDOFF-0.2.29.md) remains a historical record; its rule descriptions are superseded below.
+Current implementation: **0.2.70**. Read [the current release handoff](HANDOFF-0.2.70.md) for shared product layouts, saved-plan recovery, selected-range previews and validation scope. The [0.2.51](HANDOFF-0.2.51.md) and [0.2.29](HANDOFF-0.2.29.md) handoffs remain historical records.
 
-Composition v8 preserves historical results and independent drafts. The local desktop was updated to 0.2.51 on 2026-11-13 after packaged and real UI verification. Source synchronization does not publish an installer or update the company feed. Existing analysis is not automatically rerun, and model completion is not proof that every valid combination was covered. Offline recovery of a completed window does not authorize requesting missing windows or publishing incomplete analysis.
+Composition v8 preserves historical results and independent drafts. Version 0.2.70 was published to the company feed on 2026-11-16 after package, shared-reader, real-preview and updater-download verification. Source synchronization itself does not publish an installer. Existing analysis is not automatically rerun, and model completion is not proof that every valid combination was covered. Offline recovery of a completed window does not authorize requesting missing windows or publishing incomplete analysis.
 
 ## Current behavior
 
 - Use one **Transcribe and discover products** entry. Reuse saved transcription and join continuous same-product speech across text batches. Select one product lecture occurrence; saved manual range edits determine the next analysis scope. Analysis and composition are separate operations. Do not silently combine returning lectures.
 - Reuse saved public analysis. Completed results are not automatically re-analyzed; uncertain results/costs are not automatically resubmitted.
+- Shared readers restore confirmed product layouts separately from immutable AI results. Exact result identities connect displayed products to saved analysis and public plans; old candidate/range IDs and private work remain intact. Normal saves publish layout revisions, with a durable pending receipt if the shared write fails.
+- Short previews from long recordings prepare selected video/audio ranges and map preview clocks back to original source time. Saved edits and exports keep original coordinates. Status reads reuse transcript hashes and the UI reuses candidate indexes.
 - Analysis keeps independently understandable speech and necessary continuous context. Product introduction describes what is sold; selling points describe its attractive qualities. Price and benefits are separate roles. Complete comparisons can coexist with usable independent subranges.
 - Composition v8 requires an introduction, a selling point, a current quoted price and a purchase close. It evaluates price changes against the selected lecture's chronological transcript with cue evidence; an old or reference price alone does not qualify. New plans use 1.3x playback and a 30–40 second finished duration. Historical prompts, results and drafts retain their identities.
 - One opening has at most three substantively different plans, including existing valid plans. Fewer are allowed; changing only the purchase close does not count. Requested-opening progress is separate from accepted-plan coverage. Refresh/reopen/recovery never sends a model request. Preview leaves the timeline untouched; editing opens an independent personal draft.
@@ -33,6 +35,8 @@ For development and tests, inject mock model/transcription clients and use synth
 - approved-prompts.mjs and studio/server/prompts/*.txt: complete reviewed prompts; docs/prompts-review-20261111/*.txt is the test baseline.
 - ai-structure.mjs, ai-structure-priced.mjs, ai-structure-required.mjs, ai-structure-variants.mjs and ai-structure-plans.mjs: cue evidence, current price validation, mandatory roles, distinct plans, opening progress, version selection and recovery. Historical implementations remain available for saved versions.
 - structure-drafts.mjs and structure-workspace.mjs: independent personal drafts.
+- shared-product-layout.mjs, shared-project-open.mjs and shared-composition-scopes.mjs: canonical product layout, existing/new reader recovery and saved composition scopes.
+- proxies.mjs, derived.mjs, pages.mjs, src/timeline.mjs and studio/ui/src/editor/player.ts: selected-range video/audio caches and preview source-time mapping.
 - structure-batch-exports.mjs: selected Jianying exports.
 - studio/ui/src/components/ProductVisualReview.tsx, ProductPanel.tsx and StructureWorkspace.tsx: review details, selected lecture and plan/draft UI.
 
@@ -45,7 +49,7 @@ Run from the repository root with temporary directories inside the disposable ch
 
 The desktop end-to-end fixture creates synthetic audio/video, runs actual local sampling and the actual SDK, and mocks provider responses. Browser tests require the editor build and Playwright Chromium; set DAOCUT_STRUCTURE_UI to that build for structure-workspace-browser.test.mjs. Legacy suites may expect a .test-temp directory in the working directory.
 
-See the [0.2.51 handoff](HANDOFF-0.2.51.md) for packaged test counts and real playback acceptance. Existing CI covers desktop/company types and selected authorization, update and service tests; it is not a complete media-workflow acceptance suite. A broader rollout still needs fresh-machine installation/update/rollback and representative multi-machine shared-storage trials.
+See the [0.2.70 handoff](HANDOFF-0.2.70.md) for exact regression groups, real shared-reader/preview measurements and installer verification. Existing CI covers desktop/company types and selected authorization, update and service tests; it is not a complete media-workflow acceptance suite. A broader rollout still needs fresh-machine installation/update/rollback and representative multi-machine shared-storage trials.
 
 ## Collaboration
 

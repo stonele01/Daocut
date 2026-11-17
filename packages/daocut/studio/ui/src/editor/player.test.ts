@@ -1,6 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { anchorTime, EASE_STEP, easedLead, fadeSteps, fileTime, JUMP, soundsDue, stretchRate } from './player.ts';
+import { anchorTime, EASE_STEP, easedLead, fadeSteps, fileTime, JUMP, soundsDue, stretchRate, previewSound } from './player.ts';
+
+test('a short edit requests only its source audio range and retains film timing at normal and altered speeds', () => {
+  for (const speed of [1, 1.3]) {
+    const original = { src: 'assets/recording.mp4', at: 3, from: 16427.2, to: 16440.2, volume: 0.8, speed, clip: 'private-cut' };
+    const preview = previewSound(original, 'http://localhost/p/test/');
+    assert.equal(new URL(preview.src).searchParams.get('film-sound-range'), '16427.2,16440.2');
+    assert.equal(preview.from, 0); assert.equal(preview.to, 13);
+    assert.equal(preview.at, original.at); assert.equal(preview.clip, original.clip);
+    assert.ok(Math.abs(fileTime(preview, 5) + original.from - fileTime(original, 5)) < 0.00001);
+    assert.equal(original.from, 16427.2);
+  }
+});
 
 test('a sound\'s fades as ramps: where it is now, then each corner after it', () => {
   /* 4 s long, 1 s in, 2 s out */

@@ -85,6 +85,92 @@ function sharedStore({ reuseFirstBatch = false } = {}) {
   } };
 }
 
+test('explicit failed-batch retry preserves history, sends once, and does not resume other batches', async t => {
+  const f = await fixture(t, { seed: false, count: 4, respond: (body, _args, number) => {
+    if (number === 2) throw Error('simulated HTTP error');
+    return output(body.openingIds.flatMap(id => alternative(body, id).slice(0, 1)));
+  } });
+  const service = f.make(); await f.generate(service); await service.wait();
+  const failed = await service.status(f.root, f.request), request = { ...f.request, taskKey: failed.taskKey };
+  assert.equal(failed.status, 'failed'); assert.equal(failed.plans.length, 1);
+  assert.equal(failed.retryable, true);
+  const file = join(f.root, '.film/ai-structure-plans', `${failed.taskKey}.json`), before = JSON.parse(await readFile(file, 'utf8'));
+  await service.generate(f.root, { ...request, confirmed: true, continue: true });
+  assert.equal(f.calls.length, 2, 'ordinary generate cannot resend a failure');
+  const plan = (await service.retry(f.root, request)).confirmation;
+  assert.equal(plan.retry, true); assert.equal(plan.requestCount, 1); assert.equal(f.calls.length, 2);
+  await assert.rejects(service.retry(f.root, { ...request, confirmed: true, confirmationId: 'stale' }), /确认已失效/);
+  const submission = { ...request, confirmed: true, confirmationId: plan.id };
+  await Promise.all([service.retry(f.root, submission), service.retry(f.root, submission)]); await service.wait();
+  assert.equal(f.calls.length, 3); assert.deepEqual(f.calls[2], f.calls[1]);
+  const after = JSON.parse(await readFile(file, 'utf8'));
+  assert.deepEqual(after.rounds.slice(0, before.rounds.length), before.rounds);
+  assert.equal(after.rounds.at(-1).retryOf.roundIndex, 1);
+  const state = await service.status(f.root, request);
+  assert.equal(state.status, 'complete'); assert.equal(state.plans.length, 2); assert.equal(state.complete, false);
+  await assert.rejects(service.retry(f.root, submission), /没有可重试/);
+  assert.equal(f.calls.length, 3);
+});
+
+test('interrupted and legacy failures do not advertise an unsupported paid retry', async t => {
+  const f = await fixture(t, { seed: false, respond: () => ({ wrong: true }) }), service = f.make();
+  await f.generate(service); await service.wait();
+  const failed = await service.status(f.root, f.request);
+  const file = join(f.root, '.film/ai-structure-plans', `${failed.taskKey}.json`), saved = JSON.parse(await readFile(file, 'utf8'));
+  saved.rounds.at(-1).status = 'running';
+  await writeFile(file, JSON.stringify(saved));
+  const interrupted = await f.make().status(f.root, f.request);
+  assert.equal(interrupted.status, 'failed'); assert.equal(interrupted.retryable, false);
+  assert.equal(f.calls.length, 1, 'reading an interrupted task never resends it');
+  const legacy = await fixture(t), record = structuredClone(legacy.oldRecord);
+  record.rounds.at(-1).status = 'failed';
+  await writeFile(legacy.oldPath, JSON.stringify(record));
+  const old = await legacy.make().status(legacy.root, { ...legacy.request, rulesVersion: AI_STRUCTURE_ORDER_VERSION, taskKey: record.key });
+  assert.equal(old.status, 'failed'); assert.equal(old.retryable, false); assert.equal(legacy.calls.length, 0);
+});
+
+test('retry acquires the original shared task with explicit acknowledgement', async t => {
+  const shared = sharedStore(), failedTasks = new Set(), acknowledgements = [];
+  const f = await fixture(t, { seed: false, visibility: 'shared', respond: (body, _args, number) => {
+    if (number === 1) throw Error('provider unavailable');
+    return output(body.openingIds.flatMap(id => alternative(body, id).slice(0, 1)));
+  } });
+  const service = f.make({ sharedAnalysis: { ...shared.api,
+    prepareExisting: async (...args) => { const d = await shared.api.prepareExisting(...args); return failedTasks.has(d.taskKey) ? { ...d, mode: 'retry-required', attemptId: 'failed-attempt' } : d; },
+    fail: async d => failedTasks.add(d.taskKey),
+    acquire: async (d, options) => { if (d.mode === 'retry-required') { assert.equal(options?.retryAcknowledged, true); acknowledgements.push(d.taskKey); } return shared.api.acquire(d); },
+  } });
+  await f.generate(service); await service.wait();
+  const state = await service.status(f.root, f.request), request = { ...f.request, taskKey: state.taskKey };
+  const plan = (await service.retry(f.root, request)).confirmation;
+  await service.retry(f.root, { ...request, confirmed: true, confirmationId: plan.id }); await service.wait();
+  assert.deepEqual(acknowledgements, [shared.claims[0]]); assert.equal(f.calls.length, 2);
+  assert.equal((await service.status(f.root, request)).plans.length, 1);
+});
+
+test('another malformed retry stays failed without automatic requests and requires a fresh confirmation', async t => {
+  const f = await fixture(t, { seed: false, respond: () => ({ wrong: true }) }), service = f.make();
+  await f.generate(service); await service.wait();
+  const state = await service.status(f.root, f.request), request = { ...f.request, taskKey: state.taskKey };
+  const plan = (await service.retry(f.root, request)).confirmation;
+  await service.retry(f.root, { ...request, confirmed: true, confirmationId: plan.id }); await service.wait();
+  assert.equal(f.calls.length, 2); assert.equal((await service.status(f.root, request)).status, 'failed');
+  await assert.rejects(service.retry(f.root, { ...request, confirmed: true, confirmationId: plan.id }), /确认已失效/);
+  assert.equal(f.calls.length, 2);
+});
+
+test('retry recovers a valid saved reply without sending the model', async t => {
+  const f = await fixture(t, { seed: false, respond: async (body, args) => {
+    await receipt(args, output(body.openingIds.flatMap(id => alternative(body, id).slice(0, 1))));
+    throw Error('interrupted after receipt');
+  } }), service = f.make();
+  await f.generate(service); await service.wait();
+  const state = await service.status(f.root, f.request), request = { ...f.request, taskKey: state.taskKey };
+  const plan = (await service.retry(f.root, request)).confirmation;
+  const recovered = await service.retry(f.root, { ...request, confirmed: true, confirmationId: plan.id });
+  assert.equal(recovered.status, 'complete'); assert.equal(recovered.plans.length, 1); assert.equal(f.calls.length, 1);
+});
+
 test('reading v5 seeds exact saved v4 plans without changing IDs, source times or any old file bytes', async t => {
   const f = await fixture(t, { count: 70 }), service = f.make();
   const state = await service.status(f.root, f.request);

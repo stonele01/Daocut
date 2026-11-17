@@ -55,6 +55,7 @@ export function createStructureWorkspace({ plans, batches, register = openProjec
     else if (req.method === 'POST' && rest === 'structure-drafts') body = await edit(project, await readJson(req));
     else if (req.method === 'GET' && rest === 'structure-plans') { await assertOwner(project); body = await plans.status(project.path, query); }
     else if (req.method === 'POST' && rest === 'structure-plans/generate') { await assertOwner(project); await authorize(); body = await plans.generate(project.path, await readJson(req)); }
+    else if (req.method === 'POST' && rest === 'structure-plans/retry') { await assertOwner(project); await authorize(); body = await plans.retry(project.path, await readJson(req)); }
     else if (req.method === 'POST' && rest === 'structure-plans/recover') { await assertOwner(project); body = await plans.recover(project.path, await readJson(req)); }
     else if (req.method === 'POST' && rest === 'structure-plans/publish') { await assertOwner(project); await authorize(); body = await plans.publish(project.path, await readJson(req)); }
     else return false;

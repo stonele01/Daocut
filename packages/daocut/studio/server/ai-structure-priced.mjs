@@ -36,7 +36,7 @@ function checkedPrices(input, prices, inspected) {
   const priceItems = inspected.reviewItems.filter(item => !item.issues.length && item.review.roles.includes('price'));
   const byId = new Map(priceItems.map(item => [item.candidateId, item]));
   const indices = input.engineInput.cueIndices ?? input.engineInput.cues.map((_, index) => index);
-  const decisions = new Map();
+  const decisions = new Map(), unconfirmed = new Set(), issues = [];
   if (!Array.isArray(prices)) invalid('缺少整段讲解的报价核对，未接受仅凭旧现价标签生成的方案');
   for (const decision of prices) {
     if (!record(decision) || Object.keys(decision).some(key => !['id', 'kind', 'evidence', 'replacedBy'].includes(key))
@@ -44,7 +44,7 @@ function checkedPrices(input, prices, inspected) {
       || !['current', 'reference', 'future', 'superseded', 'uncertain'].includes(decision.kind)
       || !Array.isArray(decision.evidence) || !decision.evidence.length
       || decision.evidence.some(index => !Number.isSafeInteger(index) || !indices.includes(index))) invalid('报价核对必须逐项引用本次讲解的真实话术和字幕编号，不得遗漏或重复');
-    if (decision.kind === 'current' && !isCurrent(byId.get(decision.id))) invalid('参考价或拟改价不能未经重新分析直接充当当前成交价');
+    if (decision.kind === 'current' && !isCurrent(byId.get(decision.id))) unconfirmed.add(decision.id);
     const range = input.engineInput.candidates.find(item => item.id === decision.id).cueRange;
     if (!decision.evidence.some(cue => cue >= range[0] && cue <= range[1])) invalid('报价核对必须包含该话术自身的原字幕依据');
     if (decision.kind === 'superseded') {
@@ -52,13 +52,30 @@ function checkedPrices(input, prices, inspected) {
     } else if (decision.replacedBy?.length) invalid('仅已改价话术可以声明替代报价');
     decisions.set(decision.id, decision);
   }
-  if (decisions.size !== byId.size) invalid('报价核对未覆盖全部价格话术，未接受不完整的价格判断');
+  if (decisions.size !== byId.size) {
+    const missingIds = [...byId.keys()].filter(id => !decisions.has(id));
+    throw Object.assign(Error('报价核对未覆盖全部价格话术，未接受不完整的价格判断'), {
+      code: 'AI_STRUCTURE_INVALID_RESPONSE',
+      retryFeedback: { code: 'AI_PRICE_AUDIT_INCOMPLETE', missingIds,
+        message: `上次 prices 漏掉 ${missingIds.join('、')}。请重新核对全部 ${byId.size} 条价格话术，每条各返回一项，包括未用于 plans 的参考价；依据原字幕独立判断，不沿用遗漏。` },
+    });
+  }
   for (const decision of decisions.values()) if (decision.kind === 'superseded') {
     if (decision.replacedBy.some(id => decisions.get(id)?.kind !== 'current')) invalid('替代报价必须是已核对的当前成交价，不能循环引用旧价');
     const ranges = decision.replacedBy.map(id => input.engineInput.candidates.find(item => item.id === id).cueRange);
     if (!ranges.some(([start, end]) => decision.evidence.some(cue => cue >= start && cue <= end))) invalid('改价判断缺少替代报价原话的字幕依据');
+    if (decision.replacedBy.some(id => unconfirmed.has(id))) unconfirmed.add(decision.id);
   }
-  return decisions;
+  // One invalid price-role promotion must not erase independent valid routes.
+  // Keep the model response intact and quarantine both that quote and any
+  // replacement claim relying on it. Plans containing either remain unusable.
+  for (const id of unconfirmed) {
+    const decision = decisions.get(id);
+    decisions.set(id, { id, kind: 'uncertain', evidence: [...decision.evidence] });
+    issues.push({ code: 'AI_PRICE_ROLE_UNCONFIRMED', candidateId: id,
+      message: '报价或其替代报价把参考价、拟改价当成了现价；相关方案未采用，其他独立有效方案保留。' });
+  }
+  return { decisions, issues };
 }
 
 function checkedContent(input, sequences, inspected, options = {}) {
@@ -80,10 +97,10 @@ export function validateAiPricedResponse(input, value, options = {}) {
   if (!record(value) || value.schema !== AI_STRUCTURE_PRICED_VERSION || !Array.isArray(value.plans)
     || Object.keys(value).some(key => !['schema', 'prices', 'plans'].includes(key))) invalid('新版拼结构只返回schema、prices报价核对和plans编号数组');
   const inspected = inspectAiPricedInput(input.engineInput);
-  const prices = checkedPrices(input, value.prices, inspected);
+  const priceCheck = checkedPrices(input, value.prices, inspected), prices = priceCheck.decisions;
   const checked = checkedContent(input, value.plans, inspected, options);
   const history = getAiVariantsCoverage(input, options.previous ?? [], { openingIds: options.openingIds ?? inspected.openingIds, targetVariants: MAX_OPENING_VARIANTS });
-  const plans = [], sequences = [], issues = [...checked.issues], counts = new Map(history.perOpening.map(item => [item.openingId, item.distinctCount]));
+  const plans = [], sequences = [], issues = [...priceCheck.issues, ...checked.issues], counts = new Map(history.perOpening.map(item => [item.openingId, item.distinctCount]));
   for (const [index, sequence] of checked.sequences.entries()) {
     const reject = (code, message) => issues.push({ code, openingId: sequence[0], message });
     const selected = sequence.filter(id => prices.has(id));
@@ -99,6 +116,7 @@ export function validateAiPricedResponse(input, value, options = {}) {
       version: AI_STRUCTURE_PRICED_VERSION, inputHash: inspected.inputHash, priceReview: selected.map(id => prices.get(id)) });
     sequences.push(sequence);
   }
+  if (priceCheck.issues.length && !plans.length) invalid('参考价或拟改价被当成现价，且本批没有可独立保留的有效方案；原回复保留，不自动重发');
   const targets = options.openingIds ?? inspected.openingIds;
   return { plans, sequences, issues, prices: [...prices.values()], modelComplete: targets.every(id => sequences.some(sequence => sequence[0] === id)), allValidCombinationsEnumerated: false };
 }

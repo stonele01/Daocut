@@ -74,7 +74,7 @@ export function createProductPreparation({ liveAnalysis, discovery }) {
       ...(state?.id ? { runId: state.id } : {}),
       ...(needsReview ? { error: '已有人工修改或待归属内容，但尚无商品段；请在拆品记录中核对后处理' }
         : status === 'failed' ? { error: interrupted ? '素材准备已中断；核查后显式重试，已完成结果会复用' : state?.error || live.transcription.error || split.error } : {}),
-      transcription: { status: live.transcription.status, error: live.transcription.error, retryBlocked: live.transcription.retryBlocked },
+      transcription: { status: live.transcription.status, error: live.transcription.error, retryBlocked: live.transcription.retryBlocked, progress: live.transcription.progress },
       discovery: split,
     };
   }

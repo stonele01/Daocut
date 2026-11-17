@@ -39,6 +39,19 @@ async function fixture() {
   const make = id => ensureStructureDraft(root, { parentProjectId: 'parent-project-1', plan: plan(id) });
   return { root, make, plan };
 }
+
+test('an explicitly selected historical shared plan can open a private draft without changing its source scope', async () => {
+  const f = await fixture();
+  const file = join(f.root, '.film/product-analysis.json');
+  const analysis = JSON.parse(await readFile(file, 'utf8'));
+  analysis.scopes = [{ ...analysis.intervals[0], kind: 'historical-analysis', confirmed: true }];
+  analysis.intervals = [];
+  const before = JSON.stringify(analysis);
+  await writeFile(file, before);
+  const draft = await f.make('shared-historical-plan');
+  assert.equal(draft.meta.planId, 'shared-historical-plan');
+  assert.equal(await readFile(file, 'utf8'), before);
+});
 const read = (root, path) => readFile(join(root, path), 'utf8');
 test.beforeEach(t => { t.mock.method(globalThis, 'fetch', () => { throw new Error('No network or model calls are allowed in structure draft tests'); }); });
 

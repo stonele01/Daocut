@@ -1,6 +1,6 @@
 import React from 'react';
 import { api, type LiveAnalysisState, type ProductWorkflowStatus, type SharedProjectOpen } from '@/api';
-import { sourceTime, type ProductAnalysis, type ProductInterval } from '@/lib/product-analysis';
+import { sourceTime, visibleProducts, savedStructureRange, productResultCandidates, isRecoveredProduct, type ProductAnalysis, type ProductInterval } from '@/lib/product-analysis';
 import { structureColor } from '@/lib/structure-colors';
 import { displayStructureTag, displayStructureTags, hasStructureTag, productStructureTags } from '@/lib/product-structure-tags';
 import type { WorkspaceResource } from '@/lib/workspace-resources';
@@ -88,25 +88,27 @@ function LiveAnalysis({ refreshKey, projectId, sources, ranges: productRanges, s
   };
   const status = (s: string) => ({ idle: '未开始', running: '进行中', complete: '已完成', failed: '失败' }[s] ?? s);
   const selectedComplete = state?.analysis.status === 'complete' && state.analysis.intervalId === selectedRange?.id;
-  const analyzing = starting || state?.analysis.status === 'running';
+  const analyzing = starting || (!!selectedRange && state?.analysis.intervalId === selectedRange.id && state.analysis.status === 'running');
   const rangeLabel = selectedRange ? `${sourceTime(selectedRange.startMs)} – ${sourceTime(selectedRange.endMs)}` : '请先点选商品段';
   const historical = selectedRange?.kind === 'historical-analysis';
   const needsTranscript = !!state && state.transcription.status !== 'complete';
   const reviewTranscript = needsTranscript && !!(state?.transcription.boundaryReview || state?.transcription.code === 'ASR_BOUNDARY_REVIEW');
   const transcribing = state?.transcription.status === 'running';
-  const actionLabel = historical ? '历史结果' : selectedComplete ? '重新分析' : analyzing ? '分析中…' : state?.analysis.status === 'failed' ? '重试分析' : '分析';
-  const action = <button type="button" className="min-h-9 flex-1 rounded-md border border-[var(--accent)]/60 bg-[var(--accent)]/20 px-4 py-2 text-[12px] font-medium transition duration-150 hover:bg-[var(--accent)]/30 active:scale-[.98] disabled:opacity-50" aria-label={`${actionLabel} ${rangeLabel}`} title={needsTranscript ? '请先完成整条原视频的转写' : `${selectedComplete ? '重新分析此商品段' : '仅分析此商品段'}：${rangeLabel}`} disabled={historical || !state || needsTranscript || analyzing || preparation?.busy || !!confirm || !selectedRange} onClick={() => setConfirm(selectedComplete ? 'rerun' : 'analyze')}>{actionLabel}</button>;
+  const joined = !!selectedRange?.joinedScopeIds?.length;
+  const actionLabel = joined ? '选择原分析范围' : historical ? '历史结果' : selectedComplete ? '重新分析' : analyzing ? '分析中…' : state?.analysis.status === 'failed' ? '重试分析' : '分析';
+  const action = <button type="button" className="min-h-9 flex-1 rounded-md border border-[var(--accent)]/60 bg-[var(--accent)]/20 px-4 py-2 text-[12px] font-medium transition duration-150 hover:bg-[var(--accent)]/30 active:scale-[.98] disabled:opacity-50" aria-label={`${actionLabel} ${rangeLabel}`} title={joined ? '请选择下方原分析范围，以复用已有结果并避免重复提交' : needsTranscript ? '请先完成整条原视频的转写' : `${selectedComplete ? '重新分析此商品段' : '仅分析此商品段'}：${rangeLabel}`} disabled={joined || historical || !state || needsTranscript || analyzing || preparation?.busy || !!confirm || !selectedRange} onClick={() => setConfirm(selectedComplete ? 'rerun' : 'analyze')}>{actionLabel}</button>;
   const source = sources.find(item => item.id === sourceId);
   const preparing = transcribing || preparation?.preparation?.status === 'running' || preparation?.discovery.status === 'running';
   const reviewDiscovery = !needsTranscript && preparation?.needsReview;
   const prepared = !needsTranscript && preparation?.discoveryReady && !reviewDiscovery;
-  const transcriptLabel = reviewTranscript ? '核对转写' : reviewDiscovery ? '核对拆品' : transcribing ? '转写中…' : preparing ? '拆品中…' : state?.transcription.status === 'failed' || preparation?.discovery.status === 'failed' ? '继续转写拆品' : needsTranscript ? '转写并拆品' : '继续拆品';
+  const transcriptLabel = reviewTranscript ? '核对转写' : reviewDiscovery ? '核对拆品' : transcribing ? '转写中…' : preparing ? '拆品中…' : needsTranscript ? state?.transcription.status === 'failed' ? '重试转写' : '转写' : '继续拆品';
   const transcription = source && <section aria-label="原视频转写" className="-order-2 shrink-0 space-y-2 border-b border-[var(--border)] px-3 py-3 transition duration-150">
     <div className="flex items-center justify-between gap-2"><strong>原视频</strong>{prepared && !preparing && <span className="text-[11px] text-[var(--text-muted)]">商品已准备好</span>}</div>
     <p className="break-all text-[11px] text-[var(--text-muted)]" title={source.assetPath}>{source.assetPath.split(/[\\/]/).at(-1)} · 整条视频{source.durationMs ? ` ${sourceTime(source.durationMs)}` : ''}</p>
     {state && preparation && (!prepared || preparing) && <button type="button" className="min-h-10 w-full rounded-md border border-blue-600 bg-blue-600 px-4 py-2 text-[13px] font-medium text-white transition duration-150 hover:bg-blue-700 active:scale-[.98] disabled:opacity-50" aria-label={`${transcriptLabel} ${source.assetPath}`} disabled={!!(analyzing || preparing || confirm)} onClick={() => { if (reviewTranscript) onReviewTranscript(); else if (reviewDiscovery) onReviewTranscript(true); else setConfirm('transcribe'); }}>{transcriptLabel}</button>}
-    {state && !prepared && <p role="status" className="text-[11px] text-[var(--text-muted)]">{reviewTranscript ? '分段转写已完成，请核对交界处的字幕。' : reviewDiscovery ? '商品识别已完成，请核对与现有商品范围的差异。' : transcribing ? '正在转写整条视频，完成后自动拆品。' : preparing ? '正在识别商品，完成后显示商品列表。' : !needsTranscript ? '转写已完成，尚未完成拆品；点击继续，复用现有转写。' : '整条视频转写一次，再按实际商品拆分；一个品就生成一个品。'}</p>}
+    {state && !prepared && <p role="status" className="text-[11px] text-[var(--text-muted)]">{reviewTranscript ? '分段转写已完成，请核对交界处的字幕。' : reviewDiscovery ? '商品识别已完成，请核对与现有商品范围的差异。' : transcribing ? '正在转写整条视频，完成后保存字幕。' : preparing ? '正在识别商品，完成后显示商品列表。' : !needsTranscript ? '转写已完成，可分析已选范围；需要按商品分段时再拆品。' : '先将整条视频转成文字，完成后再选择分析或拆品。'}</p>}
     {state?.transcription.status === 'failed' && !reviewTranscript && state.transcription.error && <p role="alert" className="text-[11px] text-[var(--warn)]">{state.transcription.error}</p>}
+    {transcribing && state?.transcription.progress && <p role="status" className="text-[11px]">{state.transcription.progress.phase === 'extracting' ? '正在准备音频' : '正在识别音频'} · 第 {state.transcription.progress.currentSegment}/{state.transcription.progress.totalSegments} 段 · 已完成 {state.transcription.progress.completedSegments} 段</p>}
     {!reviewTranscript && preparation?.preparation?.status === 'failed' && !(preparation.preparation.phase === 'transcription' && !needsTranscript) && <p role="alert" className="text-[11px] text-[var(--warn)]">{preparation.preparation.error}</p>}
   </section>;
   const feedback = <>
@@ -115,7 +117,7 @@ function LiveAnalysis({ refreshKey, projectId, sources, ranges: productRanges, s
     {error && <p role="alert" className="mt-2 text-red-400">{error} <button className={btn} onClick={() => setTick((n) => n + 1)}>重试读取</button></p>}
     {state?.analysis.status === 'failed' && state.analysis.error && <p role="alert" className="mt-2 text-red-400">{state.analysis.error}</p>}
     {confirm && state && <ProductWorkflowConfirmation key={`${scope}:${confirm}`} projectId={projectId}
-      request={{ sourceId, action: confirm === 'transcribe' ? needsTranscript ? 'transcription' : 'discovery' : 'analysis', ...(confirm === 'transcribe' ? { prepare: true } : {}), ...(confirm !== 'transcribe' && selectedRange ? { productId: selectedRange.productId, intervalId: selectedRange.id } : {}), rerun: confirm === 'rerun', retry: confirm === 'transcribe' ? state.transcription.status === 'failed' || preparation?.discovery.status === 'failed' : confirm !== 'rerun' && state.analysis.status === 'failed' }}
+      request={{ sourceId, action: confirm === 'transcribe' ? needsTranscript ? 'transcription' : 'discovery' : 'analysis', ...(confirm === 'transcribe' && !needsTranscript ? { prepare: true } : {}), ...(confirm !== 'transcribe' && selectedRange ? { productId: selectedRange.productId, intervalId: selectedRange.id } : {}), rerun: confirm === 'rerun', retry: confirm === 'transcribe' ? needsTranscript ? state.transcription.status === 'failed' : preparation?.discovery.status === 'failed' : confirm !== 'rerun' && state.analysis.status === 'failed' }}
       onDone={requestFinished} onClose={() => { setConfirm(null); setTick(n => n + 1); }} />}
   </>;
   const details = <details className="text-[11px] text-[var(--text-muted)]">
@@ -138,6 +140,22 @@ export function ProductPanel(props: ProductPanelProps) {
   const [sharedOpen, setSharedOpen] = React.useState<SharedProjectOpen | null>(null);
   const [sharedError, setSharedError] = React.useState('');
   const [refresh, setRefresh] = React.useState(0);
+  const [reading, setReading] = React.useState(false);
+  const attempted = React.useRef(new Set<string>());
+  const sourceId = props.analysis.sources.length === 1 ? props.analysis.sources[0]!.id : props.rangeSelection.sourceId;
+  const identity = `${props.projectId}:${sourceId}`;
+  const currentIdentity = React.useRef(identity); currentIdentity.current = identity;
+  const updated = React.useRef(props.onAnalysisComplete); updated.current = props.onAnalysisComplete;
+  const resume = async () => {
+    setReading(true); setSharedError('');
+    try {
+      const report = await api.resumeSharedAnalyses(props.projectId, sourceId);
+      if (currentIdentity.current !== identity) return;
+      setSharedOpen(report);
+      await updated.current();
+    } catch (error) { if (currentIdentity.current === identity) setSharedError(error instanceof Error ? error.message : String(error)); }
+    finally { if (currentIdentity.current === identity) setReading(false); }
+  };
   React.useEffect(() => {
     const readReport = (event: Event) => {
       if ((event as CustomEvent<{ projectId?: string }>).detail?.projectId === props.projectId) setRefresh(value => value + 1);
@@ -147,15 +165,26 @@ export function ProductPanel(props: ProductPanelProps) {
   }, [props.projectId]);
   React.useEffect(() => {
     let active = true;
-    setSharedOpen(null); setSharedError('');
-    void api.sharedProjectOpen(props.projectId).then(result => { if (active) setSharedOpen(result.sharedRead); }, error => {
+    setSharedOpen(null); setSharedError(''); setReading(false);
+    void api.sharedProjectOpen(props.projectId).then(async result => {
+      if (!active) return;
+      setSharedOpen(result.sharedRead);
+      const key = `${props.projectId}:${sourceId}`;
+      // Upgrade incomplete old readers using saved artifacts only. The server
+      // preserves edits and never invokes ASR or the model through this route.
+      if (result.sharedRead && result.sharedRead.readerRevision !== 3 && sourceId && !attempted.current.has(key)) {
+        attempted.current.add(key);
+        await resume();
+      }
+    }, error => {
       if (active) setSharedError(error instanceof Error ? error.message : String(error));
     });
     return () => { active = false; };
-  }, [props.projectId, refresh]);
+  }, [props.projectId, sourceId, refresh]);
   return <>
     {(sharedOpen || sharedError) && <div aria-label="已有分析读取状态" role="status" className="shrink-0 border-b border-[var(--border)] px-3 py-2 text-[11px] leading-relaxed text-[var(--text-muted)] transition duration-150">
       {sharedOpen && <p>{sharedOpen.status === 'ready' ? '已读取已有分析，可直接预览和选材' : sharedOpen.status === 'empty' ? '当前视频尚无已保存的共享分析' : sharedOpen.status === 'review-required' ? '已有分析需要核对，请查看素材与拆品记录' : '已有共享分析暂未读取，请检查连接或素材与拆品记录'}</p>}
+      {sourceId && <button type="button" className={btn} disabled={reading} onClick={() => void resume()}>{reading ? '正在读取已有分析和方案…' : '刷新共享分析和方案（不重新分析）'}</button>}
       {sharedOpen?.warnings.map((warning, index) => <p key={index} className="mt-1 text-[var(--warn)]">{warning}</p>)}
       {sharedError && <p>读取已有分析状态失败：{sharedError} <button type="button" className={btn} onClick={() => setRefresh(value => value + 1)}>重试读取</button></p>}
     </div>}
@@ -171,12 +200,15 @@ function ProductPanelContent({ files, currentSourcePath, analysis, selectedProdu
   const [productName, setProductName] = React.useState('');
   const [busy, setBusy] = React.useState(false);
   const [notice, setNotice] = React.useState('');
+  const [showRecovered, setShowRecovered] = React.useState(() => { const item = analysis.products.find(p => p.id === selectedProductId); return !!item && isRecoveredProduct(item); });
   // Historical analysis may extend beyond today's lecture boundary. Show all saved
   // candidates without changing the selected lecture or its source times.
+  const candidatesSection = React.useRef<HTMLElement>(null);
   const [candidateScope, setCandidateScope] = React.useState<'range' | 'product'>('product');
   const [draggedCandidate, setDraggedCandidate] = React.useState<string>();
   const product = analysis.products.find((p) => p.id === selectedProductId);
-  const ranges = [...analysis.intervals, ...(analysis.scopes ?? [])].filter(r => r.productId === selectedProductId).sort((a, b) => a.sourceId.localeCompare(b.sourceId) || a.startMs - b.startMs);
+  const linkedScopes = new Set([...analysis.intervals, ...(analysis.scopes ?? [])].filter(r => r.productId === selectedProductId).flatMap(r => r.joinedScopeIds ?? []));
+  const ranges = [...analysis.intervals, ...(analysis.scopes ?? [])].filter(r => r.productId === selectedProductId || linkedScopes.has(r.id)).sort((a, b) => a.sourceId.localeCompare(b.sourceId) || a.startMs - b.startMs);
   const selectRange = (range: ProductInterval) => {
     setSelection({ sourceId: range.sourceId, intervalId: range.id });
     onLocate(range.sourceId, range.startMs);
@@ -195,31 +227,43 @@ function ProductPanelContent({ files, currentSourcePath, analysis, selectedProdu
     setError(''); setNotice(''); setBusy(true);
     try {
       await onSave(applyProductEdit(analysis, { type: 'rename', productId: product.id, name: nextName }));
+      if (!isRecoveredProduct({ ...product, name: nextName })) setShowRecovered(false);
       setRenaming(false); setNotice('已保存');
     } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
     finally { setBusy(false); }
   };
-  const candidates = analysis.candidates.filter((c) => c.productId === product?.id && (candidateScope === 'product' || (c.sourceId === selected.sourceId && c.intervalId === selected.intervalId)));
+  const selectedRange = ranges.find(range => range.id === selected.intervalId && range.sourceId === selected.sourceId);
+  const savedRange = selectedRange && savedStructureRange(analysis, selectedRange);
+  const selectedIds = new Set([selectedRange?.id, savedRange?.id, ...(selectedRange?.joinedScopeIds ?? []), ...(savedRange?.joinedScopeIds ?? [])]);
+  const allCandidates = product ? productResultCandidates(analysis, product.id) : [];
+  const candidates = allCandidates.filter(c => candidateScope === 'product' || c.sourceId === selected.sourceId && selectedIds.has(c.intervalId));
+  const recovered = !!savedRange && (savedRange.id !== selectedRange?.id || savedRange.kind === 'historical-analysis');
+  const showSavedAnalysis = () => { setCandidateScope('product'); onTagChange('全部'); candidatesSection.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); };
   const activeTag = displayStructureTag(tag);
   const filtered = candidates.filter((c) => hasStructureTag(c.tags, tag));
-  const candidateCounts = React.useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const candidate of analysis.candidates) counts.set(candidate.productId, (counts.get(candidate.productId) ?? 0) + 1);
-    return counts;
-  }, [analysis.candidates]);
+  const candidateCounts = React.useMemo(() => new Map(analysis.products.map(product => [product.id, productResultCandidates(analysis, product.id).length])), [analysis]);
   const status = (item: ProductAnalysis['products'][number]) => {
     const count = candidateCounts.get(item.id) ?? 0;
     return count ? `${count} 个候选` : item.sourceIds.length ? '未分析或无候选' : '未关联视频';
   };
   const isDemo = candidates.some((candidate) => candidate.origin === 'demo-data');
+  const products = React.useMemo(() => visibleProducts(analysis), [analysis]);
+  const pendingProducts = products.filter(isRecoveredProduct);
+  const shownProducts = showRecovered ? pendingProducts : products.filter(p => !isRecoveredProduct(p));
+  const toggleRecovered = () => {
+    if (showRecovered && product && isRecoveredProduct(product)) { const first = products.find(p => !isRecoveredProduct(p)); if (first) onSelectProduct(first.id); }
+    setShowRecovered(value => !value);
+  };
   const dailyEntry = !!analysis.sources.length && !analysis.intervals.length && !analysis.candidates.length;
   return <LiveAnalysis refreshKey={transcriptRefresh} projectId={projectId} sources={analysis.sources.filter((s) => product?.sourceIds.includes(s.id))} ranges={ranges} sourceId={selected.sourceId} intervalId={selected.intervalId} onSelectSource={selectSource} onSelectRange={id => { const range = ranges.find(range => range.id === id); if (range) selectRange(range); else setSelection({ sourceId: selected.sourceId, intervalId: '' }); }} onLocate={onLocate} onAnalysisComplete={onAnalysisComplete} onWorkflowStarted={() => setTranscriptRefresh(value => value + 1)} onReviewTranscript={(discovery = false) => setTranscriptReviewRequest(previous => ({ sourceId: selected.sourceId, id: (previous?.id ?? 0) + 1, kind: discovery ? 'discovery' : 'transcript' }))}>{({ action, transcription, feedback, details }) => <div className="flex min-h-0 flex-1 flex-col overflow-y-auto text-[12px] text-[var(--text)]">
     {!onReturnToProject && transcription}
     <div className="shrink-0 border-b border-[var(--border)] px-3 pb-3 pt-3">
-      <div className="mb-2 flex flex-wrap items-center gap-2"><strong className="flex-1">商品</strong></div>
-      <VirtualList items={analysis.products} itemKey={p => p.id} estimateHeight={p => p.id === selectedProductId ? 160 : 100} label="商品列表" maxHeight={320} pinnedKey={selectedProductId ?? undefined} revealKey={selectedProductId ?? undefined} renderItem={p => {
+      <div className="mb-2 flex flex-wrap items-center gap-2"><strong className="flex-1">{showRecovered ? '待确认的已有分析' : '商品'}</strong>{pendingProducts.length > 0 && <button type="button" className={btn} aria-expanded={showRecovered} onClick={toggleRecovered}>{showRecovered ? '返回商品列表' : `待确认的已有分析 ${pendingProducts.length}`}</button>}</div>{showRecovered && <p className="mb-2 text-[11px] text-[var(--text-muted)]">这些原分析尚未对应到当前商品，内容已保留，可查看原话后确认归属。</p>}
+      <VirtualList items={shownProducts} itemKey={p => p.id} estimateHeight={p => p.id === selectedProductId ? 160 : 100} label="商品列表" maxHeight={320} pinnedKey={selectedProductId ?? undefined} revealKey={selectedProductId ?? undefined} renderItem={p => {
         const cardSelected = p.id === selectedProductId;
         const summary = productRangeSummary(analysis, p.id);
+        const displayName = isRecoveredProduct(p) ? '已有分析（商品待确认）' : p.name;
+        const original = isRecoveredProduct(p) ? [...analysis.intervals, ...(analysis.scopes ?? [])].find(range => range.productId === p.id) : undefined;
         return <div key={p.id} data-product-card={p.id} className={`flex min-h-24 min-w-0 shrink-0 flex-col gap-3 rounded-lg border p-3 transition duration-200 motion-safe:animate-[daocut-rise_180ms_ease-out] ${cardSelected ? 'border-[var(--accent)] bg-[var(--accent)]/10' : 'border-[var(--border)] bg-[var(--surface)] hover:border-[var(--accent)]/40 hover:bg-[var(--bg-hover)]'}`}>
           {cardSelected && renaming ? <>
             <input autoFocus aria-label="商品名称" value={productName} disabled={busy} onChange={(e) => setProductName(e.target.value)} onKeyDown={(e) => { if (e.nativeEvent.isComposing || e.keyCode === 229) return; if (e.key === 'Enter') { e.preventDefault(); void saveName(); } else if (e.key === 'Escape') { setRenaming(false); setError(''); } }} className="min-h-9 w-full min-w-0 rounded-md border border-[var(--accent)] bg-[var(--dock-pane)] px-2 py-1.5 text-[13px] outline-none" />
@@ -230,12 +274,12 @@ function ProductPanelContent({ files, currentSourcePath, analysis, selectedProdu
             </details>
           </> : <>
             <button type="button" aria-pressed={cardSelected} className="flex w-full min-w-0 flex-1 flex-col justify-center gap-2.5 text-left transition active:scale-[.99]" onClick={() => onSelectProduct(p.id)}>
-              <span className="w-full break-words text-[14px] font-medium leading-5" title={`${p.name} · ${p.sourceIds.length} 个视频 · ${status(p)}`}>{p.name}</span>
+              <span className="w-full break-words text-[14px] font-medium leading-5" title={`${displayName} · ${p.sourceIds.length} 个视频 · ${status(p)}`}>{displayName}</span>{original && <span className="text-[11px] text-[var(--text-muted)]">{sourceTime(original.startMs)} – {sourceTime(original.endMs)}</span>}
               <span className="flex w-full flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[11px] leading-4 text-[var(--text-muted)]"><span>{summary.count ? `${summary.count} 段讲解` : '请选择讲解范围'}</span>{summary.count > 0 && <span className="tabular-nums">共 {sourceTime(summary.totalMs)}</span>}</span>
               {!!candidateCounts.get(p.id) && <span className="text-[11px] text-[var(--accent)]">{candidateCounts.get(p.id)} 条话术</span>}
             </button>
 
-            {cardSelected && <div className="flex flex-wrap items-center gap-2 border-t border-[var(--accent)]/15 pt-2.5">{onReturnToProject ? <button type="button" className={btn} onClick={onReturnToProject}>返回工程分析</button> : action}{onCompose && <button type="button" className={`${btn} min-h-9 rounded-md px-3 text-[12px]`} disabled={!analysis.intervals.some(range => range.id === selected.intervalId && range.sourceId === selected.sourceId && range.productId === p.id)} onClick={() => { const range = analysis.intervals.find(range => range.id === selected.intervalId && range.sourceId === selected.sourceId && range.productId === p.id); if (range) onCompose({ sourceId: range.sourceId, productId: p.id, intervalId: range.id, startMs: range.startMs, endMs: range.endMs }); }}>拼结构</button>}<button type="button" className={`${btn} min-h-9 shrink-0 rounded-md px-3 text-[12px]`} disabled={busy || !!onReturnToProject} aria-label={`编辑商品名称：${p.name}`} onClick={() => { setProductName(p.name); setError(''); setRenaming(true); }}>编辑</button></div>}
+            {cardSelected && <div className="flex flex-wrap items-center gap-2 border-t border-[var(--accent)]/15 pt-2.5">{onReturnToProject ? <button type="button" className={btn} onClick={onReturnToProject}>返回工程分析</button> : recovered && allCandidates.length ? <button type="button" className={`${btn} min-h-9 flex-1`} onClick={showSavedAnalysis}>查看已有分析</button> : action}{onCompose && <button type="button" className={`${btn} min-h-9 rounded-md px-3 text-[12px]`} disabled={!ranges.some(range => range.id === selected.intervalId && range.sourceId === selected.sourceId)} onClick={() => { const range = ranges.find(range => range.id === selected.intervalId && range.sourceId === selected.sourceId); if (range) { const saved = savedStructureRange(analysis, range); onCompose({ sourceId: saved.sourceId, productId: saved.productId, intervalId: saved.id, startMs: saved.startMs, endMs: saved.endMs }); } }}>拼结构</button>}<button type="button" className={`${btn} min-h-9 shrink-0 rounded-md px-3 text-[12px]`} disabled={busy || !!onReturnToProject} aria-label={`编辑商品名称：${p.name}`} onClick={() => { setProductName(p.name); setError(''); setRenaming(true); }}>编辑</button></div>}
           </>}
         </div>;
       }} />
@@ -245,14 +289,14 @@ function ProductPanelContent({ files, currentSourcePath, analysis, selectedProdu
     {error && <p role="alert" className="shrink-0 mx-3 my-2 text-red-400">{error}</p>}
     {!product ? <p className="mt-3 text-[var(--text-muted)]">选择商品开始整理</p> : <>
       {sharedAdd && <details className="order-3 shrink-0 border-t border-[var(--border)] px-3 py-2"><summary className="cursor-pointer text-[11.5px] text-[var(--text-muted)]">添加视频 / 配置共享素材</summary><div className="mt-2">{sharedAdd}</div></details>}
-      <section className="order-2 flex min-h-[180px] shrink-0 flex-col border-t border-[var(--border)] px-3 py-2.5" aria-label="候选片段">
+      <section ref={candidatesSection} className="order-2 flex min-h-[180px] shrink-0 flex-col border-t border-[var(--border)] px-3 py-2.5" aria-label="候选片段">
         <div className="mb-1.5 flex items-center"><h3 className="flex-1 font-medium">候选片段</h3><span className="text-[10.5px] text-[var(--text-muted)]">{filtered.length} / {candidates.length}</span></div>
         <div className="mb-2 flex flex-wrap gap-1" aria-label="候选显示范围"><button type="button" aria-pressed={candidateScope === 'range'} className={`${btn} ${candidateScope === 'range' ? 'border-[var(--accent)] text-[var(--accent)]' : ''}`} onClick={() => setCandidateScope('range')}>当前段</button><button type="button" aria-pressed={candidateScope === 'product'} className={`${btn} ${candidateScope === 'product' ? 'border-[var(--accent)] text-[var(--accent)]' : ''}`} onClick={() => setCandidateScope('product')}>该商品全部讲解</button></div>
-        {ranges.filter(range => range.kind === 'historical-analysis').map(range => <button key={range.id} className={`${btn} mb-2 text-left`} aria-pressed={selected.intervalId === range.id} onClick={() => selectRange(range)}>历史话术 · {sourceTime(range.startMs)} – {sourceTime(range.endMs)}</button>)}
+        {ranges.filter(range => range.kind === 'historical-analysis' || (range.kind === 'confirmed-inspection' && analysis.intervals.some(interval => interval.joinedScopeIds?.includes(range.id)))).map(range => <button key={range.id} className={`${btn} mb-2 text-left`} aria-pressed={selected.intervalId === range.id} onClick={() => selectRange(range)}>{range.kind === 'historical-analysis' ? '历史话术' : '原分析范围'} · {sourceTime(range.startMs)} – {sourceTime(range.endMs)}</button>)}
         <p className="mb-2 text-[10.5px] text-[var(--text-muted)]">按住片段拖到下方成片时间线</p>
         <div className="mb-2 flex flex-wrap gap-1">{['全部', ...tags].map((t) => { const count = t === '全部' ? candidates.length : candidates.filter((candidate) => hasStructureTag(candidate.tags, t)).length; return <button key={t} aria-pressed={activeTag === t} className={`${btn} ${activeTag === t ? 'ring-2 ring-[var(--accent)] ring-offset-1 ring-offset-[var(--surface)]' : 'text-[var(--text-muted)]'}`} style={t === '全部' || activeTag !== t ? undefined : { backgroundColor: structureColor(t).bg, color: structureColor(t).text, borderColor: structureColor(t).border }} onClick={() => onTagChange(t)}>{t} {count}</button>; })}</div>
         {isDemo ? <p className="mb-2 rounded border border-[var(--accent)]/30 bg-[var(--accent)]/10 px-2 py-1.5 text-[10.5px] leading-relaxed text-[var(--text-muted)]">演示数据：原话、标签和区间均为合成示例，不是实际视频分析。</p> : null}
-        {!candidates.length ? <p className="text-[var(--text-muted)]">{candidateScope === 'range' ? '当前段暂无候选片段。' : '当前商品暂无候选片段。'}</p> : !filtered.length ? <p className="text-[var(--text-muted)]">此标签暂无候选片段。</p> : <VirtualList key={`${selected.sourceId}:${selected.intervalId}:${candidateScope}:${tag}`} items={filtered} itemKey={c => c.id} estimateHeight={() => 160} label="结构候选列表" maxHeight={360} gap={6} pinnedKey={draggedCandidate} renderItem={c => <article data-candidate-card={c.id} draggable={canDragCandidate(c.id)} onDragStart={(event) => { setDraggedCandidate(c.id); onDragCandidate(c.id, event); }} onDragEnd={() => { setDraggedCandidate(undefined); onDragCandidateEnd(); }} className="rounded border border-[var(--border)] bg-[var(--surface)] p-2"><button className="block w-full text-left" onClick={() => onLocate(c.sourceId, c.startMs, c.id)}><span className="block leading-relaxed">{c.text || '候选片段'}</span><span className="mt-1 block truncate text-[10.5px] text-[var(--text-muted)]" title={name(c.sourceId)}>{name(c.sourceId)} · {sourceTime(c.startMs)} – {sourceTime(c.endMs)}</span></button>{candidateUnavailable(c) && <p className="mt-1 text-[10.5px] text-[var(--warn)]">这段话术已失效，请重新分析</p>}<div className="mt-1.5 flex flex-wrap gap-1">{displayStructureTags(c.tags).map((item) => <span key={item} className="rounded border px-1.5 py-0.5 text-[10px]" style={{ backgroundColor: structureColor(item).bg, color: structureColor(item).text, borderColor: structureColor(item).border }}>{item}</span>)}</div><div className="mt-2 flex gap-1"><button className={`${btn} shrink-0 whitespace-nowrap`} onClick={() => onLocate(c.sourceId, c.startMs, c.id, true)}>预览</button><button className={`${btn} shrink-0 whitespace-nowrap`} disabled={candidateUnavailable(c)} onClick={() => onAddCandidate(c.id)}>加入成片</button></div></article>} />}
+        {!candidates.length ? <p className="text-[var(--text-muted)]">{candidateScope === 'range' ? '当前段暂无候选片段。' : '当前商品暂无候选片段。'}</p> : !filtered.length ? <p className="text-[var(--text-muted)]">此标签暂无候选片段。</p> : <VirtualList key={`${selected.sourceId}:${selected.intervalId}:${candidateScope}:${tag}`} items={filtered} itemKey={c => c.id} estimateHeight={() => 160} label="结构候选列表" maxHeight={360} gap={6} pinnedKey={draggedCandidate} renderItem={c => <article data-candidate-card={c.id} draggable={canDragCandidate(c.id)} onDragStart={(event) => { setDraggedCandidate(c.id); onDragCandidate(c.id, event); }} onDragEnd={() => { setDraggedCandidate(undefined); onDragCandidateEnd(); }} className="rounded border border-[var(--border)] bg-[var(--surface)] p-2"><button className="block w-full text-left" onClick={() => onLocate(c.sourceId, c.startMs, c.id)}><span className="block leading-relaxed">{c.text || '候选片段'}</span><span className="mt-1 block truncate text-[10.5px] text-[var(--text-muted)]" title={name(c.sourceId)}>{name(c.sourceId)} · {sourceTime(c.startMs)} – {sourceTime(c.endMs)}</span></button>{candidateUnavailable(c) && <p className="mt-1 text-[10.5px] text-[var(--warn)]">话术状态尚未核对，暂不可加入成片</p>}<div className="mt-1.5 flex flex-wrap gap-1">{displayStructureTags(c.tags).map((item) => <span key={item} className="rounded border px-1.5 py-0.5 text-[10px]" style={{ backgroundColor: structureColor(item).bg, color: structureColor(item).text, borderColor: structureColor(item).border }}>{item}</span>)}</div><div className="mt-2 flex gap-1"><button className={`${btn} shrink-0 whitespace-nowrap`} onClick={() => onLocate(c.sourceId, c.startMs, c.id, true)}>预览</button><button className={`${btn} shrink-0 whitespace-nowrap`} disabled={candidateUnavailable(c)} onClick={() => onAddCandidate(c.id)}>加入成片</button></div></article>} />}
       </section>
     </>}
     <div className="order-3 shrink-0 border-t border-[var(--border)] px-3 py-2">{onReturnToProject ? <p className="text-[11px] text-[var(--text-muted)]">这里沿用原工程的分析。商品范围和分析在原工程管理，当前个人草稿单独保存。</p> : details}</div>
