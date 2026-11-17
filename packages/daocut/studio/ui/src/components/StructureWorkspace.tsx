@@ -299,7 +299,7 @@ export function StructureWorkspace({ projectId, onProject, onLeave }: { projectI
       <div className="shrink-0 border-t border-[var(--border)] p-3 text-[11px]">
         <p aria-live="polite" className="mb-2">已选 {selectedIds.length} 条</p>
         <p className="text-[var(--text-muted)]">{batchPreparing ? '正在保存并固定版本…' : '勾选或全选后，点击右上角「导出」命名并导出'}</p>
-        <p className="mt-1 text-[var(--text-muted)]">优先使用个人草稿 · 每条单独一份</p>
+        <p className="mt-1 text-[var(--text-muted)]">优先使用个人草稿 · 可分别导出或合并到一个工程</p>
       </div>
       <StructureExportBatches projectId={projectId} revision={batchRevision} />
     </aside>

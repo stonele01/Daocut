@@ -878,7 +878,7 @@ const STOP_WAIT_MS = 8000;
 export function createExports({ onChange = () => {}, captions = subtitlesForExport, drafts = defaultDrafts } = {}) {
   /** @type {ExportJob[]} */
   const jobs = [];
-  /** @type {Map<string, { root: string, folder: string, abort: AbortController, twin?: string, draftsFolder?: string, receipt?: { batchId: string, itemId: string, revision: string } }>} */
+  /** @type {Map<string, { root: string, folder: string, abort: AbortController, twin?: string, draftsFolder?: string, cues?: Cue[], receipt?: { batchId: string, itemId: string, revision: string } }>} */
   const work = new Map();
   let running = false;
   /* Studio is closing: nothing new starts (stopAll) */
@@ -1272,7 +1272,8 @@ export function createExports({ onChange = () => {}, captions = subtitlesForExpo
     update(job, { encoder: prores && !app ? (await hardwareEncoder('prores', have)) ?? 'prores_ks' : 'png' });
     /* a source out of the project fails the export before anything is drawn */
     for (const track of doc.tracks) for (const row of track.clips) clipPath(root, row.src);
-    const { cues } = ask.subtitles === false ? { cues: [] } : await subtitlesOf(root).catch((error) => {
+    const frozenCues = work.get(job.id)?.cues;
+    const { cues } = ask.subtitles === false ? { cues: [] } : frozenCues ? { cues: frozenCues } : await subtitlesOf(root).catch((error) => {
       if (fcp) throw error;
       return { cues: [] };
     });
@@ -1719,14 +1720,14 @@ export function createExports({ onChange = () => {}, captions = subtitlesForExpo
   return {
     /** Internal entry for a captured batch item. It never uses the installed app's drafts directory.
      * @param {{ id: string, name: string, path: string }} project
-     * @param {NleAsk & { folder?: string, receipt?: { batchId: string, itemId: string, revision: string } }} input
+     * @param {NleAsk & { folder?: string, cues?: Cue[], receipt?: { batchId: string, itemId: string, revision: string } }} input
      */
     startSnapshot(project, input) {
       if (input?.kind !== 'nle' || input.format !== 'jianying' || input.media !== 'link' || !input.folder) throw new ExportError('批量快照只支持指定目录的剪映草稿导出');
-      const { folder: destination, receipt, ...ask } = input;
+      const { folder: destination, receipt, cues, ...ask } = input;
       if (receipt && (!/^[a-f0-9]{24}$/.test(receipt.batchId) || !/^\d+$/.test(receipt.itemId) || !/^[a-f0-9]{64}$/.test(receipt.revision))) throw new ExportError('批量导出身份无效');
       const folder = folderOf(destination), job = queue(project, checked(ask), folder);
-      const item = work.get(job.id); if (item) { item.draftsFolder = folder; if (receipt) item.receipt = { ...receipt }; }
+      const item = work.get(job.id); if (item) { item.draftsFolder = folder; if (receipt) item.receipt = { ...receipt }; if (cues) item.cues = structuredClone(cues); }
       const queued = { ...job }; next(); return queued;
     },
     /** Queue an export of the project at `root`. @param {{ id: string, name: string, path: string }} project @param {ExportAsk} ask @param {{ folder?: string }} [where] */

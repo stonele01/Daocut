@@ -213,7 +213,7 @@ function codecAvailable(codec: ExportVideoCodec, can: ExportCapabilities | null)
 }
 
 export interface ExportCenterProps {
-  /** Checked public plans use this same dialog, with one named Jianying draft per fixed version. */
+  /** Checked plans use this dialog for separate drafts or a single combined Jianying project. */
   structureBatch?: StructureBatchExportSelection;
   open: boolean;
   onClose: () => void;
@@ -282,6 +282,7 @@ export function ExportCenter(props: ExportCenterProps) {
   const [nameTyped, setNameTyped] = React.useState(false);
   const batchSession = React.useRef(false);
   const [batchDestination, setBatchDestination] = React.useState<'jianying' | 'folder'>('folder');
+  const [batchMode, setBatchMode] = React.useState<'separate' | 'combined'>('separate');
   const [jianyingFolder, setJianyingFolder] = React.useState<string | null>(null);
 
   React.useEffect(() => {
@@ -302,7 +303,7 @@ export function ExportCenter(props: ExportCenterProps) {
     setRange((r) => ({ ...r, on: false }));
     if (batch) {
       setDefaultFolder('');
-      setJianyingFolder(null); setBatchDestination('folder');
+      setJianyingFolder(null); setBatchDestination('folder'); setBatchMode('separate');
       // Use the parent's batch output root, independent of installed editor settings and the active draft.
       setS({ ...loaded, folder: '' });
       void api.structureExports(batch.projectId).then(r => { if (alive) { setDefaultFolder(r.folder); setJianyingFolder(r.jianyingFolder ?? null); setBatchDestination(r.jianyingFolder ? 'jianying' : 'folder'); } }).catch(e => { if (alive) setResult({ ok: false, text: String(e.message ?? e) }); });
@@ -550,7 +551,7 @@ export function ExportCenter(props: ExportCenterProps) {
       if (!folder) { setResult({ ok: false, text: t('exportCenter.noFolder') }); return; }
       setWorking('正在保存并固定所选版本…');
       try {
-        await batch.onExport({ name: exportName.trim() || batch.title, folder, destination: batchDestination });
+        await batch.onExport({ name: exportName.trim() || batch.title, folder, destination: batchDestination, mode: batchMode });
         onClose();
       } catch (e) {
         if (e instanceof StructureExportSelectionChangedError) onClose();
@@ -622,7 +623,7 @@ export function ExportCenter(props: ExportCenterProps) {
   if (!open || typeof document === 'undefined') return null;
 
   const primaryLabel = working
-    ?? (batch ? `批量导出 ${batch.ordinals.length} 份剪映草稿` : fileCount > 1 ? t('exportCenter.exportN').replace('{n}', String(fileCount)) : t('exportCenter.export'));
+    ?? (batch ? batchMode === 'combined' ? '导出 1 个剪映工程' : `批量导出 ${batch.ordinals.length} 份剪映草稿` : fileCount > 1 ? t('exportCenter.exportN').replace('{n}', String(fileCount)) : t('exportCenter.export'));
   const disabled = Boolean(working) || Boolean(emptyReason) || !folder;
 
   return createPortal(
@@ -678,7 +679,7 @@ export function ExportCenter(props: ExportCenterProps) {
           <div className="flex shrink-0 items-center gap-2 px-5 pb-1 pt-4">
             <div className="min-w-0 flex-1">
               <h3 className="text-[14px] font-semibold text-[var(--text)]">{batch ? `已选 ${batch.ordinals.length} 条方案` : t(`exportCenter.dest.${dest}`)}</h3>
-              <p className="mt-0.5 text-[12px] leading-relaxed text-[var(--text-muted)]">{batch ? '每条单独导出剪映草稿，优先使用对应的个人修改' : tApp(`exportCenter.destDesc.${dest}`)}</p>
+              <p className="mt-0.5 text-[12px] leading-relaxed text-[var(--text-muted)]">{batch ? batchMode === 'combined' ? '所选方案按编号接在同一条时间线上，优先使用个人修改' : '每条单独导出剪映草稿，优先使用对应的个人修改' : tApp(`exportCenter.destDesc.${dest}`)}</p>
             </div>
             <button
               type="button"
@@ -694,6 +695,12 @@ export function ExportCenter(props: ExportCenterProps) {
           <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 pb-4 pt-3">
             <div className="flex flex-col gap-5">
               {batch ? <>
+                <Field label="工程方式">
+                  <div className="flex flex-wrap gap-2" role="group" aria-label="工程方式">
+                    {(['separate', 'combined'] as const).map(mode => <button key={mode} type="button" disabled={Boolean(working)} aria-pressed={batchMode === mode} onClick={() => { setBatchMode(mode); setResult(null); }} style={batchMode === mode ? { borderColor: 'var(--accent)', backgroundColor: 'var(--accent)', color: 'var(--on-accent)' } : undefined} className="flex items-center gap-1.5 rounded-lg border border-[var(--border)] px-3 py-2 text-[13px] transition duration-150 hover:bg-[var(--bg-hover)] active:scale-95 disabled:opacity-40"><Check size={13} className={`transition-opacity duration-150 ${batchMode === mode ? 'opacity-100' : 'opacity-0'}`} />{mode === 'separate' ? '每条一个工程' : '合并到一个工程'}</button>)}
+                  </div>
+                  <p className="mt-2 text-[12px] leading-relaxed text-[var(--text-muted)]">{batchMode === 'combined' ? '新建一个剪映工程，保留每条方案的片段、字幕和倍速。画布使用第一条方案的尺寸。' : '保持当前方式，每条方案生成独立的剪映工程。'}</p>
+                </Field>
                 <Field label="导出到">
                   <div className="flex gap-2">
                     <button type="button" disabled={!jianyingFolder || Boolean(working)} aria-pressed={batchDestination === 'jianying'} onClick={() => setBatchDestination('jianying')} className={`rounded-lg border px-3 py-2 text-[13px] transition hover:bg-[var(--bg-hover)] active:scale-95 disabled:opacity-40 ${batchDestination === 'jianying' ? 'border-[var(--accent)] text-[var(--accent)]' : 'border-[var(--border)]'}`}>剪映草稿库</button>
@@ -702,16 +709,16 @@ export function ExportCenter(props: ExportCenterProps) {
                   {!jianyingFolder && defaultFolder && <p className="mt-2 text-[12px] text-[var(--text-muted)]">未检测到剪映草稿位置，可先保存到指定文件夹</p>}
                 </Field>
                 <Field label="草稿命名预览">
-                  <p className="mb-2 text-[12px] text-[var(--text-muted)]">下方输入统一名称，自动加方案编号。只导出已勾选的方案。</p>
+                  <p className="mb-2 text-[12px] text-[var(--text-muted)]">{batchMode === 'combined' ? '下方输入合并工程名称。只包含已勾选的方案。' : '下方输入统一名称，自动加方案编号。只导出已勾选的方案。'}</p>
                   <ul className="space-y-1 text-[13px] text-[var(--text)]">
-                    {batch.ordinals.slice(0, 5).map(number => <li key={number}>{exportName.trim() || batch.title}_方案{String(number).padStart(3, '0')}</li>)}
+                    {batchMode === 'combined' ? <li>{exportName.trim() || batch.title}</li> : batch.ordinals.slice(0, 5).map(number => <li key={number}>{exportName.trim() || batch.title}_方案{String(number).padStart(3, '0')}</li>)}
                   </ul>
-                  {batch.ordinals.length > 5 && <p className="mt-2 text-[12px] text-[var(--text-muted)]">其余 {batch.ordinals.length - 5} 份按对应方案编号命名</p>}
+                  {batchMode === 'separate' && batch.ordinals.length > 5 && <p className="mt-2 text-[12px] text-[var(--text-muted)]">其余 {batch.ordinals.length - 5} 份按对应方案编号命名</p>}
                   <p className="mt-2 text-[11px] text-[var(--text-faint)]">特殊字符沿用原导出的文件命名规则整理</p>
                 </Field>
                 <Field label="保存位置">
                   <p className="break-all text-[12px] text-[var(--text)]">{folder || '正在读取保存位置…'}</p>
-                  <p className="mt-2 text-[12px] leading-relaxed text-[var(--text-muted)]">{batchDestination === 'jianying' ? '沿用普通导出的剪映草稿位置，每条直接写入草稿库。素材也保存在该草稿库中，不依赖试用工程。' : '在此目录内新建本批文件夹，完成后可点击「打开文件夹」。此方式不会直接出现在剪映首页；请保留本批完整目录和共用素材。'}</p>
+                  <p className="mt-2 text-[12px] leading-relaxed text-[var(--text-muted)]">{batchDestination === 'jianying' ? '沿用普通导出的剪映草稿位置，工程直接写入草稿库。素材也保存在该草稿库中，不依赖试用工程。' : '在此目录内新建本批文件夹，完成后可点击「打开文件夹」。此方式不会直接出现在剪映首页；请保留本批完整目录和共用素材。'}</p>
                 </Field>
                 <p className="text-[12px] leading-relaxed text-[var(--text-muted)]">使用每条对应的个人草稿；未编辑过的使用公共方案。确认导出时固定版本，后续切换或修改不会改变本批内容。</p>
               </> : <>
@@ -1303,7 +1310,7 @@ export function ExportCenter(props: ExportCenterProps) {
                 ) : (
                   <>
                     {/* a project is not a length of film: its size only */}
-                    {batch ? <span className="block text-[var(--text-muted)]">{batch.ordinals.length} 份独立草稿</span> : dest !== 'project' ? (
+                    {batch ? <span className="block text-[var(--text-muted)]">{batchMode === 'combined' ? `1 个工程 · ${batch.ordinals.length} 条方案` : `${batch.ordinals.length} 份独立草稿`}</span> : dest !== 'project' ? (
                       <span className="block text-[var(--text-muted)] tabular-nums">
                         {t('exportCenter.summary').replace('{n}', String(fileCount)).replace('{dur}', formatFilmTime(outMs))}
                       </span>

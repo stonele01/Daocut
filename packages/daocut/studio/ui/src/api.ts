@@ -10,7 +10,7 @@ import { studioHost } from '@/lib/host';
 import { watchStudioVersion } from '@/lib/studio-version';
 import { trackDraftWrite } from '@/lib/draft-save-barrier';
 import type { StructureScope, StructurePlansState, StructureWorkspaceState } from '@/lib/structure-workspace';
-import type { StructureExportBatch } from '@/lib/structure-export-selection';
+import type { StructureExportBatch, StructureBatchExportOptions } from '@/lib/structure-export-selection';
 import type { ProductMediaReview } from '@/lib/product-media-review';
 import type { ProductVisualReview, ProductVisualPlan } from '@/lib/product-visual-review';
 
@@ -211,7 +211,7 @@ export type TranscriptReviewState = { available: false; sourceId: string } | {
 
 export const api = {
   structureExports: (id: string) => call<{ batches: StructureExportBatch[]; folder: string; jianyingFolder?: string | null }>(`${p(id)}/structure-exports`),
-  exportStructurePlans: (id: string, scope: StructureScope, taskKey: string, planIds: string[], requestId: string, options?: { name: string; folder: string; destination: 'jianying' | 'folder' }) => call<StructureExportBatch>(`${p(id)}/structure-exports`, { method: 'POST', json: { ...scope, taskKey, planIds, requestId, ...options } }),
+  exportStructurePlans: (id: string, scope: StructureScope, taskKey: string, planIds: string[], requestId: string, options?: StructureBatchExportOptions) => call<StructureExportBatch>(`${p(id)}/structure-exports`, { method: 'POST', json: { ...scope, taskKey, planIds, requestId, ...options } }),
   revealStructureExport: (id: string, batchId: string) => call<object>(`${p(id)}/structure-exports/${encodeURIComponent(batchId)}/reveal`, { method: 'POST', json: {} }),
   retryStructureExport: (id: string, batchId: string) => call<StructureExportBatch>(`${p(id)}/structure-exports/${encodeURIComponent(batchId)}/retry`, { method: 'POST', json: {} }),
   cancelStructureExport: (id: string, batchId: string) => call<StructureExportBatch>(`${p(id)}/structure-exports/${encodeURIComponent(batchId)}/cancel`, { method: 'POST', json: {} }),
