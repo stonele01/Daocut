@@ -4,7 +4,7 @@ import { constants, createReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { filmHtml, readFilmFile } from '../../src/film-doc.mjs';
-import { inspectMediaReference } from '../../src/shared-media-reference.mjs';
+import { inspectMediaReference, mediaContentHash, SAMPLED_MEDIA_IDENTITY } from '../../src/shared-media-reference.mjs';
 import { readable } from './files.mjs';
 import { listStructureDrafts, STRUCTURE_DRAFT_META } from './structure-drafts.mjs';
 import { FILM_SUBTITLE_DEFAULT } from './film-subtitle.mjs';
@@ -28,8 +28,10 @@ function publicFilm(plan, analysis, parentFilm) {
   const sourceIds = new Set(plan.clips.map(clip => clip.sourceId));
   const source = sourceIds.size === 1 && analysis.sources?.find(item => sourceIds.has(item.id));
   if (!source || !safeAsset(source.assetPath) || !(source.durationMs > 0)) fail('公共方案原片或时长无效');
-  const scope = analysis.intervals?.find(item => item.id === plan.scope?.intervalId && item.sourceId === source.id && item.productId === plan.scope?.productId);
-  if (!scope || ['sourceId', 'productId', 'startMs', 'endMs'].some(key => plan.scope?.[key] !== scope[key])) fail('商品讲解范围已变化，未导出旧范围方案');
+  const scopes = [...(analysis.intervals ?? []), ...(analysis.scopes ?? []).filter(item => item.kind === 'historical-analysis' && item.confirmed === true)]
+    .filter(item => item.id === plan.scope?.intervalId && item.sourceId === source.id && item.productId === plan.scope?.productId);
+  const scope = scopes[0];
+  if (scopes.length !== 1 || ['sourceId', 'productId', 'startMs', 'endMs'].some(key => plan.scope?.[key] !== scope[key])) fail('商品讲解范围已变化，未导出旧范围方案');
   let at = 0;
   const clips = plan.clips.map((clip, index) => {
     if (!Number.isSafeInteger(clip.startMs) || !Number.isSafeInteger(clip.endMs) || clip.startMs < scope.startMs || clip.endMs > scope.endMs || clip.endMs > source.durationMs || clip.endMs <= clip.startMs || typeof clip.text !== 'string' || !clip.text.trim() || !Array.isArray(clip.roles) || !Array.isArray(clip.coreIds) || (clip.assetPath !== undefined && clip.assetPath !== source.assetPath)) fail('公共方案片段边界、原话或原片身份无效');
@@ -88,8 +90,8 @@ export async function captureStructureExport(project, { plan, itemRoot }) {
     const info = await fs.stat(sourcePath);
     if (!info.isFile()) fail(`原片不可用：${assetPath}`);
     const record = reference?.reference ?? manifest?.items?.[assetPath];
-    if (record && (info.size !== record.size || (record.sha256 !== undefined && !/^[a-f0-9]{64}$/.test(record.sha256)))) fail(`原片身份已变化：${assetPath}`);
-    media.push({ assetPath, sourcePath, identity: identity(info), ...(record?.sha256 ? { sha256: record.sha256 } : {}) });
+    if (record && (info.size !== record.size || (record.sha256 !== undefined && !/^[a-f0-9]{64}$/.test(record.sha256)) || (record.identityKind !== undefined && record.identityKind !== SAMPLED_MEDIA_IDENTITY))) fail(`原片身份已变化：${assetPath}`);
+    media.push({ assetPath, sourcePath, identity: identity(info), ...(record?.sha256 ? { sha256: record.sha256, ...(record.identityKind ? { identityKind: record.identityKind } : {}) } : {}) });
     const translations = (await translationsOf(sourceRoot, assetPath)).sort(); transcriptLists.set(assetPath, translations);
     for (const rel of [transcriptPath(assetPath), ...translations.map(language => transcriptPath(assetPath, language))]) {
       const bytes = await small(sourceRoot, rel); if (bytes) files.set(rel, bytes);
@@ -143,21 +145,31 @@ async function frozenMedia(source, mediaRoot) {
     if (!info.isFile() || !sameIdentity(identity(info), source.identity)) fail(`原片在排队期间发生变化：${source.assetPath}`);
   };
   await check();
+  const verify = async (path, sha256) => {
+    const expected = source.sha256 && !source.identityKind ? source.sha256 : await fileHash(source.sourcePath);
+    if (sha256 !== expected || (source.identityKind && await mediaContentHash(path, { identityKind: source.identityKind }) !== source.sha256)) fail(`原片内容与保存的身份不一致：${source.assetPath}`);
+    await check();
+  };
   const key = hash([source.sourcePath, source.identity]), target = join(mediaRoot, `${key}${extname(source.assetPath).toLowerCase()}`);
   const existing = await optional(target);
   if (existing) {
     if (!existing.isFile() || existing.isSymbolicLink() || existing.size !== source.identity.size) fail('已冻结素材发生变化');
-    const sha256 = await fileHash(target), expected = source.sha256 ?? await fileHash(source.sourcePath);
-    await check();
-    if (sha256 !== expected) fail('已冻结素材与原片身份不一致');
+    const sha256 = await fileHash(target);
+    await verify(target, sha256);
     return { path: target, sha256, identity: identity(await fs.stat(target)) };
+  }
+  const space = await fs.statfs(mediaRoot), available = Number(space.bavail) * Number(space.bsize);
+  if (available < source.identity.size) {
+    const gb = bytes => (bytes / 1e9).toFixed(2);
+    throw Object.assign(new Error(`导出磁盘空间不足：保存共用原片需要 ${gb(source.identity.size)} GB，当前可用 ${gb(available)} GB。请释放空间或更换剪映草稿目录后重新导出；同批方案只复制一份原片。`), { code: 'ENOSPC' });
   }
   const part = `${target}.copying-${randomUUID()}`;
   try {
     await fs.copyFile(source.sourcePath, part, constants.COPYFILE_EXCL);
     const copied = await fs.stat(part), sha256 = await fileHash(part);
     await check();
-    if (copied.size !== source.identity.size || (source.sha256 && sha256 !== source.sha256)) fail(`原片内容与保存的身份不一致：${source.assetPath}`);
+    if (copied.size !== source.identity.size) fail(`原片内容与保存的身份不一致：${source.assetPath}`);
+    await verify(part, sha256);
     await fs.rename(part, target);
     return { path: target, sha256, identity: identity(await fs.stat(target)) };
   } finally { await fs.rm(part, { force: true }); }
@@ -172,15 +184,16 @@ export async function materializeStructureExport(snapshot, { mediaRoot, mediaCac
     if (!safeAsset(source.assetPath) || !STATIC_MEDIA.test(source.assetPath) || !isAbsolute(source.sourcePath)) fail('导出素材引用无效');
     const info = await fs.stat(source.sourcePath);
     if (!sameIdentity(identity(info), source.identity)) fail(`原片在排队期间发生变化：${source.assetPath}`);
-    const key = JSON.stringify([root, source.sourcePath, source.identity]);
+    const key = JSON.stringify([root, source.sourcePath, source.identity, source.sha256, source.identityKind]);
     let work = mediaCache.get(key);
     if (!work) {
       work = frozenMedia(source, root); mediaCache.set(key, work);
-      void work.catch(() => { if (mediaCache.get(key) === work) mediaCache.delete(key); });
+      // Keep ENOSPC for this batch; an explicit retry creates a fresh cache.
+      void work.catch(error => { if (error.code !== 'ENOSPC' && mediaCache.get(key) === work) mediaCache.delete(key); });
     }
     const copied = await work, output = join(snapshot.root, source.assetPath), cacheInfo = await fs.stat(copied.path);
     // Linking changes ctime, but must never change the copied file's identity, size or contents timestamp.
-    if (['size', 'mtimeMs', 'ino', 'dev'].some(key => cacheInfo[key] !== copied.identity[key]) || (source.sha256 && source.sha256 !== copied.sha256)) fail('已冻结素材发生变化或与原片身份不一致');
+    if (['size', 'mtimeMs', 'ino', 'dev'].some(key => cacheInfo[key] !== copied.identity[key]) || (source.sha256 && !source.identityKind && source.sha256 !== copied.sha256)) fail('已冻结素材发生变化或与原片身份不一致');
     await fs.mkdir(dirname(output), { recursive: true });
     const present = await optional(output);
     if (present) {

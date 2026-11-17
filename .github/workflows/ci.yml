@@ -70,6 +70,12 @@ jobs:
           packages/daocut/studio/server/project-backup-sampled.test.mjs
           packages/daocut/studio/server/project-backup-legacy-reference.test.mjs
           packages/daocut/studio/server/structure-drafts.test.mjs
+      - name: Check saved structure exports without model calls
+        # Frozen exports must also accept the exact saved ranges restored by shared layouts.
+        run: >-
+          node --test --test-concurrency=1
+          packages/daocut/studio/server/structure-export-snapshot.test.mjs
+          packages/daocut/studio/server/structure-batch-exports.test.mjs
       - name: Check LAN publisher files and manifests
         # The combined publisher/service route test needs both independent installs.
         # The service job below covers the real HTTP/range/TLS routes; see README.md for the combined local test.
