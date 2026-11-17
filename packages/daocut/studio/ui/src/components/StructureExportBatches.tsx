@@ -33,7 +33,7 @@ export function StructureExportBatches({ projectId, revision }: { projectId: str
     <div className="mt-2 max-h-48 space-y-3 overflow-y-auto">
       {batches.map(batch => <details key={batch.id} className="border-t border-[var(--border)] pt-2" open={batch === batches[0]}>
         <summary className="cursor-pointer">{statusText(batch.status)} · 成功 {batch.completed}/{batch.total}{batch.failed ? ` · 失败 ${batch.failed}` : ''}</summary>
-        <progress className="mt-1 w-full accent-[var(--accent)]" aria-label="批量导出进度" max={1} value={batch.progress} />
+        <progress className={`mt-1 w-full ${batch.failed ? 'accent-[var(--warn)]' : 'accent-[var(--accent)]'}`} aria-label="批量导出进度" max={1} value={batch.progress} />
         <p className="break-all text-[var(--text-muted)]" title={batch.folder}>目录：{batch.folder}</p>
         <p className="mt-1 text-[var(--text-muted)]">{batch.destination === 'jianying' ? '目标为剪映草稿库，共用素材随库保留' : '草稿共用本批素材，请保留完整导出目录'}</p>
         <div className="my-2 flex flex-wrap gap-1">

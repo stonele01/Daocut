@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import { filmHtml } from '../../src/film-doc.mjs';
@@ -42,6 +43,70 @@ test('capture public plan freezes only small files without making a personal dra
   assert.equal((await listStructureDrafts(f.root)).length, 0);
   assert.equal(await read(f.root, 'film.html'), before);
   await assert.rejects(captureStructureExport(f.project, { plan: f.plan, itemRoot: result.root }), /存在|existing/i);
+});
+
+test('shared layout keeps the exact confirmed historical plan exportable without changing saved analysis', async t => {
+  const f = await fixture(t), analysis = JSON.parse(await read(f.root, '.film/product-analysis.json'));
+  analysis.scopes = [{ ...analysis.intervals[0], kind: 'historical-analysis', confirmed: true, sharedLayoutHidden: true }];
+  analysis.intervals = [{ ...analysis.intervals[0], id: 'layout-new', productId: 'display-product', startMs: 500, endMs: 19000, savedResultScopeId: 'lecture' }];
+  const saved = JSON.stringify(analysis); await fs.writeFile(join(f.root, '.film/product-analysis.json'), saved);
+  const snapshot = await captureStructureExport(f.project, { plan: f.plan, itemRoot: f.item('historical') });
+  await materializeStructureExport(snapshot, { mediaRoot: f.mediaRoot });
+  assert.equal(snapshot.origin, 'public');
+  assert.deepEqual((await readProjectFilm(snapshot.root)).value.tracks[0].clips.map(c => c.time), [[1, 3], [7, 9], [12, 14]]);
+  assert.equal(await read(f.root, '.film/product-analysis.json'), saved);
+  assert.equal((await listStructureDrafts(f.root)).length, 0);
+});
+
+test('historical scope support still rejects unconfirmed, changed, ambiguous and out-of-range plans', async t => {
+  const f = await fixture(t), original = JSON.parse(await read(f.root, '.film/product-analysis.json'));
+  const scope = { ...original.intervals[0], kind: 'historical-analysis', confirmed: true };
+  for (const [name, scopes, plan] of [
+    ['unconfirmed', [{ ...scope, confirmed: false }], f.plan],
+    ['wrong-kind', [{ ...scope, kind: 'other' }], f.plan],
+    ['changed-product', [{ ...scope, productId: 'other' }], f.plan],
+    ['changed-range', [{ ...scope, startMs: 500 }], f.plan],
+    ['ambiguous', [scope, { ...scope }], f.plan],
+    ['outside', [scope], { ...f.plan, clips: [{ ...f.plan.clips[0], endMs: 21000 }] }],
+  ]) {
+    await fs.writeFile(join(f.root, '.film/product-analysis.json'), JSON.stringify({ ...original, intervals: [], scopes }));
+    await assert.rejects(captureStructureExport(f.project, { plan, itemRoot: f.item(name) }), /范围|边界/);
+    await assert.rejects(fs.stat(f.item(name)), { code: 'ENOENT' });
+  }
+});
+
+test('disk space is checked before copying and one batch does not retry the same full source after ENOSPC', async t => {
+  const f = await fixture(t), mediaCache = new Map();
+  const a = await captureStructureExport(f.project, { plan: f.plan, itemRoot: f.item('a') });
+  const b = await captureStructureExport(f.project, { plan: { ...f.plan, id: 'b' }, itemRoot: f.item('b') });
+  let available = 0, probes = 0, copies = 0; const copy = fs.copyFile;
+  t.mock.method(fs, 'statfs', async () => { probes++; return { bsize: 1, bavail: available }; });
+  t.mock.method(fs, 'copyFile', async (...args) => { copies++; return copy(...args); });
+  const noSpace = error => error.code === 'ENOSPC' && /空间不足.*需要.*可用.*更换/.test(error.message);
+  await assert.rejects(materializeStructureExport(a, { mediaRoot: f.mediaRoot, mediaCache }), noSpace);
+  await assert.rejects(materializeStructureExport(b, { mediaRoot: f.mediaRoot, mediaCache }), noSpace);
+  assert.equal(copies, 0); assert.equal(probes, 1);
+  assert.deepEqual(await fs.readdir(f.mediaRoot), []);
+  available = 1024 ** 3;
+  await materializeStructureExport(a, { mediaRoot: f.mediaRoot, mediaCache: new Map() });
+  assert.equal(copies, 1, 'an explicit retry with recovered space may copy again');
+  available = 0;
+  await materializeStructureExport(b, { mediaRoot: f.mediaRoot, mediaCache: new Map() });
+  assert.equal(copies, 1, 'existing frozen media needs no second full-size allocation');
+});
+
+test('sampled shared media identities are retained and verified with the right hash format', async t => {
+  const f = await fixture(t), bytes = await fs.readFile(join(f.root, 'assets/live.mp4'));
+  const identityKind = 'sampled-sha256-v1';
+  const sha256 = createHash('sha256').update(`${identityKind}\0${bytes.length}\0`).update(bytes).digest('hex');
+  await fs.writeFile(join(f.root, 'assets/.daocut-source-media.json'), JSON.stringify({ version: 1, items: { 'assets/live.mp4': { mode: 'copy', size: bytes.length, identityKind, sha256 } } }));
+  const a = await captureStructureExport(f.project, { plan: f.plan, itemRoot: f.item('a') });
+  const b = await captureStructureExport(f.project, { plan: { ...f.plan, id: 'b' }, itemRoot: f.item('b') });
+  assert.equal(a.media[0].identityKind, identityKind);
+  const result = await materializeStructureExport(a, { mediaRoot: f.mediaRoot });
+  assert.equal(result.frozenMedia[0].sha256, createHash('sha256').update(bytes).digest('hex'));
+  await materializeStructureExport(b, { mediaRoot: f.mediaRoot });
+  assert.deepEqual(await fs.readFile(join(b.root, 'assets/live.mp4')), bytes);
 });
 
 test('private plan version wins and captured order trim subtitles style and settings survive later edits', async t => {
