@@ -19,7 +19,7 @@ Daocut is a local AI video editing workspace for livestream product clips. It co
 
 The editor also supports footage, images, audio, HTML scenes, subtitles and its existing export formats. A project is a folder containing `film.html` and its assets; see the [manual](packages/daocut/MANUAL.md) and [film format](packages/daocut/SPEC.md).
 
-Current source version: **0.2.71**. This patch fixes shared historical-plan exports and sampled video identity checks, and reports insufficient disk space before copying a full recording. See the [export fix handoff](docs/HANDOFF-0.2.71.md) for validation and retry instructions, the [0.2.70 handoff](docs/HANDOFF-0.2.70.md) for shared recovery and playback measurements, and the [development guide](docs/DEVELOPMENT.md) for implementation paths. Full production export on another physical computer still needs acceptance.
+Current source version: **0.2.72**. New selected-plan exports save only the used media ranges. Four saved 30–40 second plans from a 30.25 GB recording produced about 200.5 MB of shared media in 46 seconds on the local acceptance machine. See the [selected export handoff](docs/HANDOFF-0.2.72.md) for verification, editing limits and retry instructions, the [0.2.71 handoff](docs/HANDOFF-0.2.71.md) for the preceding scope fix, and the [development guide](docs/DEVELOPMENT.md) for implementation paths. Jianying acceptance on another physical computer remains outstanding.
 
 ## Use or develop
 

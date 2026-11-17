@@ -10,7 +10,7 @@ const scope = { sourceId: 'source', productId: 'product', intervalId: 'lecture',
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const tick = () => new Promise(done => setTimeout(done, 1));
 
-async function fixture(t, { count = 8, hold = false, captureFailure } = {}) {
+async function fixture(t, { count = 8, hold = false, captureFailure, selectedMedia = false } = {}) {
   const { createStructureBatchExports } = await import('./structure-batch-exports.mjs');
   await mkdir(base, { recursive: true });
   const dir = await mkdtemp(join(base, 'case-')), root = join(dir, 'project'), output = join(dir, 'output');
@@ -32,7 +32,7 @@ async function fixture(t, { count = 8, hold = false, captureFailure } = {}) {
   };
   const exports = {
     startSnapshot(projectArg, ask) {
-      const snapshot = captured.find(c => c.root === projectArg.path);
+      const snapshot = captured.find(c => (selectedMedia ? join(c.root, 'selected-export') : c.root) === projectArg.path);
       assert.ok(snapshot, 'only a captured project may be exported');
       assert.equal(ask.kind, 'nle'); assert.equal(ask.format, 'jianying'); assert.equal(ask.media, 'link');
       const job = { id: `job-${++serial}`, project: projectArg.id, planId: snapshot.planId, status: 'running', progress: 0.25, outputs: [] };
@@ -55,6 +55,7 @@ async function fixture(t, { count = 8, hold = false, captureFailure } = {}) {
   const materialize = async (snapshot, { mediaRoot, mediaCache }) => {
     assert.ok(mediaRoot.startsWith(dir + sep)); assert.ok(mediaCache instanceof Map);
     materialized.push(snapshot.planId);
+    if (selectedMedia) return { ...snapshot, exportRoot: join(snapshot.root, 'selected-export') };
   };
   let configuredDrafts = null;
   const statusRequests = [];
@@ -73,6 +74,14 @@ test('batch plan lookup preserves the exact task key selected by the user', asyn
   const batch = await m.create(f.project, request); await m.wait(f.project, batch.id);
   assert.equal(f.statusRequests.length, 1);
   assert.deepEqual(f.statusRequests[0], { ...scope, taskKey: request.taskKey });
+});
+
+test('selected media hands the rebased edit to the existing export queue and preserves the frozen receipt', async t => {
+  const f = await fixture(t, { selectedMedia: true }), m = f.make();
+  const batch = await m.create(f.project, f.request(['plan-2'])); await m.wait(f.project, batch.id);
+  assert.equal(f.sent[0].project.path, join(f.captured[0].root, 'selected-export'));
+  assert.equal(f.sent[0].ask.receipt.revision, f.captured[0].revision);
+  assert.equal((await m.list(f.project)).batches[0].completed, 1);
 });
 
 test('only checked plans are frozen and exported, in original plan order, without changing the parent film', async t => {

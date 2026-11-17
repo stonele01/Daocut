@@ -201,13 +201,13 @@ export function createStructureBatchExports({ plans, exports, outputRoot, captur
       await persist(project, batch);
       try {
         if (batch.destination === 'jianying') await existingDraftsFolder(batch.draftsFolder);
-        await materialize(item.snapshot, { mediaRoot: join(batch.folder, '_media'), mediaCache });
+        const prepared = await materialize(item.snapshot, { mediaRoot: join(batch.folder, '_media'), mediaCache });
         if (closed || batch.cancelRequested) { await interrupt(project, batch); return; }
         // Persist intent before dispatch: after a crash, a missing job/receipt is
         // an unknown result, not evidence that submitting again is harmless.
         item.attempted = true; await persist(project, batch);
         const exportName = item.exportName ?? `${project.name} ${item.label}`;
-        const job = exports.startSnapshot({ id: project.id, name: exportName, path: item.snapshot.root },
+        const job = exports.startSnapshot({ id: project.id, name: exportName, path: prepared?.exportRoot ?? item.snapshot.root },
           { kind: 'nle', format: 'jianying', media: 'link', ...(item.exportName ? { name: exportName } : {}), subtitles: true, fps: item.snapshot.fps ?? 30, folder: draftsFolderOf(batch),
             receipt: { batchId: batch.id, itemId: item.id, revision: item.revision } });
         item.jobId = job.id;
