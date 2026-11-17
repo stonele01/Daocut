@@ -103,5 +103,23 @@ test('real isolated company HTTP and desktop bridge admit one shared analysis an
   const item = catalogue.results.find(item => item.taskKey === historicalPlan.taskKey);
   assert.ok(item); assert.equal(item.catalog.action, 'analysis'); assert.equal(item.catalog.count, 40);
   const selected = await stores[1].historicalArtifact(roots[1], sources[1], item.taskKey, item.result.sha256); assert.equal(selected.snapshot.payload.candidates.length, 40); assert.equal(modelCalls, 1);
+  const segmentInputs = [
+    { action: 'analysis', scope: { startMs: 0, endMs: 4000 }, data: [{ startMs: 0, endMs: 1500, text: 'Synthetic product A' }], contract: { model: 'simulated-only' } },
+    { action: 'analysis', scope: { startMs: 4000, endMs: 8000 }, data: [{ startMs: 4000, endMs: 5500, text: 'Synthetic product B' }], contract: { model: 'simulated-only' } },
+  ];
+  const segments = await Promise.all(stores.map((store, index) => store.prepare(roots[index], sources[index], segmentInputs[index])));
+  assert.notEqual(segments[0].taskKey, segments[1].taskKey);
+  const claims = await Promise.all(stores.map((store, index) => store.acquire(segments[index])));
+  const duplicate = await stores[1].prepare(roots[1], sources[1], segmentInputs[0]);
+  await assert.rejects(stores[1].acquire(duplicate), 'the same segment cannot be claimed twice while in progress');
+  const outputs = [{ product: 'A' }, { product: 'B' }];
+  await Promise.all(stores.map((store, index) => store.complete(roots[index], segments[index], claims[index].attemptId, outputs[index])));
+  for (let index = 0; index < 2; index++) {
+    const other = 1 - index;
+    const savedSegment = await stores[other].prepare(roots[other], sources[other], segmentInputs[index]);
+    assert.equal(savedSegment.mode, 'reuse');
+    assert.deepEqual((await stores[other].read(roots[other], savedSegment)).payload, outputs[index]);
+  }
+  assert.deepEqual((await stores[follower].read(roots[follower], reused)).payload, payload, 'existing discovery is preserved');
   await assert.rejects(clients[0].sharedAnalysis('claim', { taskKey: '8'.repeat(64), inputHash: '9'.repeat(64), clientAttemptId: 'bad-catalog', catalog: { ...item.catalog, provenance: { kind: { apiKey: 'forbidden-private-config' } } } }));
 });

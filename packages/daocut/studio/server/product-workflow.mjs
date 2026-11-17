@@ -13,8 +13,10 @@ import { parseVtt, transcriptPath } from './transcripts.mjs';
 import { readable } from './files.mjs';
 import { analyzeTextStructure } from './text-structure.mjs';
 import { createExistingAnalysisPublication } from './existing-analysis-publication.mjs';
-import { openNewSharedProject, readSharedProjectOpen, refreshEmptySharedProject } from './shared-project-open.mjs';
+import { openNewSharedProject, readSharedProjectOpen, refreshEmptySharedProject, resumeSharedAnalyses } from './shared-project-open.mjs';
 import { importExistingTranscriptArtifact, readExistingTranscriptArtifact } from './existing-transcript-artifact.mjs';
+import { createSharedProductLayout } from './shared-product-layout.mjs';
+import { withMediaReferenceSnapshot } from '../../src/shared-media-reference.mjs';
 
 const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).filter(key => value[key] !== undefined).sort().map(key => [key, canonical(value[key])])) : value;
 const hash = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
@@ -27,6 +29,13 @@ const noCost = basis => ({ estimate: null, currency: null, uncertain: true, basi
 export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis, analysisServices = async () => ({}), readTranscript = readProductTranscript, probeSource = probe, audioPolicy = AUDIO_SEGMENT_POLICY, authorizeTask = async () => {} } = {}) {
   const starting = new Map(), running = new Map(), preparing = new Map(), adopting = new Set();
   const existingPublication = createExistingAnalysisPublication({ liveAnalysis, discovery, sharedAnalysis, importNormal: importDiscoveredShared });
+  const productLayout = createSharedProductLayout({ shared: sharedAnalysis, probeSource });
+  existingPublication.restoreLayout = (root, sourceId) => productLayout.sync(root, sourceId);
+  async function syncProductLayout(root, publish = false) {
+    const before = (await readProductAnalysis(root)).analysis;
+    for (const source of before.sources) await productLayout.sync(root, source.id, { publish });
+    return { changed: hash(before) !== hash((await readProductAnalysis(root)).analysis) };
+  }
   async function sourceFor(root, sourceId) {
     const { analysis } = await readProductAnalysis(root);
     const source = analysis.sources.find(item => item.id === sourceId);
@@ -90,9 +99,10 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
       } catch { /* Leave the durable uncertain status visible until input and company can be verified. */ }
     }
     if (shared?.mode === 'local-review' && live.transcription.status === 'complete') shared = { ...shared, mode: 'local-only', reason: '本机转写已核对，可继续本机拆品；人工接缝修正不共享，其他同事的转写仍需核对' };
+    const layoutState = await readFile(join(root, '.film', `shared-layout-${sourceHash(sourceId)}.json`), 'utf8').then(JSON.parse).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
     const preparation = await readProductPreparationState(root, sourceId);
     if (preparation?.status === 'running' && !preparing.has(`${root}\0${sourceId}`)) Object.assign(preparation, { status: 'failed', error: '转写拆品已中断，已完成的结果会复用，请点击继续。' });
-    return { source, ready, discoveryReady, needsReview, busy: starting.has(`${root}\0${sourceId}`) || running.has(`${root}\0${sourceId}`) || preparing.has(`${root}\0${sourceId}`), phase: discoveryReady ? 'ready' : live.transcription.status === 'complete' ? 'discovery' : 'transcription', transcription: live.transcription, discovery: split, ...(preparation ? { preparation } : {}), ...(binding ? { binding } : {}), ...(shared ? { shared } : {}) };
+    return { ...(layoutState?.pending ? { sharingWarning: `商品关联待补存：${layoutState.error}。点击刷新共享分析和方案可免费重试保存` } : {}), source, ready, discoveryReady, needsReview, busy: starting.has(`${root}\0${sourceId}`) || running.has(`${root}\0${sourceId}`) || preparing.has(`${root}\0${sourceId}`), phase: discoveryReady ? 'ready' : live.transcription.status === 'complete' ? 'discovery' : 'transcription', transcription: live.transcription, discovery: split, ...(preparation ? { preparation } : {}), ...(binding ? { binding } : {}), ...(shared ? { shared } : {}) };
   }
   const sharedPublic = descriptor => descriptor ? Object.fromEntries(['mode', 'taskKey', 'status', 'reason', 'result', 'coordinationId', 'familyKey', 'newVersion', 'recoverCached'].filter(k => descriptor[k] !== undefined).map(k => [k, descriptor[k]])) : undefined;
   async function sharedFor(root, source, analysis, action, scope, rerun, newVersion = false) {
@@ -100,11 +110,10 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
     let transcript = null;
     try { transcript = await readTranscript(root, source); } catch (error) { if (action !== 'transcription') throw error; }
     const manual = (analysis.manualEdits ?? []).filter(edit => edit.action === 'manual-save' && edit.sourceIds.includes(source.id));
-    const adjustedRange = scope && manual.some(edit => {
-      const before = edit.before.intervals.find(i => i.id === scope.intervalId), after = edit.after.intervals.find(i => i.id === scope.intervalId);
-      return (!before || !after || before.startMs !== after.startMs || before.endMs !== after.endMs || before.productId !== after.productId);
-    });
-    const localOnly = rerun ? '明确重新分析仅生成本机新版本，共享首版不变' : transcript?.localReconciled ? '人工确认或修改的转写仅用于本机分析，不上传共享底稿' : adjustedRange || (action === 'discovery' && manual.length) ? '人工修改只保存在本机，新分析不会覆盖共享首版' : undefined;
+    // A manually selected range still produces an original AI result. Share
+    // that first result by source/time and original transcript, without sharing
+    // private product edits or replacing a different range's existing result.
+    const localOnly = rerun ? '明确重新分析仅生成本机新版本，共享首版不变' : transcript?.localReconciled ? '人工确认或修改的转写仅用于本机分析，不上传共享底稿' : action === 'discovery' && manual.length ? '人工商品修改只保存在本机，新拆品不会覆盖共享首版' : undefined;
     const selectedTranscript = action === 'analysis' ? productTranscriptRange(transcript, scope, source.durationMs) : null;
     const data = action === 'transcription' ? null : selectedTranscript ? { cues: selectedTranscript.segments, cueIndices: selectedTranscript.cueIndices } : transcript?.cues;
     // Reuse/recovery publishes the original paid judgment under its original
@@ -152,11 +161,33 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
       return { imported: true, runId: imported.runId, count: imported.proposal?.intervals.length ?? 0 };
     }
     const reference = payload.association;
+    const restoreIndependent = async () => {
+      // Older public results contain exact cue provenance but no product link.
+      // Restore that paid result in its own scope; never guess a product by overlap.
+      const selected = productTranscriptRange(transcript, snapshot.scope, source.durationMs);
+      if (hash({ cues: selected.segments, cueIndices: selected.cueIndices }) !== snapshot.dataHash) throw new HttpError(409, '共享话术输入与当前字幕不同，已有修改保留');
+      if (!Array.isArray(payload.candidates)) throw new HttpError(409, '共享话术格式不兼容');
+      const candidates = payload.candidates.map(candidate => {
+        const first = selected.cueIndices.indexOf(candidate.cueRange?.[0]), last = selected.cueIndices.indexOf(candidate.cueRange?.[1]);
+        if (first < 0 || last < first) throw new HttpError(409, '共享话术字幕范围不属于原分析输入');
+        const lines = selected.segments.slice(first, last + 1);
+        return { ...candidate, startMs: Math.min(...lines.map(cue => cue.startMs)), endMs: Math.max(...lines.map(cue => cue.endMs)),
+          text: lines.reduce((text, cue) => text + (/[A-Za-z]$/.test(text) && /^[A-Za-z]/.test(cue.text) ? ' ' : '') + cue.text, '') };
+      });
+      const imported = await liveAnalysis.importHistorical(root, source.id, { version: 1, kind: 'historical-ai-structure', scope: snapshot.scope, candidates }, result, {
+        productId: body.productId, productName: body.productId ? undefined : body.productName || '已有话术（商品待核对）',
+        expectedAnalysis: body.expectedAnalysis, expectedSourceFingerprint: selection.localSourceFingerprint,
+        sourceSha: selection.descriptor.source.sha256, sharedWorkflow: payload,
+      });
+      return { ...imported, needsReview: true, reason: '已有话术已完整读取；原记录缺少商品关联，保留为独立分析范围，可核对商品后使用。已有结构方案仍复用原共享底稿。' };
+    };
+    if (!reference) return restoreIndependent();
     const { analysis } = await readProductAnalysis(root), split = await discovery.view(root, source.id);
-    if (!reference || split.runId !== `shared-${reference.discoverySha}` || !(analysis.discoveryApplied ?? []).some(item => item.sourceId === source.id && item.runId === split.runId)) throw new HttpError(409, '话术缺少已采用的原商品拆分依据，请在已有结果中核对；未按时间重叠猜测商品');
+    if (analysis.sharedLayouts?.[source.id]) return restoreIndependent();
+    if (split.runId !== `shared-${reference.discoverySha}` || !(analysis.discoveryApplied ?? []).some(item => item.sourceId === source.id && item.runId === split.runId)) return restoreIndependent();
     const products = analysis.products.filter(p => p.key === reference.productKey && p.sourceIds.includes(source.id));
     const ranges = analysis.intervals.filter(i => i.sourceId === source.id && products.some(p => p.id === i.productId) && i.firstCue === reference.firstCue && i.lastCue === reference.lastCue && i.startMs === snapshot.scope?.startMs && i.endMs === snapshot.scope?.endMs);
-    if (ranges.length !== 1) throw new HttpError(409, '话术对应商品段有歧义或已修改，未自动归属');
+    if (ranges.length !== 1) return restoreIndependent();
     const range = ranges[0], scope = { intervalId: range.id, productId: range.productId, startMs: range.startMs, endMs: range.endMs, lectureOnly: true };
     const selected = productTranscriptRange(transcript, scope, source.durationMs);
     if (hash({ cues: selected.segments, cueIndices: selected.cueIndices }) !== snapshot.dataHash) throw new HttpError(409, '共享话术输入与当前字幕不同，已有修改保留');
@@ -191,6 +222,7 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
     payload.count = current.action === 'transcription' ? payload.cues.length : current.action === 'analysis' ? payload.candidates.length : (await discovery.view(root, source.id)).proposal?.intervals.length ?? 0;
     if (recover) await sharedAnalysis.recover(root, descriptor, payload, current.service);
     else await sharedAnalysis.complete(root, descriptor, attemptId, payload, current.service);
+    if (current.action !== 'transcription') await productLayout.sync(root, source.id, { publish: true }).catch(() => {}); // Durable pending state is shown separately; the paid result is already complete.
   }
   async function plan(root, request) {
     const { action, sourceId } = request;
@@ -231,9 +263,10 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
       ({ cached, totalRequests, reusedRequests, transcriptSegments, retryRequired, inputIdentity, generation, windows } = prepared);
       if (prepared.rerunRequired && !rerun && !newVersion) error = '来源或配置已变化，请明确重新拆品';
     } else {
-      const interval = analysis.intervals.find(item => item.id === request.intervalId && item.productId === request.productId && item.sourceId === sourceId);
+      const interval = [...analysis.intervals, ...(analysis.scopes ?? []).filter(item => item.kind === 'confirmed-inspection')].find(item => item.id === request.intervalId && item.productId === request.productId && item.sourceId === sourceId);
       if (!interval) throw new HttpError(409, '请先选择一个有效商品讲解段');
-      scope = { sourceId, productId: interval.productId, intervalId: interval.id, startMs: interval.startMs, endMs: interval.endMs, lectureOnly: true };
+      if (interval.joinedScopeIds?.length) throw new HttpError(409, '已连接的讲解保留原分析范围；请分别选择原范围复用已有结果或分析未处理部分，避免重复提交');
+      scope = { sourceId, productId: interval.productId, intervalId: interval.id, startMs: interval.startMs, endMs: interval.endMs, lectureOnly: interval.kind !== 'confirmed-inspection' };
       const live = await liveAnalysis.view(root, sourceId, interval.id, interval.productId, scope);
       generation = { id: live.analysis.confirmationId ?? live.analysis.attemptId ?? null, status: live.analysis.status };
       inputIdentity = live.analysisPlan?.inputIdentity;
@@ -489,7 +522,22 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
   const route = async (req, res, root, rest) => {
     if (!rest.startsWith('product-workflow/')) return false;
     const params = Object.fromEntries(new URL(req.url, 'http://localhost').searchParams);
-    if (req.method === 'GET' && rest === 'product-workflow/shared-open') { json(res, 200, { sharedRead: await readSharedProjectOpen(root) }); return true; }
+    if (req.method === 'GET' && rest === 'product-workflow/shared-open') {
+      let sharedRead = await readSharedProjectOpen(root);
+      try {
+        const synced = await syncProductLayout(root);
+        if (synced.changed && sharedRead) sharedRead = { ...sharedRead, readerRevision: 2 };
+      } catch (error) {
+        sharedRead = { ...(sharedRead ?? { imported: {}, requestCount: 0 }), readerRevision: 2, status: 'review-required', warnings: [error.message] };
+      }
+      json(res, 200, { sharedRead }); return true;
+    }
+    if (req.method === 'POST' && rest === 'product-workflow/resume-shared') {
+      const body = await readJson(req);
+      if (body.confirmed !== true) throw new HttpError(400, '请确认补齐已有共享分析');
+      if ([...starting.keys(), ...running.keys(), ...preparing.keys()].some(key => key.startsWith(`${root}\0`))) throw new HttpError(409, '当前任务运行中，完成后再补齐共享分析');
+      json(res, 200, await withMediaReferenceSnapshot(() => resumeSharedAnalyses(root, body.sourceId, existingPublication))); return true;
+    }
     if (req.method === 'GET' && rest === 'product-workflow/existing-results') { json(res, 200, await existingPublication.inventory(root, params.sourceId)); return true; }
     if (req.method === 'GET' && rest === 'product-workflow/shared-history') { json(res, 200, await existingPublication.catalog(root, params.sourceId)); return true; }
     if (req.method === 'GET' && rest === 'product-workflow/shared-history-preview') { json(res, 200, await existingPublication.preview(root, params)); return true; }
@@ -508,5 +556,5 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
     }
     return false;
   };
-  return Object.assign(route, { openSharedProject: (root, input) => openNewSharedProject(root, input, { registerSource, publication: existingPublication, discovery }), refreshSharedProject: root => refreshEmptySharedProject(root, { registerSource, publication: existingPublication, discovery }), registerSource, status, plan, execute, bindTranscript, publishShared, sharedVersions, adoptShared, busy: root => [...starting.keys(), ...running.keys(), ...preparing.keys()].some(key => key.startsWith(`${root}\0`)), wait: async (root, sourceId) => { const key = `${root}\0${sourceId}`; await starting.get(key)?.promise; await preparing.get(key)?.promise; await running.get(key)?.promise; } });
+  return Object.assign(route, { syncProductLayout, resumeSharedProject: (root, sourceId) => resumeSharedAnalyses(root, sourceId, existingPublication), openSharedProject: (root, input) => openNewSharedProject(root, input, { registerSource, publication: existingPublication, discovery }), refreshSharedProject: root => refreshEmptySharedProject(root, { registerSource, publication: existingPublication, discovery }), registerSource, status, plan, execute, bindTranscript, publishShared, sharedVersions, adoptShared, busy: root => [...starting.keys(), ...running.keys(), ...preparing.keys()].some(key => key.startsWith(`${root}\0`)), wait: async (root, sourceId) => { const key = `${root}\0${sourceId}`; await starting.get(key)?.promise; await preparing.get(key)?.promise; await running.get(key)?.promise; } });
 }

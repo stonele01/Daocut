@@ -106,7 +106,8 @@ test('each analysis batch is identifiable and old candidates remain auditable af
     assert.equal(first.analysis.stale, false);
     const firstId = first.analysis.currentRunId;
     assert.ok(firstId);
-    assert.equal((await readProductAnalysis(root)).analysis.candidates[0].runId, firstId);
+    const originalCandidate = (await readProductAnalysis(root)).analysis.candidates[0];
+    assert.equal(originalCandidate.runId, firstId);
     current = { cues: [{ text: '新的价格', startMs: 100, endMs: 2000 }] };
     assert.equal((await request(route, root, 'GET', 'live-analysis')).analysis.stale, true);
     const pending = await request(route, root, 'POST', 'live-analysis/analyze', { sourceId: 's', confirmed: true });
@@ -114,8 +115,9 @@ test('each analysis batch is identifiable and old candidates remain auditable af
     const second = await finished(route, root, 'analysis');
     assert.equal(second.analysis.stale, false);
     assert.notEqual(second.analysis.currentRunId, firstId);
-    const candidates = (await readProductAnalysis(root)).analysis.candidates;
-    assert.deepEqual(candidates.map(c => c.runId), [firstId, second.analysis.currentRunId]);
+    const saved = (await readProductAnalysis(root)).analysis;
+    assert.deepEqual(saved.candidates.map(c => c.runId), [second.analysis.currentRunId]);
+    assert.deepEqual(saved.archivedCandidates, [originalCandidate]);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 test('uncertain transcription failure cannot be automatically retried', async () => {
@@ -276,20 +278,23 @@ test('concurrent confirmed requests for one source issue only one model call', a
     assert.equal((await readProductAnalysis(root)).analysis.candidates.length, 1);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
-test('explicit rerun appends a new batch without changing existing data', async () => {
+test('explicit rerun keeps the old batch intact in history and exposes only the new active batch', async () => {
   const root = await setup();
   try {
     let calls = 0;
     const route = createLiveAnalysis({ readTranscript: async () => transcript, probeSource: probe, modelClient: async () => { calls++; return { candidates: [candidate], issues: [] }; } });
     await request(route, root, 'POST', 'live-analysis/analyze', { sourceId: 's', confirmed: true });
     const first = await finished(route, root, 'analysis');
+    const originals = (await readProductAnalysis(root)).analysis.candidates;
     await request(route, root, 'POST', 'live-analysis/analyze', { sourceId: 's', confirmed: true });
     assert.equal(calls, 1);
     await request(route, root, 'POST', 'live-analysis/analyze', { sourceId: 's', confirmed: true, rerun: true });
     const next = await finished(route, root, 'analysis');
     assert.notEqual(first.analysis.currentRunId, next.analysis.currentRunId);
     assert.equal(calls, 2);
-    assert.equal((await readProductAnalysis(root)).analysis.candidates.length, 2);
+    const saved = (await readProductAnalysis(root)).analysis;
+    assert.equal(saved.candidates.length, 1);
+    assert.deepEqual(saved.archivedCandidates, originals);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

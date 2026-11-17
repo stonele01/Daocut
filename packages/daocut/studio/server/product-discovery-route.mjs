@@ -6,7 +6,7 @@ import { probe } from './derived.mjs';
 import { HttpError, json, readJson } from './http.mjs';
 import { readProductAnalysis, recordProductEdit, updateProductAnalysis, validateProductAnalysis } from './product-analysis.mjs';
 import { productSourcePath, readProductTranscript } from './product-transcription.mjs';
-import { DISCOVERY_PROMPT, PREVIOUS_CONTEXT_DISCOVERY_PROMPT, PREVIOUS_DISCOVERY_PROMPT, DISCOVERY_VERSION, discoverProducts, discoveryWindows, validateDiscoveryCues } from './product-discovery.mjs';
+import { DISCOVERY_PROMPT, PREVIOUS_BOUNDARY_DISCOVERY_PROMPT, PREVIOUS_CHAT_DISCOVERY_PROMPT, PREVIOUS_CONTEXT_DISCOVERY_PROMPT, PREVIOUS_DISCOVERY_PROMPT, DISCOVERY_VERSION, discoverProducts, discoveryWindows, validateDiscoveryCues } from './product-discovery.mjs';
 import { textResultCacheIdentity } from './text-structure.mjs';
 
 const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).filter(key => value[key] !== undefined).sort().map(key => [key, canonical(value[key])])) : value;
@@ -77,7 +77,7 @@ export function createProductDiscovery({ modelClient, modelIdentity, readTranscr
     const publicModelHash = modelConfiguration ? hash(modelConfiguration) : null;
     const contract = prompt => publicModelHash ? hash({ publicModelHash: hash(textResultCacheIdentity(modelConfiguration)), promptHash: hash(prompt), algorithmVersion: DISCOVERY_VERSION, windowPolicy: { maxBytes, contextCues, knownProductBytes: 8000 } }) : null;
     const contractHash = contract(DISCOVERY_PROMPT), previousContractHash = contract(PREVIOUS_DISCOVERY_PROMPT);
-    const previousContracts = [PREVIOUS_CONTEXT_DISCOVERY_PROMPT, PREVIOUS_DISCOVERY_PROMPT].map(prompt => ({ prompt, hash: contract(prompt) }));
+    const previousContracts = [PREVIOUS_BOUNDARY_DISCOVERY_PROMPT, PREVIOUS_CHAT_DISCOVERY_PROMPT, PREVIOUS_CONTEXT_DISCOVERY_PROMPT, PREVIOUS_DISCOVERY_PROMPT].map(prompt => ({ prompt, hash: contract(prompt) }));
     return { analysis, source, durationMs, cues, fingerprint, modelConfiguration, publicModelHash, contractHash, previousContractHash, previousContracts, inputHash: hash({ fingerprint, durationMs, cues }) };
   }
   async function view(root, sourceId) {

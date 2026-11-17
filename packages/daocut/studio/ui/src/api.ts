@@ -138,6 +138,7 @@ export interface SharedMediaFolder {
   moreTranscripts: boolean;
 }
 export interface SharedProjectOpen {
+  readerRevision?: number;
   status: 'ready' | 'empty' | 'unavailable' | 'review-required';
   imported: { transcription: number; discovery: number; analysis: number };
   warnings: string[];
@@ -186,6 +187,7 @@ import type { ProductWorkflowPlan, ProductWorkflowRequest, SharedAnalysisState, 
 import type { ProjectBackupInspection, ProjectBackupRestoreInput } from './lib/project-backup-types';
 export type { ProductWorkflowPlan, ProductWorkflowRequest } from './lib/product-workflow-types';
 export type ProductWorkflowStatus = {
+  sharingWarning?: string;
   preparation?: { status: 'running' | 'complete' | 'failed'; phase: string; error?: string };
   source: ProductAnalysis['sources'][number]; phase: 'transcription' | 'discovery' | 'ready'; ready: boolean; discoveryReady: boolean; busy?: boolean; needsReview?: boolean;
   transcription: LiveAnalysisState['transcription'] & { code?: string; boundaryReview?: boolean };
@@ -221,6 +223,7 @@ export const api = {
   structurePlans: (id: string, scope: StructureScope, rulesVersion?: string) => call<StructurePlansState>(`${p(id)}/structure-plans?${new URLSearchParams({ sourceId: scope.sourceId, productId: scope.productId, intervalId: scope.intervalId, ...(scope.startMs != null ? { startMs: String(scope.startMs), endMs: String(scope.endMs) } : {}), ...(rulesVersion ? { rulesVersion } : {}) })}`),
   generateStructurePlans: (id: string, scope: StructureScope, confirmationId: string, continuation = false, rulesVersion?: string) => call<StructurePlansState>(`${p(id)}/structure-plans/generate`, { method: 'POST', json: { ...scope, confirmed: true, confirmationId, continue: continuation, ...(rulesVersion ? { rulesVersion } : {}) } }),
   recoverStructurePlans: (id: string, scope: StructureScope, rulesVersion?: string) => call<StructurePlansState>(`${p(id)}/structure-plans/recover`, { method: 'POST', json: { ...scope, ...(rulesVersion ? { rulesVersion } : {}) } }),
+  retryStructurePlans: (id: string, scope: StructureScope, taskKey: string, rulesVersion?: string, confirmationId?: string) => call<StructurePlansState>(`${p(id)}/structure-plans/retry`, { method: 'POST', json: { ...scope, taskKey, rulesVersion, ...(confirmationId ? { confirmed: true, confirmationId } : {}) } }),
   publishStructurePlans: (id: string, sourceId: string, taskKey: string) => call<StructurePlansState>(`${p(id)}/structure-plans/publish`, { method: 'POST', json: { sourceId, taskKey, confirmed: true } }),
   editStructurePlan: (id: string, scope: StructureScope, taskKey: string, planId: string) => call<{ project: Project }>(`${p(id)}/structure-drafts`, { method: 'POST', json: { ...scope, taskKey, planId } }),
   bindSharedMediaCopy: (id: string, input: { assetPath: string; libraryId: string; videoPath: string; confirmed: true }) => call<{ asset: string; source: SharedMediaSource }>(`${p(id)}/shared-media/bind-copy`, { method: 'POST', json: input }),
@@ -295,6 +298,7 @@ export const api = {
   sharedMediaBrowse: (libraryId: string, folder: string) => call<SharedMediaFolder>('shared-media/browse', { method: 'POST', json: { libraryId, folder } }),
   sharedMediaProject: (libraryId: string, videoPath: string, requestId: string) => call<{ project: Project; asset: string; source: Omit<SharedMediaSource, 'status'>; sharedRead?: SharedProjectOpen }>('shared-media/projects', { method: 'POST', json: { libraryId, videoPath, requestId } }),
   sharedProjectOpen: (projectId: string) => call<{ sharedRead: SharedProjectOpen | null }>(`${p(projectId)}/product-workflow/shared-open`),
+  resumeSharedAnalyses: (projectId: string, sourceId: string) => call<SharedProjectOpen & { skippedRecords: number; failedRecords: number }>(`${p(projectId)}/product-workflow/resume-shared`, { method: 'POST', json: { sourceId, confirmed: true } }),
   sharedMediaAdd: (projectId: string, libraryId: string, folder: string, videoPaths: string[]) => call<{ assets: string[] }>(`${p(projectId)}/shared-media/add`, { method: 'POST', json: { libraryId, folder, videoPaths } }),
   associateSharedMediaLibrary: (projectId: string, libraryId: string, root: string) => call<{ library: SharedMediaLibrary }>(`${p(projectId)}/shared-media/associate`, { method: 'POST', json: { libraryId, root } }).then((r) => r.library),
   rename: (id: string, name: string) => call<{ project: Project }>(p(id), { method: 'PATCH', json: { name } }).then((r) => {

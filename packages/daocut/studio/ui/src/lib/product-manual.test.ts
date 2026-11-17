@@ -2,12 +2,39 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { applyProductEdit, productRangeSummary } from './product-manual.ts';
 import type { ProductAnalysis } from './product-analysis.ts';
+import { mkdtemp, rm, mkdir } from 'node:fs/promises';
+import { resolve, join } from 'node:path';
+import { writeProductAnalysis, readProductAnalysis } from '../../../server/product-analysis.mjs';
 
 const fixture = (): ProductAnalysis => ({
   version: 1, sources: [{ id: 's', assetPath: 'assets/live.mp4', durationMs: 12000 }],
   products: [{ id: 'a', name: '甲', sourceIds: ['s'] }, { id: 'b', name: '乙', sourceIds: ['s'] }],
   intervals: [{ id: 'a1', productId: 'a', sourceId: 's', startMs: 0, endMs: 3000 }, { id: 'b1', productId: 'b', sourceId: 's', startMs: 3000, endMs: 6000 }, { id: 'a2', productId: 'a', sourceId: 's', startMs: 7000, endMs: 10000 }],
   candidates: [{ id: 'c', intervalId: 'a2', productId: 'a', sourceId: 's', startMs: 7100, endMs: 8000, text: '甲又回来了', tags: ['卖点'], origin: 'ai-text', version: 1, runId: 'run-a2' }],
+});
+
+test('a confirmed long conversation gap joins and persists without changing original analysis; actual intervening lectures still block', async () => {
+  const data = fixture(); data.sources[0].durationMs = 300000;
+  data.intervals = [{ ...data.intervals[0], endMs: 30000 }, { ...data.intervals[1], startMs: 180000, endMs: 210000 }];
+  data.candidates = [{ ...data.candidates[0], productId: 'a', intervalId: 'a1', startMs: 1000, endMs: 2000 }];
+  data.unassigned = [{ id: 'chat', sourceId: 's', startMs: 30000, endMs: 180000, kind: 'transition', reason: '闲聊' }];
+  const action = { type: 'join-lecture' as const, productId: 'a', intervalIds: ['a1', 'b1'] as [string, string], newIntervalId: 'joined' };
+  assert.throws(() => applyProductEdit(data, action), /核对中间没有换品/);
+  const joined = applyProductEdit(data, { ...action, allowGap: true });
+  assert.equal(joined.intervals[0].joinedGapConfirmed, true);
+  assert.equal(joined.intervals[0].shareJoinedPlans, true);
+  assert.deepEqual(joined.scopes?.map(s => [s.id, s.startMs, s.endMs]), data.intervals.map(s => [s.id, s.startMs, s.endMs]));
+  assert.deepEqual(joined.candidates, data.candidates); assert.deepEqual(joined.unassigned, data.unassigned);
+  const blocked = structuredClone(data); blocked.intervals.push({ id: 'middle', sourceId: 's', productId: 'b', startMs: 60000, endMs: 90000 });
+  assert.throws(() => applyProductEdit(blocked, { ...action, allowGap: true }), /其他讲解|中间/);
+  const base = resolve('.tmp/manual-long-gap'); await mkdir(base, { recursive: true }); const root = await mkdtemp(join(base, 'case-'));
+  try {
+    await writeProductAnalysis(root, joined, async () => ({ duration: 300 }));
+    assert.deepEqual((await readProductAnalysis(root)).analysis, joined);
+    const unconfirmed = structuredClone(joined); delete unconfirmed.intervals[0].joinedGapConfirmed;
+    await assert.rejects(writeProductAnalysis(root, unconfirmed, async () => ({ duration: 300 })), /joined scopes/);
+    assert.deepEqual((await readProductAnalysis(root)).analysis, joined);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test('A B A rename and boundary correction retain two disjoint ranges and do not mutate the original AI document', () => {
@@ -35,6 +62,34 @@ test('merging and splitting preserve independent ranges, source links and candid
   assert.equal(split.candidates[0].text, original.candidates[0].text);
   assert.deepEqual(split.products.find(p => p.id === 'c')?.sourceIds, ['s']);
   assert.equal(split.intervals.find(i => i.id === 'b1')?.productId, 'a');
+});
+
+test('joining adjacent ranges retains the exact original analysis scopes and candidates', () => {
+  const original = fixture();
+  const merged = applyProductEdit(original, { type: 'merge', productId: 'b', targetId: 'a' });
+  const joined = applyProductEdit(merged, { type: 'join-lecture', productId: 'a', intervalIds: ['a1', 'b1'], newIntervalId: 'joined' });
+  assert.equal(joined.intervals.find(item => item.id === 'joined')?.shareJoinedPlans, true);
+  const shared = applyProductEdit(merged, { type: 'join-lecture', productId: 'a', intervalIds: ['a1', 'b1'], newIntervalId: 'shared-joined', shareJoinedPlans: true });
+  assert.equal(shared.intervals.find(item => item.id === 'shared-joined')?.shareJoinedPlans, true);
+  assert.deepEqual(joined.intervals.find(i => i.id === 'joined'), { id: 'joined', sourceId: 's', productId: 'a', startMs: 0, endMs: 6000, origin: 'manual', scopeStatus: 'confirmed', joinedScopeIds: ['a1', 'b1'], shareJoinedPlans: true, review: ['人工确认连接；原分析按原范围保留'] });
+  assert.deepEqual(joined.scopes?.map(scope => [scope.id, scope.startMs, scope.endMs]), [['a1', 0, 3000], ['b1', 3000, 6000]]);
+  assert.deepEqual(joined.candidates, original.candidates);
+  assert.throws(() => applyProductEdit(joined, { type: 'join-lecture', productId: 'a', intervalIds: ['joined', 'a2'], newIntervalId: 'bad' }), /独立讲解范围/);
+  assert.throws(() => applyProductEdit(merged, { type: 'join-lecture', productId: 'a', intervalIds: ['a1', 'a2'], newIntervalId: 'bad' }), /相邻/);
+});
+
+test('joining two analyzed products retains both identities and the intervening unassigned content', () => {
+  const data = fixture(); data.sources[0].durationMs = 120000;
+  data.intervals = [{ id: 'a1', productId: 'a', sourceId: 's', startMs: 0, endMs: 30000 }, { id: 'b1', productId: 'b', sourceId: 's', startMs: 80000, endMs: 110000 }];
+  data.candidates = [{ id: 'ca', intervalId: 'a1', productId: 'a', sourceId: 's', startMs: 1000, endMs: 2000, text: '原话甲', tags: ['卖点'], origin: 'ai-text', version: 1 }, { id: 'cb', intervalId: 'b1', productId: 'b', sourceId: 's', startMs: 81000, endMs: 82000, text: '原话乙', tags: ['卖点'], origin: 'ai-text', version: 1 }];
+  data.unassigned = [{ id: 'chat', sourceId: 's', startMs: 31000, endMs: 79000, kind: 'uncertain', reason: '主播闲聊', evidence: [] }];
+  assert.throws(() => applyProductEdit(data, { type: 'join-lecture', productId: 'a', intervalIds: ['a1', 'b1'], newIntervalId: 'joined' }), /相邻/);
+  const joined = applyProductEdit(data, { type: 'join-lecture', productId: 'a', intervalIds: ['a1', 'b1'], newIntervalId: 'joined', allowGap: true });
+  assert.deepEqual(joined.candidates, data.candidates);
+  assert.deepEqual(joined.unassigned, data.unassigned);
+  assert.equal(joined.products.find(p => p.id === 'b')?.joinedInto, 'a');
+  assert.deepEqual(joined.scopes?.map(scope => [scope.id, scope.productId, scope.startMs, scope.endMs]), [['a1', 'a', 0, 30000], ['b1', 'b', 80000, 110000]]);
+  assert.equal(joined.intervals[0].joinedGapConfirmed, true);
 });
 
 test('unassign and delete preserve footage ranges and archive quotes; pending ranges can be assigned to a new product', () => {

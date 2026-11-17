@@ -8,6 +8,18 @@ const item = { firstCue: 0, lastCue: 1, subject: { kind: 'self', evidence: [0] }
 
 const compact = candidates => ({ schema: 'complete-speech-v1', candidates, issues: [] });
 
+test('unclassified complete speech is preserved for review and survives saved-output revalidation', async () => {
+  const result = await analyzeTextStructure({ ...input(), client: async () => compact([{ firstCue: 0, lastCue: 1, tags: [], subject: { kind: 'self', evidence: [0] } }]) });
+  const candidate = result.candidates[0];
+  assert.equal(candidate.text, '你看这个价格十元');
+  assert.deepEqual(candidate.tags, []);
+  assert.equal(candidate.details.composition.status, 'pending');
+  assert.ok(candidate.details.review.includes('模型未标注话术类型，需人工核对'));
+  const restored = await analyzeTextStructure({ ...input(), client: async () => ({ candidates: [{ firstCue: 0, lastCue: 1, tags: [], details: candidate.details }], issues: [] }) });
+  assert.deepEqual(restored.candidates[0].details, candidate.details);
+  await assert.rejects(analyzeTextStructure({ ...input(), client: async () => ({ candidates: [{ firstCue: 0, lastCue: 1, tags: [], details: item.details }], issues: [] }) }), { code: 'MODEL_CONSTRAINT' });
+});
+
 test('new requests carry explicit window-local indices and inclusive boundaries without mutating source cues', async () => {
   const args = input();
   args.cues[0].index = 91;

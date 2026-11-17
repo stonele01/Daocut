@@ -5,11 +5,26 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { addSharedMedia, associateSharedLibrary, browseSharedFolder, createSharedMediaProject, listSharedProjectMedia, refreshSharedMedia, resolveSharedMedia, sharedMediaManifest } from './shared-media.mjs';
 import { readProductAnalysis } from './product-analysis.mjs';
+import { writePrefs } from './prefs.mjs';
 import { readFilmFile } from '../../src/film-doc.mjs';
 
 let scratch;
 let oldHome;
 let oldLibrary;
+
+test('a malformed unrelated result does not hide a valid legacy video identity', async () => {
+  const root = join(scratch, 'legacy-source'), resultRoot = join(scratch, 'results-root');
+  mkdirSync(root); const bytes = Buffer.alloc(8 * 1024 * 1024 + 1, 7);
+  writeFileSync(join(root, 'large.mp4'), bytes);
+  const library = await associateSharedLibrary({ id: 'legacy-valid-result', name: 'Library', root });
+  writePrefs({ sharedAnalysis: { enabled: true, resultRoots: [{ libraryId: library.id, root: resultRoot }] } });
+  for (const key of ['a', 'b']) mkdirSync(join(resultRoot, 'results', key.repeat(64)), { recursive: true });
+  writeFileSync(join(resultRoot, 'results', 'a'.repeat(64), 'a'.repeat(64) + '.json'), '{incomplete');
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  writeFileSync(join(resultRoot, 'results', 'b'.repeat(64), 'b'.repeat(64) + '.json'), JSON.stringify({ schema: 'daocut.shared-analysis.v1', source: { libraryId: library.id, relativePath: 'large.mp4', size: bytes.length, sha256 } }));
+  const opened = await createSharedMediaProject({ libraryId: library.id, videoPath: 'large.mp4', requestId: 'valid-after-malformed-result' });
+  assert.equal((await sharedMediaManifest(opened.project.path)).items[opened.asset].sha256, sha256);
+});
 
 beforeEach(() => {
   const temporaryRoot = process.env.DAOCUT_TEST_TMP || join(process.cwd(), '.test-temp');

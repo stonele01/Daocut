@@ -28,12 +28,14 @@ test('source playback handles delayed media and superseded user commands', { tim
     import React,{useState} from 'react';
     import {createRoot} from 'react-dom/client';
     import {SourcePreview} from ${JSON.stringify(join(repo, 'packages/daocut/studio/ui/src/components/SourcePreview.tsx').replaceAll('\\', '/'))};
-    const file={path:'assets/synthetic.mp4',name:'synthetic.mp4',dir:'assets',size:128,kind:'video',mtimeMs:1,durationMs:30000};
+    const file={path:'assets/synthetic.mp4',name:'synthetic.mp4',dir:'assets',size:128,kind:'video',mtimeMs:1,durationMs:location.search.includes('long=1')?24270000:30000};
     function Fixture(){
       const [request,setRequest]=useState({sourceId:'source-a',requestId:1,timeMs:1000,play:true});
+      const [sourceId,setSourceId]=useState('source-a');
       window.fixture ??= {};
       window.fixture.seek=setRequest;
-      return <SourcePreview file={file} sourceId="source-a" sources={{file:()=>'/synthetic.mp4?key=PRIVATE_TEST_TOKEN'+(location.search.includes('real=1')?'&real=1':'')}}
+      window.fixture.source=setSourceId;
+      return <SourcePreview file={file} sourceId={sourceId} sources={{file:()=>'/synthetic.mp4?key=PRIVATE_TEST_TOKEN'+(location.search.includes('real=1')?'&real=1':'')}}
         seekRequest={request} onClose={()=>{}} hideSourceTimeline />;
     }
     createRoot(document.getElementById('root')).render(<Fixture/>);
@@ -48,11 +50,18 @@ test('source playback handles delayed media and superseded user commands', { tim
       const url = new URL(request.url, 'http://localhost'), path = url.pathname;
       if (path === '/synthetic.mp4') {
         if (!url.searchParams.has('real')) { response.writeHead(204).end(); return; }
+        let mediaBytes = syntheticBytes;
+        if (url.searchParams.has('film-clip')) {
+          const [from, to] = url.searchParams.get('film-clip').split(',').map(Number);
+          const start = Math.max(0, Math.floor(from) - 1), end = Math.min(6, Math.ceil(to) + 1), output = join(scratch, `range-${start}-${end}.mp4`);
+          execFileSync('ffmpeg', ['-v', 'error', '-ss', String(start), '-i', synthetic, '-t', String(end - start), '-c:v', 'libx264', '-c:a', 'aac', '-movflags', '+faststart', '-y', output], { windowsHide: true });
+          mediaBytes = await readFile(output);
+        }
         const range = /^bytes=(\d+)-(\d*)$/.exec(request.headers.range ?? '');
-        const start = range ? Number(range[1]) : 0, end = range?.[2] ? Math.min(Number(range[2]), syntheticBytes.length - 1) : syntheticBytes.length - 1;
+        const start = range ? Number(range[1]) : 0, end = range?.[2] ? Math.min(Number(range[2]), mediaBytes.length - 1) : mediaBytes.length - 1;
         response.writeHead(range ? 206 : 200, { 'content-type': 'video/mp4', 'content-length': end - start + 1, 'accept-ranges': 'bytes',
-          ...(range ? { 'content-range': `bytes ${start}-${end}/${syntheticBytes.length}` } : {}) });
-        response.end(syntheticBytes.subarray(start, end + 1)); return;
+          ...(range ? { 'content-range': `bytes ${start}-${end}/${mediaBytes.length}` } : {}) });
+        response.end(mediaBytes.subarray(start, end + 1)); return;
       }
       const file = path.startsWith('/assets/') ? join(scratch, 'dist', path) : join(scratch, 'dist/index.html');
       response.setHeader('content-type', file.endsWith('.js') ? 'text/javascript' : 'text/html');
@@ -95,9 +104,11 @@ test('source playback handles delayed media and superseded user commands', { tim
       fixture.event = type => document.querySelector('video').dispatchEvent(new Event(type));
       fixture.resolve = index => { const p = pending[index]; state(p.media).paused = false; p.media.dispatchEvent(new Event('playing')); p.resolve(); };
       fixture.reject = (index, name, message) => pending[index].reject(new DOMException(message || name, name));
-      fixture.mediaError = (code, message) => { const media = document.querySelector('video'); state(media).error = { code, message }; media.dispatchEvent(new Event('error')); };
+      fixture.mediaError = (code, message) => { const media = document.querySelector('video'); state(media).error = { code, message }; const event = new Event('error'); event.fixtureMediaError = true; media.dispatchEvent(event); };
       // Browser decoding is not under test in these controlled event races.
-      document.addEventListener('error', e => { if (e.target instanceof HTMLMediaElement && !state(e.target).error) e.stopImmediatePropagation(); }, true);
+      // Ignore native decoder errors from the deliberate HTTP 204 fixture, even
+      // while a controlled error is pending; otherwise it consumes another retry.
+      document.addEventListener('error', e => { if (e.target instanceof HTMLMediaElement && !e.fixtureMediaError) e.stopImmediatePropagation(); }, true);
     });
     const page = await context.newPage(); page.setDefaultTimeout(8000);
     const errors = []; page.on('pageerror', error => errors.push(error.message));
@@ -204,6 +215,38 @@ test('source playback handles delayed media and superseded user commands', { tim
       assert.match(await page.getByRole('alert').innerText(), /无法读取或格式不受支持/, 'a bad HTTP response must not be diagnosed as a codec failure');
       assert.equal(await page.evaluate(() => window.fixture.loads), 0, 'format errors are not retried');
     });
+    await t.test('old metadata before the retry loads cannot cancel reconnect', async () => {
+      await open();
+      await page.evaluate(() => {
+        document.querySelector('video').currentTime=12;
+        window.fixture.mediaError(2,'read interrupted');
+        window.fixture.metadata();
+      });
+      await page.waitForFunction(() => window.fixture.loads === 1);
+      assert.equal(await page.evaluate(() => window.fixture.calls),1);
+      await page.evaluate(() => window.fixture.metadata());
+      await page.waitForFunction(() => window.fixture.calls === 2);
+      assert.equal(await page.locator('video').evaluate(v => v.currentTime),12);
+    });
+    await t.test('switching source identity on the same media path cancels the previous reconnect', async () => {
+      await open();
+      await page.evaluate(() => {
+        document.querySelector('video').currentTime=12;
+        window.fixture.mediaError(2,'old source interrupted');
+        window.fixture.source('source-b');
+        window.fixture.seek({sourceId:'source-b',requestId:2,timeMs:3000,play:false});
+      });
+      await flush(); await page.waitForTimeout(350);
+      assert.equal(await page.evaluate(()=>window.fixture.loads),0);
+      await page.evaluate(()=>window.fixture.metadata()); await flush();
+      assert.equal(await page.locator('video').evaluate(v=>v.currentTime),3);
+      assert.equal(await page.locator('video').evaluate(v=>v.paused),true);
+      await page.evaluate(()=>window.fixture.mediaError(2,'new source interrupted'));
+      await page.waitForFunction(()=>window.fixture.loads===1);
+      await page.evaluate(()=>window.fixture.metadata()); await flush();
+      assert.equal(await page.locator('video').evaluate(v=>v.currentTime),3);
+      assert.equal(await page.locator('video').evaluate(v=>v.paused),true);
+    });
     await t.test('network reconnect restores position and ignores a stale play rejection', async () => {
       await open();
       await page.locator('video').evaluate(v => { v.currentTime = 12; });
@@ -227,11 +270,26 @@ test('source playback handles delayed media and superseded user commands', { tim
       assert.equal(await page.locator('video').evaluate(v => v.paused), true);
       assert.equal(await page.evaluate(() => window.fixture.calls), 1, 'reconnect must not undo the user pause');
     });
+    await t.test('successful playback renews the retry budget for later independent interruptions', async () => {
+      await open();
+      await page.evaluate(() => window.fixture.resolve(0)); await flush();
+      for (let episode = 1; episode <= 3; episode++) {
+        await page.evaluate(() => window.fixture.mediaError(2, 'separate interruption'));
+        await page.waitForFunction(n => window.fixture.loads === n, episode);
+        await page.evaluate(() => window.fixture.metadata());
+        await page.waitForFunction(n => window.fixture.calls === n + 1, episode);
+        await page.evaluate(n => window.fixture.resolve(n), episode); await flush();
+        assert.equal(await page.getByRole('alert').count(), 0);
+      }
+    });
     await t.test('repeated read failures stop after two retries and manual play can retry again', async () => {
       await open();
       for (let attempt = 1; attempt <= 2; attempt++) {
         await page.evaluate(() => window.fixture.mediaError(2, 'read interrupted'));
-        await page.waitForFunction(n => window.fixture.loads === n, attempt);
+        await page.waitForFunction(n => window.fixture.loads === n, attempt).catch(async error => {
+          t.diagnostic(JSON.stringify({ attempt, ...await page.evaluate(() => ({ loads: window.fixture.loads, calls: window.fixture.calls, error: window.fixture.state(document.querySelector('video')).error, status: document.querySelector('[data-source-playback-state]')?.textContent })) }));
+          throw error;
+        });
       }
       await page.evaluate(() => window.fixture.mediaError(2, 'still unavailable')); await flush();
       assert.match(await page.getByRole('alert').innerText(), /读取|网络/);
@@ -255,10 +313,15 @@ test('source playback handles delayed media and superseded user commands', { tim
       await real.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
       try {
         const viewer = await real.newPage();
-        await viewer.goto(`${origin}/?real=1`);
+        await viewer.goto(`${origin}/?real=1&long=1`);
         await viewer.waitForFunction(() => { const v = document.querySelector('video'); return v && !v.paused && v.currentTime > 1.3 && v.videoWidth === 160; });
         await viewer.evaluate(() => window.fixture.seek({ sourceId: 'source-a', requestId: 2, timeMs: 3000, play: true, range: { startMs: 3000, endMs: 4000 } }));
-        await viewer.waitForFunction(() => { const v = document.querySelector('video'); return v && v.paused && Math.abs(v.currentTime - 4) < 0.05; });
+        await viewer.waitForFunction(() => { const v = document.querySelector('video'); return v && v.paused && Math.abs(v.currentTime - 2) < 0.05; });
+        assert.equal(new URL(await viewer.locator('video').getAttribute('src'), origin).searchParams.get('film-clip'), '3,4');
+        await viewer.evaluate(() => window.fixture.seek({ sourceId: 'source-a', requestId: 2, timeMs: 3000, play: true, range: { startMs: 2500, endMs: 3200 } }));
+        await viewer.waitForFunction(() => { const v = document.querySelector('video'); return v && v.paused && Math.abs(v.currentTime - 2.2) < 0.05; });
+        await viewer.evaluate(() => window.fixture.seek({ sourceId: 'source-a', requestId: 3, timeMs: 2000, play: true, range: { startMs: 2000, endMs: 3000 } }));
+        await viewer.waitForFunction(() => { const v = document.querySelector('video'); return v && v.paused && Math.abs(v.currentTime - 2) < 0.05; });
         assert.equal(await viewer.getByRole('alert').count(), 0);
         assert.ok(await viewer.locator('video').evaluate(v => v.getVideoPlaybackQuality().totalVideoFrames) > 0);
         assert.ok(await viewer.locator('video').evaluate(v => v.webkitAudioDecodedByteCount) > 0, 'Chromium decoded the synthetic AAC track');

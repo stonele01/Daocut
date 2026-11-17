@@ -1,4 +1,6 @@
 /** Selection belongs to public plan IDs, never virtual row positions or the active timeline. */
+export class StructureExportSelectionChangedError extends Error {}
+
 export function toggleStructurePlan(selected: ReadonlySet<string>, id: string): Set<string> {
   const next = new Set(selected);
   if (next.has(id)) next.delete(id); else next.add(id);

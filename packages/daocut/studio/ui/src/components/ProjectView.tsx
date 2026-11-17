@@ -87,7 +87,7 @@ import { ProductPanel } from './ProductPanel';
 import { structureColor } from '@/lib/structure-colors';
 import { displayStructureTags } from '@/lib/product-structure-tags';
 import { SharedMediaAddPanel } from './SharedMediaAddPanel';
-import { readProductAnalysis, writeProductAnalysis, ProductAnalysisConflict, productId, sourceTime, type ProductAnalysis, type ProductAnalysisState } from '@/lib/product-analysis';
+import { readProductAnalysis, writeProductAnalysis, ProductAnalysisConflict, productId, sourceTime, visibleProducts, savedStructureRange, productResultRanges, productResultCandidates, type ProductAnalysis, type ProductAnalysisState } from '@/lib/product-analysis';
 import { applyProductEdit } from '@/lib/product-manual';
 import { ResourceInspector } from './ResourceInspector';
 import { FilmInspector } from './FilmInspector';
@@ -1405,6 +1405,7 @@ export function ProjectView({ projectId, onProject, onLeave, structure }: {
       const result = await writeProductAnalysis(projectId, next, expected);
       productDataRef.current = result;
       setProductData(result);
+      if (result.sharingWarning) toast.showError(result.sharingWarning);
     } catch (error) {
       if (error instanceof ProductAnalysisConflict) {
         let latest: ProductAnalysisState;
@@ -1492,18 +1493,21 @@ export function ProjectView({ projectId, onProject, onLeave, structure }: {
     const data = productData?.analysis;
     const product = data?.products.find(item => item.id === selectedProductId);
     const available = (sourceId: string) => listing?.files.some(file => file.path === data?.sources.find(source => source.id === sourceId)?.assetPath && !file.link?.missing && (!file.link?.source || file.link.source.status === 'available'));
-    const ranges = [...(data?.intervals ?? []), ...(data?.scopes ?? [])].filter(range => range.productId === selectedProductId).sort((a, b) => a.sourceId.localeCompare(b.sourceId) || a.startMs - b.startMs);
+    const linked = new Set([...(data?.intervals ?? []), ...(data?.scopes ?? [])].filter(range => range.productId === selectedProductId).flatMap(range => range.joinedScopeIds ?? []));
+    const ranges = [...(data?.intervals ?? []), ...(data?.scopes ?? [])].filter(range => range.productId === selectedProductId || linked.has(range.id)).sort((a, b) => a.sourceId.localeCompare(b.sourceId) || a.startMs - b.startMs);
     if (productRangeSelection && product?.sourceIds.includes(productRangeSelection.sourceId)
       && (!productRangeSelection.intervalId || ranges.some(range => range.id === productRangeSelection.intervalId && range.sourceId === productRangeSelection.sourceId))) return productRangeSelection;
-    const first = ranges.find(range => data?.intervals.some(interval => interval.id === range.id) && available(range.sourceId)) ?? ranges.find(range => available(range.sourceId));
+    const first = ranges.find(range => range.productId === selectedProductId && range.joinedScopeIds?.length && available(range.sourceId)) ?? ranges.find(range => data?.intervals.some(interval => interval.id === range.id) && available(range.sourceId)) ?? ranges.find(range => available(range.sourceId));
     return { sourceId: first?.sourceId ?? product?.sourceIds.find(available) ?? product?.sourceIds[0] ?? '', intervalId: first?.id ?? '' };
   }, [productData, selectedProductId, productRangeSelection, listing]);
   const chatProductRange = React.useMemo<StudioProductRange | null>(() => {
     if (assetsMode !== 'products') return null;
     const data = productData?.analysis;
-    const range = data?.intervals.find(item => item.id === selectedProductRange.intervalId && item.sourceId === selectedProductRange.sourceId && item.productId === selectedProductId);
-    const product = data?.products.find(item => item.id === selectedProductId);
-    return range && product ? { sourceId: range.sourceId, productId: product.id, intervalId: range.id, productName: product.name, startMs: range.startMs, endMs: range.endMs } : null;
+    const linked = new Set([...(data?.intervals ?? []), ...(data?.scopes ?? [])].filter(item => item.productId === selectedProductId).flatMap(item => item.joinedScopeIds ?? []));
+    const range = [...(data?.intervals ?? []), ...(data?.scopes ?? [])].find(item => item.id === selectedProductRange.intervalId && item.sourceId === selectedProductRange.sourceId && (item.productId === selectedProductId || linked.has(item.id)));
+    const product = data?.products.find(item => item.id === range?.productId);
+    const saved = range && data ? savedStructureRange(data, range) : range;
+    return saved && product ? { sourceId: saved.sourceId, productId: saved.productId, intervalId: saved.id, productName: product.name, startMs: saved.startMs, endMs: saved.endMs } : null;
   }, [assetsMode, productData, selectedProductId, selectedProductRange]);
   React.useEffect(() => { if (productData) structure?.onScope(chatProductRange); }, [productData, chatProductRange, structure?.onScope]);
   React.useEffect(() => { if (structure?.preview) pause(); }, [structure?.preview, pause]);
@@ -1521,12 +1525,14 @@ export function ProjectView({ projectId, onProject, onLeave, structure }: {
     setSelectedCandidateId(range.kind === 'candidate' ? range.id : null);
   }, []);
   React.useEffect(() => {
-    const products = productData?.analysis.products;
-    if (!products) return;
+    if (!productData) return;
+    const products = visibleProducts(productData.analysis);
     if (!products.length) { if (selectedProductId) setSelectedProductId(null); return; }
     if (!selectedProductId || !products.some((product) => product.id === selectedProductId)) {
-      const ready = products.find(product => productData.analysis.candidates.some(candidate => candidate.productId === product.id));
-      selectProduct((ready ?? products[0]!).id);
+      const previousRanges = [...productData.analysis.intervals, ...(productData.analysis.scopes ?? [])].filter(range => range.productId === selectedProductId);
+      const linked = products.find(product => productResultRanges(productData.analysis, product.id).some(range => previousRanges.some(previous => previous.id === range.id)));
+      const ready = products.find(product => productResultCandidates(productData.analysis, product.id).length);
+      selectProduct((linked ?? ready ?? products[0]!).id);
     }
   }, [productData, selectedProductId, selectProduct]);
   React.useEffect(() => {
@@ -1538,7 +1544,7 @@ export function ProjectView({ projectId, onProject, onLeave, structure }: {
     if (videos.length === 1) pickMedia(videos[0]!);
   }, [sourceFile, productData, listing, pickMedia]);
   const aiSourceIds = [...new Set(productData?.analysis.candidates.filter((c) => c.origin === 'ai-text').map((c) => c.sourceId) ?? [])].sort().join('\n');
-  type RangeRun = { stale?: boolean; legacyEditable?: boolean; historicalEditable?: boolean; currentRunId?: string; intervalId?: string; productId?: string; rangeStartMs?: number; rangeEndMs?: number };
+  type RangeRun = { status?: string; stale?: boolean; legacyEditable?: boolean; historicalEditable?: boolean; currentRunId?: string; intervalId?: string; productId?: string; rangeStartMs?: number; rangeEndMs?: number };
   const [aiRuns, setAiRuns] = React.useState<Record<string, RangeRun & { analyses?: Record<string, RangeRun> }>>({});
   React.useEffect(() => {
     let cancelled = false;
@@ -1551,8 +1557,10 @@ export function ProjectView({ projectId, onProject, onLeave, structure }: {
         catch { return [id, { stale: true }] as const; }
       }));
       if (cancelled) return;
-      setAiRuns(Object.fromEntries(results));
-      if (ids.length) timer = setTimeout(load, 2000);
+      const next: Record<string, RangeRun & { analyses?: Record<string, RangeRun> }> = Object.fromEntries(results);
+      setAiRuns(next);
+      const running = Object.values(next).some(run => run.status === 'running' || Object.values(run.analyses ?? {}).some(range => range.status === 'running'));
+      if (ids.length) timer = setTimeout(load, running ? 2000 : 10000);
     };
     void load();
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
@@ -1590,7 +1598,7 @@ export function ProjectView({ projectId, onProject, onLeave, structure }: {
   const addProductCandidate = React.useCallback(async (id: string) => {
     const data = productData?.analysis;
     const candidate = data?.candidates.find((item) => item.id === id);
-    if (candidate && candidateUnavailable(candidate)) { toast.show('候选已过期或状态未确认，请重新分析'); return; }
+    if (candidate && candidateUnavailable(candidate)) { toast.show('话术状态尚未核对，请刷新读取已有分析'); return; }
     const source = data?.sources.find((item) => item.id === candidate?.sourceId);
     const file = listing?.files.find((item) => item.path === source?.assetPath);
     if (!candidate || !file || file.link?.missing || (file.link?.source && file.link.source.status !== 'available')) { toast.show('来源视频不可用，无法加入成片'); return; }
@@ -1621,7 +1629,7 @@ export function ProjectView({ projectId, onProject, onLeave, structure }: {
   const dragProductCandidate = React.useCallback((id: string, event: React.DragEvent, take?: { startMs: number; endMs: number }) => {
     const data = productData?.analysis;
     const candidate = data?.candidates.find((item) => item.id === id);
-    if (candidate && candidateUnavailable(candidate)) { event.preventDefault(); toast.show('候选已过期或状态未确认，请重新分析'); return; }
+    if (candidate && candidateUnavailable(candidate)) { event.preventDefault(); toast.show('话术状态尚未核对，请刷新读取已有分析'); return; }
     const source = data?.sources.find((item) => item.id === candidate?.sourceId);
     const file = listing?.files.find((item) => item.path === source?.assetPath);
     if (!candidate || !file || !canDragCandidate(id)) {
@@ -1650,10 +1658,18 @@ export function ProjectView({ projectId, onProject, onLeave, structure }: {
     setResourceDragData(event.dataTransfer, { ...file, range: { inMs: range.startMs, outMs: range.endMs } });
     event.dataTransfer.effectAllowed = 'copy';
   }, [projectId, listing, sourceFile, sourceDragAvailable, axisSourceId, sourceClock.duration, toast]);
-  const sourceRanges = React.useMemo(() => productData ? [
-    ...productData.analysis.intervals.map((item) => ({ ...item, kind: 'interval' as const, text: productData.analysis.products.find((product) => product.id === item.productId)?.name ?? '商品' })),
-    ...productData.analysis.candidates.map((item) => ({ ...item, kind: 'candidate' as const })),
-  ] : [], [productData]);
+  const sourceRanges = React.useMemo(() => {
+    if (!productData) return [];
+    const analysis = productData.analysis;
+    const owners = new Map<string, string[]>();
+    for (const product of visibleProducts(analysis)) for (const candidate of productResultCandidates(analysis, product.id)) {
+      const ids = owners.get(candidate.id) ?? []; ids.push(product.id); owners.set(candidate.id, ids);
+    }
+    return [
+      ...analysis.intervals.map((item) => ({ ...item, kind: 'interval' as const, text: analysis.products.find((product) => product.id === item.productId)?.name ?? '商品' })),
+      ...analysis.candidates.map((item) => ({ ...item, kind: 'candidate' as const, displayProductIds: owners.get(item.id) })),
+    ];
+  }, [productData]);
   const onSourceClock = React.useCallback((clock: { time: number; duration: number }) => {
     setSourceClock((current) => current.time === clock.time && current.duration === clock.duration ? current : clock);
   }, []);
@@ -1668,7 +1684,7 @@ export function ProjectView({ projectId, onProject, onLeave, structure }: {
     <div className="flex shrink-0 gap-1 border-b border-[var(--border)] px-2 py-1 text-[12px]">
       <button type="button" aria-pressed={assetsMode === 'media'} onClick={() => { assetsModeTouched.current = true; setAssetsMode('media'); }} className={`rounded px-2 py-1 transition ${assetsMode === 'media' ? 'bg-[var(--bg-hover)] font-semibold text-[var(--accent)] ring-1 ring-inset ring-[var(--accent)]' : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)]'}`}>素材</button>
       <button type="button" aria-pressed={assetsMode === 'products'} onClick={() => { assetsModeTouched.current = true; setAssetsMode('products'); }} className={`rounded px-2 py-1 transition ${assetsMode === 'products' ? 'bg-[var(--bg-hover)] font-semibold text-[var(--accent)] ring-1 ring-inset ring-[var(--accent)]' : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)]'}`}>商品与结构</button>
-      <button type="button" disabled={demoBusy} onClick={() => void switchDemo()} className="ml-auto rounded px-2 py-1 text-[var(--text-muted)] transition hover:bg-[var(--bg-hover)] hover:text-[var(--text)] disabled:opacity-50">{demoBusy ? '准备示例…' : inDemo ? '退出演示' : '查看示例'}</button>
+      {inDemo && <button type="button" disabled={demoBusy} onClick={() => void switchDemo()} className="ml-auto rounded px-2 py-1 text-[var(--text-muted)] transition hover:bg-[var(--bg-hover)] hover:text-[var(--text)] disabled:opacity-50">退出演示</button>}
     </div>
     {inDemo ? <div className="shrink-0 border-b border-[var(--border)] px-3 py-1.5 text-[11px] text-[var(--text-muted)]">演示模式 · 内容与视频均为合成示例</div> : null}
     {assetsMode === 'products' ? productError ? <p role="alert" className="p-3 text-[12px] text-[var(--text-muted)]">{productError}</p> : productData ? (
@@ -3574,7 +3590,7 @@ export function ProjectView({ projectId, onProject, onLeave, structure }: {
                 <span className="min-w-0 flex-1 truncate" title={sourceFile?.name}>{sourceFile?.name ?? '选择素材或商品后显示原片'}</span>
                 <button type="button" aria-expanded={sourceAxisOpen} onClick={() => setSourceAxisOpen((open) => !open)} className="rounded px-2 py-1 transition hover:bg-[var(--bg-hover)] active:scale-95">{sourceAxisOpen ? '收起' : '展开'}</button>
               </div>
-              {sourceAxisOpen && sourceFile ? <SourceTimeline sourceId={axisSourceId} time={sourceClock.time} duration={sourceClock.duration} focusRangeRequest={productFocusTick} rightInset={METERS_W} headWidth={tools.timeline.solo ? 132 : 108}
+              {sourceAxisOpen && sourceFile ? <SourceTimeline sourceId={axisSourceId} time={sourceClock.time} duration={sourceClock.duration} sourceDurationMs={productData?.analysis.sources.find(source => source.id === axisSourceId)?.durationMs ?? sourceFile.durationMs ?? (facts.get(sourceFile.path)?.sourceDuration != null ? Math.round(facts.get(sourceFile.path)!.sourceDuration! * 1000) : null)} focusRangeRequest={productFocusTick} rightInset={METERS_W} headWidth={tools.timeline.solo ? 132 : 108}
                 active={barAt === 'source'} onActivate={() => setBarAt('source')} onCopySource={copySourceBlocks}
                 clearSelectionTick={clearSourceSelectionTick} onSelectTakeRange={previewSourceTake} onPreviewRange={take => previewSourceTake(take, true)} onResolveCandidateTake={resolveCandidateTake}
                 onDragSourceRange={dragSourceRange} sourceDragAvailable={sourceDragAvailable} onTrimProductRange={trimProductRange}

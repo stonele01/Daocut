@@ -33,10 +33,21 @@ function validate(data) {
     intervals.set(scope.id, scope);
   }
   for (const s of data.sources) if (!str(s.assetPath) || !(s.durationMs === null || (num(s.durationMs) && s.durationMs > 0))) fail('invalid source');
-  for (const p of data.products) if (!str(p.name) || !Array.isArray(p.sourceIds) || new Set(p.sourceIds).size !== p.sourceIds.length || p.sourceIds.some(id => !sources.has(id))) fail('invalid product sources');
+  for (const scope of scopes) if (scope.joinedScopeIds !== undefined) {
+    if (scope.kind !== 'historical-analysis' || scope.origin !== 'shared-composition' || !Array.isArray(scope.joinedScopeIds) || scope.joinedScopeIds.length !== 2 || new Set(scope.joinedScopeIds).size !== 2 || !/^[a-f0-9]{64}$/.test(scope.analysisRevision ?? '')) fail('invalid historical composition');
+    const parts = scope.joinedScopeIds.map(id => intervals.get(id));
+    if (parts.some(part => !part || part.sourceId !== scope.sourceId || part.joinedScopeIds?.length) || parts[0].startMs !== scope.startMs || parts[1].endMs !== scope.endMs || parts[0].endMs > parts[1].startMs) fail('invalid historical composition parts');
+  }
+  for (const p of data.products) if (!str(p.name) || !Array.isArray(p.sourceIds) || new Set(p.sourceIds).size !== p.sourceIds.length || p.sourceIds.some(id => !sources.has(id)) || (p.joinedInto !== undefined && (!products.has(p.joinedInto) || p.joinedInto === p.id || products.get(p.joinedInto).joinedInto))) fail('invalid product sources');
   for (const i of data.intervals) {
+    if (i.shareJoinedPlans !== undefined && (typeof i.shareJoinedPlans !== 'boolean' || !i.joinedScopeIds?.length)) fail('invalid joined plan sharing');
     const s = sources.get(i.sourceId), p = products.get(i.productId);
     if (!s || !p || !p.sourceIds.includes(i.sourceId) || !num(i.startMs) || !num(i.endMs) || i.startMs >= i.endMs || (s.durationMs !== null && i.endMs > s.durationMs)) fail('invalid interval or references');
+    if (i.joinedScopeIds !== undefined) {
+      if (!Array.isArray(i.joinedScopeIds) || i.joinedScopeIds.length !== 2 || new Set(i.joinedScopeIds).size !== 2) fail('invalid joined scopes');
+      const parts = i.joinedScopeIds.map(id => intervals.get(id));
+      if (parts.some(part => !part || part.kind !== 'confirmed-inspection' || part.sourceId !== i.sourceId || (part.productId !== i.productId && products.get(part.productId)?.joinedInto !== i.productId)) || parts[0].startMs !== i.startMs || parts[1].endMs !== i.endMs || parts[0].endMs > parts[1].startMs || (i.joinedGapConfirmed !== true && parts[1].startMs - parts[0].endMs > 2000)) fail('joined scopes no longer match lecture');
+    }
   }
   for (const c of data.candidates) {
     const i = intervals.get(c.intervalId);
@@ -139,18 +150,25 @@ export async function updateProductAnalysis(root, update, probeSource = probe, {
   try { return await write; }
   finally { if (writes.get(root) === write) writes.delete(root); }
 }
-export async function productAnalysisRoute(req, res, root, rest) {
+export async function productAnalysisRoute(req, res, root, rest, { afterSave } = {}) {
   if (rest !== 'product-analysis') return false;
   if (req.method === 'GET') { json(res, 200, await readProductAnalysis(root)); return true; }
   if (req.method === 'PUT') {
-    const body = await readJson(req);
+    // Manual saves include both the edited document and its expected snapshot.
+    // Long recordings can exceed the general 4 MiB request limit.
+    const body = await readJson(req, 32 << 20);
     if (!record(body)) fail('expected { analysis }');
     const current = (await readProductAnalysis(root)).analysis;
     const extended = body.expected !== undefined || body.analysis?.unassigned !== undefined || current.unassigned !== undefined || current.discoveryApplied !== undefined;
     if (extended && body.expected === undefined) throw new HttpError(409, 'product-analysis: expected snapshot is required for manual corrections');
     // A browser edits effective ranges. Historical AI input and manual revisions stay server-owned.
     const next = extended ? recordProductEdit(current, { ...body.analysis, manualEdits: current.manualEdits, discoveryApplied: current.discoveryApplied }) : body.analysis;
-    json(res, 200, await writeProductAnalysis(root, next, probe, body.expected));
+    const saved = await writeProductAnalysis(root, next, probe, body.expected);
+    if (afterSave) {
+      try { await afterSave(root, true); Object.assign(saved, await readProductAnalysis(root)); }
+      catch (error) { saved.sharingWarning = `本机已保存，共享关联待补存：${error.message}`; }
+    }
+    json(res, 200, saved);
     return true;
   }
   return false;

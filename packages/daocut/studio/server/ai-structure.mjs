@@ -51,7 +51,13 @@ export function createAiStructureRequest(input, { previous = [], version = AI_ST
     transcript: engine.cues.map((c, i) => version === PREVIOUS_AI_STRUCTURE_VERSION ? { cue: engine.cueIndices?.[i] ?? i, ...c } : { ...c, cue: engine.cueIndices?.[i] ?? i }), units, previous,
     issues: engine.analysisIssues ?? [], mediaReview: evidence.mediaReview, visualReview: visual }) };
   // Explicit finite request budget, never truncate material or silently split a lecture.
-  if (Buffer.byteLength(request.system + request.input, 'utf8') > 128000) throw Object.assign(Error('本段话术与上下文超过单次拼结构输入预算，请先核对讲解范围；未截断素材或发送请求'), { code: 'AI_STRUCTURE_INPUT_TOO_LARGE' });
+  if (Buffer.byteLength(request.system + request.input, 'utf8') > 128000) {
+    const error = Object.assign(Error('本段话术与上下文超过单次拼结构输入预算，请先核对讲解范围；未截断素材或发送请求'), { code: 'AI_STRUCTURE_INPUT_TOO_LARGE' });
+    // Old full-transcript formats may exceed today's send budget. Their exact
+    // bytes are still needed to look up a previously submitted public task.
+    Object.defineProperty(error, 'lookupRequest', { value: request });
+    throw error;
+  }
   return request;
 }
 

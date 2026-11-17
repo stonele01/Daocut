@@ -6,6 +6,7 @@ export type ProductEdit = RangeEdit
   | { type: 'unassign'; intervalId: string }
   | { type: 'delete-product'; productId: string }
   | { type: 'merge'; productId: string; targetId: string }
+  | { type: 'join-lecture'; productId: string; intervalIds: [string, string]; newIntervalId: string; allowGap?: boolean; shareJoinedPlans?: boolean }
   | { type: 'split'; productId: string; newProductId: string; name: string; intervalIds: string[] };
 
 function withManualBounds<T extends ProductInterval | UnassignedProductRange>(value: T, startMs: number, endMs: number): T {
@@ -75,6 +76,25 @@ export function applyProductEdit(data: ProductAnalysis, action: ProductEdit): Pr
     });
     if (!product.sourceIds.includes(action.sourceId)) product.sourceIds.push(action.sourceId);
     for (const candidate of next.candidates) if (candidate.intervalId === action.id) candidate.productId = action.productId;
+  } else if (action.type === 'join-lecture') {
+    needProduct(action.productId);
+    const parts = action.intervalIds.map(id => next.intervals.find(range => range.id === id));
+    if (new Set(action.intervalIds).size !== 2 || parts.some(range => !range || range.joinedScopeIds?.length)) throw new Error('请选择两个独立讲解范围');
+    const [first, second] = (parts as ProductInterval[]).sort((a, b) => a.startMs - b.startMs);
+    if (first.productId !== action.productId) throw new Error('请保留前一段所属的商品');
+    const gap = second.startMs - first.endMs;
+    if (first.sourceId !== second.sourceId || gap < 0 || (!action.allowGap && gap > 2000)) throw new Error('只能连接同一原片中相邻的讲解范围；有间隔时请先核对中间没有换品');
+    if (second.productId !== first.productId) {
+      const other = needProduct(second.productId);
+      if (other.joinedInto || next.intervals.some(range => range.productId === other.id && range.id !== second.id) || next.scopes?.some(range => range.productId === other.id)) throw new Error('另一商品仍有其他讲解或历史范围，不能隐藏');
+      other.joinedInto = first.productId;
+    }
+    if (next.intervals.some(range => range.id === action.newIntervalId) || next.scopes?.some(range => range.id === action.newIntervalId)) throw new Error('新范围身份重复');
+    if (next.intervals.some(range => range.sourceId === first.sourceId && !action.intervalIds.includes(range.id) && range.startMs < second.endMs && range.endMs > first.startMs) || (!action.allowGap && next.unassigned?.some(range => range.sourceId === first.sourceId && range.startMs < second.startMs && range.endMs > first.endMs))) throw new Error('中间还有其他商品或待确认内容，请先核对');
+    next.scopes ??= [];
+    next.scopes.push(...[first, second].map(range => ({ ...range, kind: 'confirmed-inspection' as const, confirmed: true as const })));
+    next.intervals = next.intervals.filter(range => !action.intervalIds.includes(range.id));
+    next.intervals.push({ id: action.newIntervalId, sourceId: first.sourceId, productId: action.productId, startMs: first.startMs, endMs: second.endMs, origin: 'manual', scopeStatus: 'confirmed', joinedScopeIds: [first.id, second.id], ...(gap > 2000 ? { joinedGapConfirmed: true } : {}), shareJoinedPlans: action.shareJoinedPlans !== false, review: ['人工确认连接；原分析按原范围保留', ...(gap > 2000 ? ['中间内容保留，待按原片核对'] : [])] });
   } else if (action.type === 'unassign') {
     const range = next.intervals.find(i => i.id === action.intervalId);
     if (!range) throw new Error('讲解范围已变化，请重新读取');
@@ -108,7 +128,7 @@ export function applyProductEdit(data: ProductAnalysis, action: ProductEdit): Pr
 }
 
 export function productRangeSummary(data: ProductAnalysis, productId: string) {
-  const ranges = data.intervals.filter(i => i.productId === productId);
+  const ranges = [...data.intervals, ...(data.scopes ?? []).filter(scope => scope.kind === 'historical-analysis')].filter(i => i.productId === productId);
   return { ranges, count: ranges.length, totalMs: ranges.reduce((sum, range) => sum + range.endMs - range.startMs, 0) };
 }
 

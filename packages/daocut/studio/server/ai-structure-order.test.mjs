@@ -193,6 +193,19 @@ test('price role keys remain distinct while ambiguous legacy price and incompati
   rejected(f, [['pain', 'core-a', 'close']], 'AI_ORDER_CONDITIONS');
 });
 
+test('coupon and gift presence is compatible with a specific name, but incompatible specifics remain blocked', () => {
+  const f = fixture();
+  review(f, 'pain').conditions = { coupon: true, gift: '礼袋' };
+  review(f, 'close').conditions = { coupon: '20元券', gift: true };
+  assert.equal(validateAiStructureOrder(f, response()).plans.length, 1);
+  review(f, 'pain').conditions = { coupon: '70元券' };
+  review(f, 'close').conditions = { coupon: '20元券' };
+  rejected(f, [['pain', 'core-a', 'close']], 'AI_ORDER_CONDITIONS');
+  review(f, 'pain').conditions = { gift: false };
+  review(f, 'close').conditions = { gift: '礼袋' };
+  rejected(f, [['pain', 'core-a', 'close']], 'AI_ORDER_CONDITIONS');
+});
+
 test('source duration boundaries are exact and include the whole speech without trimming', () => {
   const checkDuration = (sourceMs, accepted) => {
     const f = fixture(), candidate = f.engineInput.candidates[4], cue = f.engineInput.cues[4];

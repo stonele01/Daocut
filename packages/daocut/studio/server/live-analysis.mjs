@@ -219,7 +219,7 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
     const ranges = rangesOf(storedAnalysis).filter(range => range.sourceId === id);
     if (requestedIntervalId !== undefined && !ranges.some(range => range.id === requestedIntervalId && (requestedProductId === undefined || range.productId === requestedProductId))) throw new HttpError(400, '请先明确指定有效的商品讲解或已确认检查范围');
     const analyses = Object.create(null);
-    let transcript, fingerprint, identityHash, identityValue, sourceInput;
+    let transcript, transcriptDigest, fingerprint, identityHash, identityValue, sourceInput;
     let readable = false;
     try {
       fingerprint = await sourceFingerprint(root, source);
@@ -227,8 +227,9 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
       identityValue = await publicModelIdentity();
       identityHash = identityValue ? hash(canonical(textResultCacheIdentity(identityValue))) : null;
       sourceInput = await sourceInputIdentity(root, source, transcript, identityHash);
+      transcriptDigest = sourceInput?.transcript ?? transcriptHash(transcript);
       readable = true;
-      if (transcription.status === 'complete' && (!transcript || state.transcription.sourceFingerprint !== fingerprint || state.transcription.transcriptHash !== transcriptHash(transcript))) Object.assign(transcription, { status: 'idle', error: '素材或字幕已变化，请重新检查转写' });
+      if (transcription.status === 'complete' && (!transcript || state.transcription.sourceFingerprint !== fingerprint || state.transcription.transcriptHash !== transcriptDigest)) Object.assign(transcription, { status: 'idle', error: '素材或字幕已变化，请重新检查转写' });
       if (transcript) {
         // The chat task only needs status; do not send the full source transcript to it.
         transcription.segments = scope ? [] : segmentsOf(transcript);
@@ -243,9 +244,14 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
     }
     if (!active && transcription.status === 'running') Object.assign(transcription, { status: 'failed', error: '任务中断，提交状态不确定，请先核查后再操作' });
     const ids = new Set(scope ? [scope.intervalId] : [...Object.keys(state.analyses), ...ranges.map(range => range.id)]);
+    const resultRangeIds = new Set(Object.values(state.results ?? {}).map(item => item.intervalId));
     for (const rangeId of ids) {
       const range = ranges.find(item => item.id === rangeId);
       const saved = state.analyses[rangeId] ?? { status: 'idle', intervalId: rangeId, productId: range?.productId };
+      if (!state.analyses[rangeId] && !resultRangeIds.has(rangeId)) {
+        analyses[rangeId] = { ...saved, stale: false };
+        continue;
+      }
       let versions = [];
       try { if (readable && range && sourceInput) versions = await inputVersions(root, source, range, transcript, identityHash, sourceInput); } catch { /* unreadable sources only invalidate; never retry */ }
       const cached = versions.map(version => state.results[version.cacheIdentity]).find(Boolean);
@@ -262,7 +268,7 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
       }
       if (item.status === 'complete') {
         item.stale = !versions.some(version => version.cacheIdentity && item.cacheIdentity === version.cacheIdentity) || !item.currentRunId || item.productId !== range?.productId;
-        if (item.sharedRef && range && readable && item.sharedSignature === hash({ fingerprint, transcript: transcriptHash(transcript), intervalId: range.id, productId: range.productId, startMs: range.startMs, endMs: range.endMs })) item.stale = false;
+        if (item.sharedRef && range && readable && item.sharedSignature === hash({ fingerprint, transcript: transcriptDigest, intervalId: range.id, productId: range.productId, startMs: range.startMs, endMs: range.endMs })) item.stale = false;
         if (item.stale) Object.assign(item, { status: 'idle', error: !identityHash ? '模型配置身份未确认，已有结果仅供核对；不会自动重新分析' : '素材、字幕、范围或分析配置已变化，已有结果仅供核对；不会自动重新分析' });
         if (item.legacyEditable) item.error = '历史分析结果可继续剪辑；未按当前配置重新分析，不作为最新分析缓存';
         if (item.historicalEditable) Object.assign(item, { status: 'idle', stale: true, error: '已导入的历史 AI 原话可继续选材；保留原分析范围，不代表当前字幕或商品边界已重新分析' });
@@ -408,7 +414,7 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
             }
             // Transport completion does not guarantee valid JSON or cue references.
             // Only an explicitly approved retry replaces a previously rejected reply.
-            const replaceInvalidReply = expected?.retryFailed === true && ['MODEL_INVALID_JSON', 'MODEL_CONSTRAINT'].includes(entry.error);
+            const replaceInvalidReply = expected?.retryFailed === true && !expected?.recoverOnly && ['MODEL_INVALID_JSON', 'MODEL_CONSTRAINT'].includes(entry.error);
             entry.bytes = Buffer.byteLength(args.prompt, 'utf8') + window.bytes - Buffer.byteLength(baseArgs.prompt, 'utf8');
             entry.status = 'running'; delete entry.error;
             entry.startedAt = new Date().toISOString();
@@ -418,6 +424,7 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
               const output = withSourceIndices(await analyzeTextStructure({ ...args, client: async request => {
                 const recovered = replaceInvalidReply ? undefined : recoverDeepSeekTextResponse(entry.receipt, request);
                 if (recovered !== undefined) { entry.recoveredFromResponse = true; return recovered; }
+                if (expected?.recoverOnly) throw Object.assign(new Error('本窗口没有可离线恢复的完整响应；已恢复窗口已保存，未发送模型请求'), { code: 'MODEL_RESPONSE_REQUIRED' });
                 if (entry.receipt) {
                   entry.previousReceipts ??= [];
                   entry.previousReceipts.push(entry.receipt);
@@ -474,6 +481,7 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
         const reason = error?.reason === 'configuration' ? '转写配置不可用' : error?.reason === 'audio' ? '音频提取失败或音频不符合要求' : '素材读取失败或发生变化';
         const status = Number.isInteger(error?.httpStatus) && error.httpStatus >= 400 && error.httpStatus <= 599 ? ` ${error.httpStatus}` : '';
         const modelErrors = { MODEL_TIMEOUT: '模型请求超时', MODEL_NETWORK: '模型网络请求失败', MODEL_HTTP: `模型服务返回 HTTP 错误${status}`, MODEL_INCOMPLETE: '模型响应未完成或达到输出上限', MODEL_INVALID_JSON: '模型输出 JSON 无效', MODEL_CONSTRAINT: '模型结果违反格式或来源约束', MODEL_INPUT_CHANGED: '本地授权输入已变化或不可读取', MODEL_INPUT_TOO_LARGE: '单条字幕或提示词超出文字窗口预算，请检查字幕边界' };
+        modelErrors.MODEL_RESPONSE_REQUIRED = '本窗口没有可离线恢复的完整响应；已恢复窗口已保存，未发送模型请求';
         const failedReceipt = type === 'analysis' ? state.attempts[state.analysis.attemptId]?.windows?.find(window => window.status === 'failed')?.receipt : undefined;
         const analysisError = error?.code === 'MODEL_INCOMPLETE' ? textResponseIncompleteMessage(failedReceipt) : error?.code === 'MODEL_CONSTRAINT' && error?.cueIssue ? error.message : Object.hasOwn(modelErrors, error?.code) ? modelErrors[error.code] : error instanceof HttpError || known.includes(error?.message) ? error.message : '任务失败，请检查配置与素材';
         state[type] = { ...(type === 'analysis' ? state.analysis : {}), status: 'failed', confirmationId, error: type === 'transcription' ? (boundaryReview ? '分段转写已保存，交界处待核对；无需重新付费转写，未自动重传音频' : safe ? `${reason}，音频未上传；处理后可手动重试` : '转写失败或提交状态不确定，不能自动重试，请先核查服务状态') : analysisError, ...(type === 'transcription' ? { segments: [], retryBlocked: !safe && !boundaryReview, ...(boundaryReview ? { code: 'ASR_BOUNDARY_REVIEW', localReviewRequired: true } : {}) } : { intervalId: selected.id, productId: selected.productId }) };
@@ -603,6 +611,12 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
     mediaRunning.set(key, { identity, promise }); return promise;
   }
   const route = async function route(req, res, root, rest) {
+    if (rest === 'live-analysis/recover' && req.method === 'POST') {
+      const body = await readJson(req);
+      if (body.confirmed !== true || !body.intervalId || !body.productId) throw new HttpError(400, '请明确选择要离线恢复的商品范围');
+      json(res, 200, await start(root, body.sourceId, 'analysis', body.intervalId, false, body.productId, false,
+        { ...expectedSelection(body), retryFailed: true, recoverOnly: true })); return true;
+    }
     if (rest === 'live-analysis/visual-plan' && req.method === 'GET') {
       const params = Object.fromEntries(new URL(req.url, 'http://localhost').searchParams);
       json(res, 200, await visualPlan(root, { ...params, startMs: Number(params.startMs), endMs: Number(params.endMs) })); return true;
@@ -640,14 +654,14 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
       const state = await load(root, sourceId), saved = state.analyses[scope?.intervalId];
       if (!saved || saved.sharedRef || saved.historicalRef || saved.status === 'idle') return null;
       const { source, analysis } = await sourceFor(root, sourceId);
-      const range = analysis.intervals.find(item => item.id === scope?.intervalId && item.productId === scope?.productId && item.sourceId === sourceId);
+      const range = rangesOf(analysis).find(item => item.id === scope?.intervalId && item.productId === scope?.productId && item.sourceId === sourceId);
       const model = await publicModelIdentity();
       const versions = await inputVersions(root, source, range, await readTranscript(root, source), model ? hash(canonical(textResultCacheIdentity(model))) : null);
       const version = versions.find(item => item.cacheIdentity && item.cacheIdentity === saved.cacheIdentity);
       if (!version) throw new HttpError(409, '已有话术分析的原始请求身份无法确认，未改用新版提示词补存或重新请求');
       return { model: textResultCacheIdentity(model), prompt: hash(textStructureCachePrompt(version.prompt)), version: structureVersion, windowPolicy, ...encodingIdentity(version.cueEncoding) };
     },
-    importHistorical: async (root, sourceId, payload, sharedRef, { productId, productName, sourceSha, expectedSourceFingerprint, expectedAnalysis } = {}) => {
+    importHistorical: async (root, sourceId, payload, sharedRef, { productId, productName, sourceSha, expectedSourceFingerprint, expectedAnalysis, sharedWorkflow } = {}) => {
       if (payload?.version !== 1 || payload.kind !== 'historical-ai-structure' || !Array.isArray(payload.candidates) || !/^[a-f0-9]{64}$/.test(sharedRef?.sha256 ?? '')) throw new HttpError(409, '历史话术格式不兼容');
       if ((typeof productId === 'string' && !!productId) === (typeof productName === 'string' && !!productName.trim())) throw new HttpError(400, '请明确关联一个本机商品，或输入新本机商品名');
       const { source, analysis } = await sourceFor(root, sourceId), expectedHash = hash(canonical(analysis));
@@ -659,18 +673,27 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
       if (existing && productId && existing.productId !== productId) throw new HttpError(409, '历史结果已关联其他本机商品，未覆盖关联');
       const localProductId = existing?.productId ?? productId ?? randomUUID(), scope = payload.scope;
       if (!Number.isFinite(scope?.startMs) || !Number.isFinite(scope?.endMs) || scope.startMs < 0 || scope.endMs <= scope.startMs || scope.endMs > source.durationMs) throw new HttpError(409, '历史范围不在原片内');
+      const importedMedia = sharedWorkflow?.mediaReview && validateProductMediaReview(sharedWorkflow.mediaReview, scope);
+      const importedVisual = sharedWorkflow?.visualReview && validateProductVisualReview(sharedWorkflow.visualReview, scope);
       const runId = `historical-${sharedRef.sha256}`;
       const candidates = payload.candidates.map((c, i) => ({ id: `historical-${hash([sharedRef.sha256, sourceId, i])}`, sourceId, productId: localProductId, intervalId: scopeId, startMs: c.startMs, endMs: c.endMs, text: c.text, tags: c.tags, details: c.details, cueRange: c.cueRange, origin: 'ai-text', version: 'historical-structure-v1', runId }));
       const committed = await updateProductAnalysis(root, data => {
         if (hash(canonical(data)) !== expectedHash) throw new HttpError(409, '本机商品在导入期间已修改，请重试；未覆盖修改');
         if (existing) return data;
-        if (!productId) data.products.push({ id: localProductId, name: productName.trim(), sourceIds: [sourceId] });
+        const layoutCompatibility = data.sharedLayouts?.[sourceId] ? { sharedLayoutHidden: true } : {};
+        if (!productId) data.products.push({ id: localProductId, name: productName.trim(), sourceIds: [sourceId], ...layoutCompatibility });
         data.scopes ??= [];
-        data.scopes.push({ id: scopeId, sourceId, productId: localProductId, ...scope, kind: 'historical-analysis', origin: 'shared-historical', confirmed: true, label: '历史话术原始分析范围' });
+        data.scopes.push({ id: scopeId, sourceId, productId: localProductId, ...scope, kind: 'historical-analysis', origin: 'shared-historical', confirmed: true, label: '历史话术原始分析范围', ...layoutCompatibility });
         data.candidates.push(...candidates); return data;
       }, probeSource, { preserveHistory: true });
       if (await sourceFingerprint(root, source) !== frozenFingerprint) throw new HttpError(409, '原片在导入期间变化，历史候选未启用，请核对素材');
       const state = await load(root, sourceId), saved = { status: 'complete', intervalId: scopeId, productId: localProductId, rangeStartMs: scope.startMs, rangeEndMs: scope.endMs, sourceFingerprint: frozenFingerprint, currentRunId: runId, candidateCount: candidates.length, historicalRef: sharedRef, sourceSha };
+      if (sharedWorkflow) {
+        saved.sharedRef = sharedRef;
+        if (sharedWorkflow.schema) saved.schema = sharedWorkflow.schema;
+        if (importedMedia) saved.mediaReview = importedMedia;
+        if (importedVisual) saved.visualReview = importedVisual;
+      }
       state.analyses[scopeId] = saved; state.analysis = saved; await save(root, sourceId, state);
       return { imported: true, intervalId: scopeId, productId: localProductId, count: candidates.length, analysis: committed.analysis };
     },
@@ -689,7 +712,7 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
       const { source, analysis } = await sourceFor(root, sourceId);
       if (expectedAnalysis && hash(canonical(analysis)) !== hash(canonical(expectedAnalysis))) throw new HttpError(409, '商品或结构已被修改，未自动导入共享话术');
       if (adopt && (analysis.manualEdits ?? []).some(edit => edit.action === 'manual-save' && edit.sourceIds.includes(sourceId))) throw new HttpError(409, '人工修改已变化，未用新版结构覆盖');
-      const selected = frozenScope(source, analysis, scope.intervalId, scope.productId, { ...scope, lectureOnly: true });
+      const selected = frozenScope(source, analysis, scope.intervalId, scope.productId, { ...scope, lectureOnly: scope.lectureOnly !== false });
       const state = await load(root, sourceId), runId = `shared-${sharedRef.sha256}`;
       const importedView = async committedAnalysis => ({ ...await view(root, sourceId, scope.intervalId, scope.productId, scope), committedAnalysis });
       if (state.analyses[scope.intervalId]?.currentRunId === runId) return importedView(analysis);
@@ -705,7 +728,7 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
       const committed = await updateProductAnalysis(root, data => {
         if (expectedAnalysis && hash(canonical(data)) !== hash(canonical(expectedAnalysis))) throw new HttpError(409, '商品或结构在导入期间被修改，未覆盖最新修改');
         if (adopt && hash(canonical(data)) !== hash(canonical(analysis))) throw new HttpError(409, '商品或结构在采用期间已被修改，未覆盖最新修改');
-        const range = data.intervals.find(i => i.id === scope.intervalId && i.productId === scope.productId && i.sourceId === sourceId);
+        const range = rangesOf(data).find(i => i.id === scope.intervalId && i.productId === scope.productId && i.sourceId === sourceId);
         if (!range || range.startMs !== scope.startMs || range.endMs !== scope.endMs) throw new HttpError(409, '本机范围已变化，共享结构未应用');
         if (adopt) {
           const previous = data.candidates.filter(c => c.intervalId === scope.intervalId);

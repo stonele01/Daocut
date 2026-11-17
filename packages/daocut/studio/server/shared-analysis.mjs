@@ -125,7 +125,7 @@ export function createSharedAnalysis({ coordinate, settings = () => readPrefs().
     const retry = ['uncertain', 'failed'].includes(task.status) || interrupted;
     return { ...descriptor, attemptId: task.attemptId, mode: retry ? 'retry-required' : 'busy', status: task.status, reason: retry ? '共享任务未完成，核查后才能明确重试，可能再次计费' : '已有同事正在处理，等待共享结果；不会再次提交请求' };
   }
-  async function prepareExisting(root, source, artifact) {
+  async function prepareExisting(root, source, artifact, { allowRetry = false } = {}) {
     const identity = await sourceIdentity(root, source);
     if (!identity || identity.localOnly) throw new HttpError(409, '请先把此素材关联共享素材库并配置结果目录；没有重新分析');
     const sourceIdentityHash = sharedHash(identity), payloadHash = sharedHash(artifact.payload);
@@ -137,6 +137,7 @@ export function createSharedAnalysis({ coordinate, settings = () => readPrefs().
     descriptor.coordinationId = response.coordinationId ?? saved?.coordinationId;
     if (saved?.outbox) return { ...descriptor, mode: 'publish-pending' };
     if (response.task?.status === 'complete') return { ...descriptor, mode: 'reuse', result: response.task.result };
+    if (allowRetry && ['uncertain', 'failed'].includes(response.task?.status)) return { ...descriptor, mode: 'retry-required', attemptId: response.task.attemptId, status: response.task.status };
     if (saved?.attemptId === response.task?.attemptId && saved?.descriptor?.inputHash === descriptor.inputHash && ['claimed', 'submitted'].includes(response.task?.status)) return { ...descriptor, mode: 'publish-resume', attemptId: saved.attemptId };
     if (saved?.status === 'claiming' && saved.clientAttemptId && saved.descriptor?.inputHash === descriptor.inputHash && response.task?.status === 'claimed') return { ...descriptor, mode: 'publish-resume', attemptId: response.task.attemptId };
     if (response.task) return { ...descriptor, mode: 'busy', reason: '共享保存尚未完成，请检查原发布记录；不会请求模型' };
@@ -355,5 +356,10 @@ export function createSharedAnalysis({ coordinate, settings = () => readPrefs().
     const pending = saved.find(item => item.outbox) ?? saved.find(item => ['claiming', 'claimed', 'submitted', 'uncertain'].includes(item.status));
     return pending ? { mode: pending.outbox ? 'publish-pending' : pending.status === 'uncertain' || !active.has(pending.descriptor.taskKey) ? 'retry-required' : 'busy', taskKey: pending.descriptor.taskKey, action: pending.descriptor.action, ...(pending.descriptor.newVersion ? { newVersion: true } : {}), ...(pending.descriptor.localScope ? { scope: pending.descriptor.localScope } : {}), status: pending.status, reason: pending.outbox ? '结果已在本机，补保存不会重新分析' : '共享任务未完成，请核查记录；不会自动重发请求' } : undefined;
   }
-  return { prepare, prepareExisting, resumeExisting, history, historicalArtifact, pinHistorical, acquire, read, complete, publish, fail, markReview, status, versions, adoption, validateSource, pendingAdoption, pendingAdoptions, commitAdoption, reconcileAdoptions, recoverable, recover };
+  async function layoutLocation(root, source) {
+    const identity = await sourceIdentity(root, source);
+    if (!identity || identity.localOnly) return null;
+    return { sourceIdentity: sharedHash(identity), directory: join(await mapping(identity.libraryId), 'product-layouts', sharedHash(identity)) };
+  }
+  return { layoutLocation, prepare, prepareExisting, resumeExisting, history, historicalArtifact, pinHistorical, acquire, read, complete, publish, fail, markReview, status, versions, adoption, validateSource, pendingAdoption, pendingAdoptions, commitAdoption, reconcileAdoptions, recoverable, recover };
 }

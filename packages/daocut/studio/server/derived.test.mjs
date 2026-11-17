@@ -1,7 +1,7 @@
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readdirSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MediaError, frame, loudness, loudnessOf, poster, probe, soundOf, waveform } from './derived.mjs';
@@ -28,6 +28,20 @@ test('probe: length, picture size, frame rate and sound of a video; a sound has 
   const sound = await probe(root, 'assets/tone.wav');
   assert.equal(sound.width, undefined);
   assert.ok(Math.abs(sound.duration - 2) < 0.05);
+});
+
+test('preview audio trims only selected sound, starts at zero and reuses its local cache', { skip: !hasFfmpeg && 'no ffmpeg' }, async () => {
+  const soundRoot = mkdtempSync(join(tmpdir(), 'of-derived-clip-')); mkdirSync(join(soundRoot, 'assets'));
+  copyFileSync(join(root, 'assets/tone.wav'), join(soundRoot, 'assets/tone.wav'));
+  const file = await soundOf(soundRoot, 'assets/tone.wav', [0.5, 1.5]);
+  assert.equal(await soundOf(soundRoot, 'assets/tone.wav', [0.5, 1.5]), file);
+  const info = JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration,start_time', '-of', 'json', file]).toString()).format;
+  assert.ok(Math.abs(Number(info.duration) - 1) < 0.05);
+  assert.ok(Math.abs(Number(info.start_time ?? 0)) < 0.001);
+  const pcm = execFileSync('ffmpeg', ['-v', 'error', '-i', file, '-f', 's16le', '-ac', '1', '-ar', '8000', '-']);
+  const peak = (start, end) => { let p = 0; for (let i = start * 16000; i < Math.min(end * 16000, pcm.length) - 1; i += 2) p = Math.max(p, Math.abs(pcm.readInt16LE(i))); return p; };
+  assert.ok(peak(0.1, 0.3) > 1000); assert.ok(peak(0.7, 0.9) < 100);
+  await assert.rejects(soundOf(soundRoot, 'assets/tone.wav', [0, 601]));
 });
 
 test('probe: a still\'s size, and a video turned a quarter (a phone\'s portrait video) as it is shown', { skip: !hasFfmpeg && 'no ffmpeg' }, async () => {

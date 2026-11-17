@@ -94,6 +94,18 @@ test('uncertain submission survives reopen and only explicit retry can acquire a
   assert.equal(q.mode, 'retry-required'); await assert.rejects(reopened.acquire(q));
   assert.notEqual((await reopened.acquire(q, { retryAcknowledged: true })).attemptId, claim.attemptId);
 });
+
+test('existing structure artifacts expose failed attempts only to explicit retry preparation', async t => {
+  const f = await fixture(t), a = f.make(), artifact = { action: 'structure-plans', payload: { kind: 'ai-structure-plans-v8', requestHash: 'same-request' } };
+  const first = await a.prepareExisting(f.roots[0], f.source, artifact), claim = await a.acquire(first);
+  assert.equal((await a.prepareExisting(f.roots[1], f.source, artifact, { allowRetry: true })).mode, 'busy', 'do not steal an active request');
+  await a.fail(first, claim.attemptId);
+  assert.equal((await a.prepareExisting(f.roots[0], f.source, artifact)).mode, 'busy', 'ordinary lookup never authorizes paid retry');
+  const retry = await a.prepareExisting(f.roots[0], f.source, artifact, { allowRetry: true });
+  assert.equal(retry.mode, 'retry-required'); assert.equal(retry.taskKey, first.taskKey); assert.equal(retry.attemptId, claim.attemptId);
+  await assert.rejects(a.acquire(retry), /明确确认/);
+  const next = await a.acquire(retry, { retryAcknowledged: true }); assert.notEqual(next.attemptId, claim.attemptId);
+});
 test('different input or local human edits do not overwrite first shared baseline', async t => {
   const f = await fixture(t), a = f.make(), p = await a.prepare(f.roots[0], f.source, f.input), claim = await a.acquire(p);
   await a.complete(f.roots[0], p, claim.attemptId, { products: ['A'] });

@@ -29,6 +29,8 @@ const url = (src) => new URL(srcHref(src), location.href);
    but is neither loaded, drawn nor heard. Anything else (a check, an export) says the missing file and stops */
 const SKIP_MISSING = new URL(location.href).searchParams.get('film-missing') === 'skip';
 const ready = (a) => Promise.resolve(typeof a.ready === 'function' ? a.ready() : a.ready);
+const clipPreviewStart = (c) => window.__filmClipPreview && c.native > 600 && c.span?.to > c.span?.from && c.span.to - c.span.from <= 600 ? Math.max(0, Math.floor(c.span.from) - 1) : null;
+const videoTime = (c, sourceTime) => Math.max(0, sourceTime - (clipPreviewStart(c) ?? 0));
 
 /** A gate that runs what is given to it when fewer than `most` of its runs are going. */
 function gate(most) {
@@ -357,7 +359,7 @@ async function onScreen(c, want) {
 function getReady(c, lead, rate) {
   const v = c.el;
   const speed = c.span.speed ?? 1;
-  const first = sourceAt(c.span, 0, c.row);
+  const first = videoTime(c, sourceAt(c.span, 0, c.row));
   const cue = Math.max(0, first - PREROLL * speed);
   const rolling = (first - cue) / speed; // the lead at which the video is at `cue`
   if (lead < rolling) { roll(c, first - lead * speed, rate); return; }
@@ -604,10 +606,15 @@ function wake(c, from = null) {
   const v = c.el;
   v.preload = 'auto';
   /* without the fragment: which seconds play is the film's to keep (a browser would stop the video at its end) */
-  v.src = url(c.row.src).href;
+  const address = url(c.row.src);
+  if (clipPreviewStart(c) != null) {
+    address.searchParams.set('film-clip', `${c.span.from},${c.span.to}`);
+    if (from == null) from = c.span.from;
+  }
+  v.src = address.href;
   /* An exact frame or paused scrub loads at its target, without first decoding the recording's opening.
      Playing videos are still woken ahead without a seek, then cued by getReady. */
-  if (from > 0) v.currentTime = from;
+  if (from != null) v.currentTime = videoTime(c, from);
   c.awake = new Promise((done) => {
     v.addEventListener('loadeddata', () => done(), { once: true });
     v.addEventListener('error', () => done(), { once: true });
@@ -772,6 +779,7 @@ const sounds = [];
 /** A clip's timing, volume and placement from its film.html row (its source already loaded). */
 function settle(c, row, track, ti) {
   const where = `clip "${row.id}" (${row.src})`;
+  if (window.__filmClipPreview && c.kind === 'video' && c.awake && JSON.stringify(c.row?.time) !== JSON.stringify(row.time)) rest(c);
   c.row = row;
   c.ti = ti;
   c.track = ti;
@@ -956,11 +964,11 @@ async function drawClip(c, t, live, play, turn, coming, going) {
   if (c.kind === 'video') {
     if (play) {
       /* where it should be this moment (not at the frame on its way): its own clock runs on to that frame */
-      const playing = sourceAt(c.span, Math.min(Math.max(0, play.now - c.at), c.span.length), c.row);
+      const playing = videoTime(c, sourceAt(c.span, Math.min(Math.max(0, play.now - c.at), c.span.length), c.row));
       if (c.held) step(c, playing); else roll(c, playing, play.rate);
       return;
     }
-    const want = sourceAt(c.span, t - c.at, c.row);
+    const want = videoTime(c, sourceAt(c.span, t - c.at, c.row));
     c.held = false;
     if (live) { await glance(c, want); return; }
     if (!c.el.paused) c.el.pause();
@@ -1145,7 +1153,7 @@ async function cue(c, row, track, t, fresh) {
   if (t < at || t >= at + span.length) return;
   cueing.add(c);
   try {
-    if (c.kind === 'video') { await glance(c, sourceAt(span, t - at, row)); return; }
+    if (c.kind === 'video') { await glance(c, videoTime(c, sourceAt(span, t - at, row))); return; }
     await wake(c);
     if (!c.child) return;
     const local = sourceAt(span, t - at, row, c.native);

@@ -13,10 +13,10 @@ export interface StructurePlansState {
   taskKey?: string; plans: StructurePlan[]; complete?: boolean; materialComplete?: boolean; allValidCombinationsEnumerated?: boolean;
   issues?: { code: string; message: string; candidateId?: string; text?: string; startMs?: number; endMs?: number }[]; stats?: Record<string, number>;
   context?: StructureScope & { visibility: string }; requestCount?: number;
-  generationMethod?: 'ai'; canContinue?: boolean; recoverable?: boolean;
+  generationMethod?: 'ai'; canContinue?: boolean; recoverable?: boolean; retryable?: boolean;
   usablePlanIds?: string[];
   coverage?: { total: number; covered: number; openingCovered?: number; remainingIds: string[]; openingIds: string[]; excluded: { id: string; reason: string; startMs?: number; endMs?: number; text?: string }[]; targetVariants?: number | null; targetCounts?: Record<string, number>; totalVariants?: number; totalDistinctVariants?: number; remainingVariants?: number; perOpening?: { openingId: string; savedCount: number; distinctCount: number; remaining: number }[] };
-  confirmation?: { enabled: boolean; id?: string; rulesVersion?: string; message?: string; service?: { model?: string; provider?: string; endpoint?: string }; requestCount?: number; candidateCount?: number; transcriptSegments?: number; openingCount?: number; batchCount?: number; batchBasis?: string; continuation?: boolean; visibility?: string; targetVariants?: number | null; existingPlanCount?: number; plannedNewVariants?: number };
+  confirmation?: { enabled: boolean; retry?: boolean; taskKey?: string; id?: string; rulesVersion?: string; message?: string; service?: { model?: string; provider?: string; endpoint?: string }; requestCount?: number; candidateCount?: number; transcriptSegments?: number; openingCount?: number; batchCount?: number; batchBasis?: string; continuation?: boolean; visibility?: string; targetVariants?: number | null; existingPlanCount?: number; plannedNewVariants?: number };
   mediaReview?: ProductMediaReview;
   mediaReviewOrigin?: 'shared' | 'local';
   visualReview?: ProductVisualReview;

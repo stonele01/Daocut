@@ -95,6 +95,15 @@ export function ExistingAnalysisSharing({ projectId, sourceId, sourcePath, durat
     }
   });
   return <section aria-label="已有分析结果共享" className="space-y-2 text-[11px] transition-all duration-150">
+    <button type="button" className={button} disabled={busy || durationMs == null || durationMs <= 0} onClick={() => void perform(async () => {
+      const report = await api.resumeSharedAnalyses(projectId, sourceId);
+      if (!isCurrent()) return;
+      setWarnings(report.warnings); setMessage(`补齐 ${report.imported.analysis} 条话术，已读记录 ${report.skippedRecords} 份，未读成功 ${report.failedRecords} 份；未重新分析`);
+      await onChanged();
+    })}>补齐共享分析（不重新分析）</button>
+    {!open && message && <p role="status">{message}</p>}
+    {!open && error && <p role="alert">{error}</p>}
+    {!open && warnings.map((warning, index) => <p key={index} className="text-[var(--warn)]">{warning}</p>)}
     <button type="button" className={button} disabled={busy} aria-expanded={open} onClick={() => setOpen(value => !value)}>发布已有分析结果</button>
     <div className={`grid transition-[grid-template-rows,opacity] duration-150 ${open ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'}`} inert={!open}>
       <div className="min-h-0 overflow-hidden"><div className="space-y-2 rounded border border-[var(--border)] p-2">

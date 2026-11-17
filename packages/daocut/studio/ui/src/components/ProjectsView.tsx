@@ -7,7 +7,7 @@
 import React from 'react';
 import { createPortal } from 'react-dom';
 import {
-  ArrowLeft, Check, ChevronDown, ChevronRight, Clock3, Folder, FolderInput, FolderOpen, FolderPlus, FolderSearch, FolderSymlink, Github, LayoutGrid, List, MoreHorizontal, Pencil, Plus, Search, SlidersHorizontal, Trash2, Video, X,
+  ArrowLeft, Check, ChevronDown, ChevronRight, Clock3, Folder, FolderInput, FolderOpen, FolderPlus, FolderSearch, FolderSymlink, LayoutGrid, List, MoreHorizontal, Pencil, Plus, Search, SlidersHorizontal, Trash2, Video, X,
 } from 'lucide-react';
 import type { Example } from '@/lib/project-sources';
 import { ExamplesSection } from './ProjectSources';
@@ -622,8 +622,8 @@ function NewProjectListRow({ creating, onNewProject, onOpenFolder, onGetFromGitH
   );
 }
 
-/** "Import from ⌄": the ways to start from a film that exists, a folder on this computer or a repository on GitHub. */
-function ImportMenu({ creating, onOpenFolder, onGetFromGitHub, onCreateFromShared, onRestoreBackup, onCreateProductAnalysisDemo, className }: Omit<NewProjectProps, 'onNewProject'> & { className: string }) {
+/** Import existing local or shared footage, or restore a project backup. */
+function ImportMenu({ creating, onOpenFolder, onCreateFromShared, onRestoreBackup, className }: Omit<NewProjectProps, 'onNewProject'> & { className: string }) {
   const t = useT();
   const [anchor, setAnchor] = React.useState<{ x: number; y: number; top: number } | null>(null);
   const button = React.useRef<HTMLButtonElement>(null);
@@ -654,9 +654,7 @@ function ImportMenu({ creating, onOpenFolder, onGetFromGitHub, onCreateFromShare
           items={[
             { id: 'folder', icon: <FolderOpen size={14} />, label: t('projects.openFolder'), onSelect: onOpenFolder },
             { id: 'shared-media', icon: <FolderSymlink size={14} />, label: t('projects.createFromShared'), onSelect: onCreateFromShared },
-            ...(onCreateProductAnalysisDemo ? [{ id: 'product-analysis-demo', icon: <Video size={14} />, label: t('projects.productAnalysisDemo'), onSelect: onCreateProductAnalysisDemo }] : []),
             ...(onRestoreBackup ? [{ id: 'restore-backup', icon: <FolderOpen size={14} />, label: '恢复工程备份', onSelect: onRestoreBackup }] : []),
-            { id: 'github', icon: <Github size={14} />, label: t('projects.getFromGitHub'), onSelect: onGetFromGitHub },
           ]}
         />
       ) : null}

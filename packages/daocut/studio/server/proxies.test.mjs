@@ -6,9 +6,22 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
-import { ensureProxies, heavy, proxySize, readyProxy } from './proxies.mjs';
-
+import { ensureProxies, heavy, proxySize, readyProxy, clipProxy } from './proxies.mjs';
 const hasFfmpeg = (() => { try { execFileSync('ffmpeg', ['-version'], { stdio: 'ignore' }); return true; } catch { return false; } })();
+
+test('selected previews start at zero and reuse the same bounded local cache', { skip: !hasFfmpeg && 'no ffmpeg' }, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'of-clip-proxy-'));
+  mkdirSync(join(root, 'assets'));
+  execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=96x160:rate=10:duration=12', '-c:v', 'prores_ks', '-profile:v', '0', join(root, 'assets', 'heavy.mov')]);
+  const outputs = await Promise.all([clipProxy(root, 'assets/heavy.mov', 8.2, 10.4, 540), clipProxy(root, 'assets/heavy.mov', 8.2, 10.4, 540)]);
+  assert.equal(outputs[0], outputs[1]);
+  const data = JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=codec_name,width,height,start_time,duration', '-of', 'json', outputs[0]]).toString()).streams[0];
+  assert.equal(data.codec_name, 'h264');
+  assert.ok(Math.abs(Number(data.start_time)) < 0.05, JSON.stringify(data));
+  assert.ok(Number(data.duration) <= 5.1, 'only the requested range plus handles is encoded');
+  await assert.rejects(clipProxy(root, 'assets/heavy.mov', 0, 601, 540));
+  assert.equal(readyProxy(root, 'assets/heavy.mov', 540), null, 'a short preview never masquerades as the full recording');
+});
 
 test('heavy footage: past 1080p, or not 8-bit H.264, VP8/9 or AV1', () => {
   assert.equal(heavy({ width: 1920, height: 1080, codec: 'h264', pixfmt: 'yuv420p' }), false);

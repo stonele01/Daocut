@@ -23,7 +23,7 @@ test('personal source takes survive a fresh browser, server restart and new anal
   let studio, browser, context, page, step = 'setup';
   let modelPosts = 0;
   try {
-    studio = await startStudio({ port: 0, openBrowser: () => {} });
+    studio = await startStudio({ port: 0, openBrowser: () => {}, ...(process.env.DAOCUT_TEST_EDITOR_DIR ? { editorDir: process.env.DAOCUT_TEST_EDITOR_DIR } : {}) });
     const api = async (path, method = 'GET', body) => {
       const response = await fetch(`${studio.origin}${path}`, { method, headers: { 'x-studio-key': studio.key, ...(body ? { 'content-type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
       const value = await response.json();
@@ -35,15 +35,10 @@ test('personal source takes survive a fresh browser, server restart and new anal
     await mkdir(join(project.path, 'assets'), { recursive: true });
     for (const name of ['a', 'b']) execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', `color=c=${name === 'a' ? 'blue' : 'green'}:s=320x180:r=10:d=30`, '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-y', join(project.path, 'assets', `synthetic-${name}.mp4`)], { windowsHide: true });
     const candidate = (id, sourceId, startMs, endMs, tag) => ({ id, productId: 'p', intervalId: sourceId === 'a' ? 'ia' : 'ib', sourceId, startMs, endMs, text: `合成取用 ${id}`, tags: [tag], origin: 'synthetic-test', version: 1 });
-    const analysis = { version: 1, sources: ['a', 'b'].map(id => ({ id, assetPath: `assets/synthetic-${id}.mp4`, durationMs: null })), products: [{ id: 'p', name: '取用保存合成商品', sourceIds: ['a', 'b'] }], intervals: ['a', 'b'].map(id => ({ id: `i${id}`, productId: 'p', sourceId: id, startMs: 0, endMs: 29000 })), candidates: [candidate('trim', 'a', 2000, 7000, '钩子'), candidate('delete', 'a', 9000, 12000, '痛点'), candidate('split', 'a', 14000, 20000, '卖点'), candidate('refresh', 'a', 23000, 25000, '行动指令'), candidate('other', 'b', 3000, 7000, '价格锚点')] };
+    const analysis = { version: 1, sources: ['a', 'b'].map(id => ({ id, assetPath: `assets/synthetic-${id}.mp4`, durationMs: null })), products: [{ id: 'p', name: '取用保存合成商品', sourceIds: ['a', 'b'] }], intervals: ['a', 'b'].map(id => ({ id: `i${id}`, productId: 'p', sourceId: id, startMs: 0, endMs: 29000 })), candidates: [candidate('trim', 'a', 2000, 7000, '钩子'), candidate('delete', 'a', 9000, 12000, '痛点'), candidate('split', 'a', 14000, 20000, '卖点'), candidate('refresh', 'a', 23000, 25000, '行动指令'), candidate('other', 'b', 3000, 7000, '价格机制')] };
     await api(`${endpoint}/product-analysis`, 'PUT', { analysis });
     const filmPath = join(project.path, 'film.html');
     const analysisPath = join(project.path, '.film', 'product-analysis.json');
-    // ffprobe metadata and browser duration can round differently by one ms.
-    // Keep this discrepancy across loading, card use and later analysis saves.
-    const fixtureAnalysis = JSON.parse(await readFile(analysisPath, 'utf8'));
-    fixtureAnalysis.sources.find(source => source.id === 'a').durationMs = 29999;
-    await writeFile(analysisPath, `${JSON.stringify(fixtureAnalysis, null, 2)}\n`);
     await writeFile(filmPath, filmHtml({ stage: { w: 320, h: 180 }, tracks: [{ clips: [{ id: 'seed', src: 'assets/synthetic-a.mp4', at: 0, time: [0, 1] }] }] }));
     const initialFilm = await readFile(filmPath, 'utf8');
     const initialAnalysis = await readFile(analysisPath, 'utf8');
@@ -52,6 +47,12 @@ test('personal source takes survive a fresh browser, server restart and new anal
     browser = await chromium.launch({ executablePath: process.env.DAOCUT_TEST_BROWSER || 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: true });
     const open = async () => {
       context = await browser.newContext({ viewport: { width: 1680, height: 1050 } });
+      // Browser media duration can differ from ffprobe metadata; exercise both
+      // paths without altering the real source identity or saved project data.
+      await context.addInitScript(() => {
+        const descriptor = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'duration');
+        Object.defineProperty(HTMLMediaElement.prototype, 'duration', { ...descriptor, get() { const value = descriptor.get.call(this); return Number.isFinite(value) && value > 0 ? value + 0.2 : value; } });
+      });
       await context.route('**/*', route => {
         const request = route.request(), url = new URL(request.url());
         // Studio serves project media on a second local origin.
@@ -125,6 +126,7 @@ test('personal source takes survive a fresh browser, server restart and new anal
     };
 
     await open();
+    assert.equal(Number(await source().locator('[role="slider"][data-zoom-layer="content"]').getAttribute('aria-valuemax')), 30000, 'editing bounds use the original source duration even when playback reports 30.2 seconds');
     step = 'trim candidate and gray take through the actual source timeline';
     await trim(block('trim').first(), 'start', 40);
     const adjusted = await bounds(block('trim').first());
@@ -230,7 +232,7 @@ test('personal source takes survive a fresh browser, server restart and new anal
 
     step = 'independent source B edit does not replace source A';
     await page.getByLabel('候选显示范围', { exact: true }).getByRole('button', { name: '该商品全部讲解', exact: true }).click();
-    await showTag('价格锚点');
+    await showTag('价格机制');
     await card('other').getByText('合成取用 other', { exact: true }).click();
     await block('other').first().waitFor();
     await trim(block('other').first(), 'end', -40);
@@ -282,7 +284,7 @@ test('personal source takes survive a fresh browser, server restart and new anal
     assert.deepEqual(await hashes(), initialHashes);
     assert.equal(modelPosts, 0, 'no transcription or model requests were made');
     await page.screenshot({ path: join(base, 'source-takes-project.png') });
-    await writeFile(join(base, 'browser-result.json'), `${JSON.stringify({ synthetic: true, modelPosts, adjusted, grayRange, otherRange, splitRange, queuedRange, cleanBrowserRestart: true, newServerOrigin: true, preservedAfterReanalysis: true, buttonDragParity: true, focusedSplitParity: true, failedSaveExplicitRetry: true, lostAcknowledgementQueuedEdit: true, metadataDurationOffsetMs: -1 }, null, 2)}\n`);
+    await writeFile(join(base, 'browser-result.json'), `${JSON.stringify({ synthetic: true, modelPosts, adjusted, grayRange, otherRange, splitRange, queuedRange, cleanBrowserRestart: true, newServerOrigin: true, preservedAfterReanalysis: true, buttonDragParity: true, focusedSplitParity: true, failedSaveExplicitRetry: true, lostAcknowledgementQueuedEdit: true, playerDurationOffsetMs: 200 }, null, 2)}\n`);
   } catch (error) {
     await page?.screenshot({ path: join(base, 'source-takes-project-failure.png') }).catch(() => {});
     throw new Error(`Source takes project test failed at: ${step}: ${error.message}`, { cause: error });

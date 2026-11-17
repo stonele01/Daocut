@@ -1,6 +1,6 @@
 /** Each structure draft is a private child project; media remains a read-only reference. */
 import { createHash, randomUUID } from 'node:crypto';
-import { copyFile, lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { filmHtml } from '../../src/film-doc.mjs';
 import { mediaContentHash } from '../../src/shared-media-reference.mjs';
@@ -13,6 +13,7 @@ import { sharedMediaManifest } from './shared-media.mjs';
 import { transcriptPath, translationsOf } from './transcripts.mjs';
 import { savedStructureTranscriptVtt } from './structure-transcript.mjs';
 import { probeSource } from './nle.mjs';
+import { replaceFile } from './atomic.mjs';
 
 export const STRUCTURE_DRAFTS_DIR = '.film/structure-drafts';
 export const STRUCTURE_DRAFT_META = '.film/structure-draft.json';
@@ -118,7 +119,7 @@ function checkedPlan(plan, analysis) {
   if (sourceIds.length !== 1) fail('结构草稿只能使用当前讲解段的原片');
   const source = analysis.sources?.find(item => item.id === sourceIds[0]);
   if (!source || !assetPath(source.assetPath) || !(source.durationMs > 0)) fail('结构方案原片不存在或时长无效');
-  const scopes = analysis.intervals?.filter(item => item.sourceId === source.id && (!plan.scope?.intervalId || item.id === plan.scope.intervalId)
+  const scopes = [...(analysis.intervals ?? []), ...(analysis.scopes ?? []).filter(item => item.kind === 'historical-analysis' && item.confirmed === true)].filter(item => item.sourceId === source.id && (!plan.scope?.intervalId || item.id === plan.scope.intervalId)
     && plan.clips.every(clip => Number.isFinite(clip.startMs) && Number.isFinite(clip.endMs) && clip.startMs >= item.startMs && clip.endMs <= item.endMs && clip.endMs > clip.startMs)) ?? [];
   if (scopes.length !== 1) fail('结构方案不属于唯一的当前讲解段，未创建草稿');
   const scope = scopes[0];
@@ -188,7 +189,7 @@ async function create(parentRoot, parentProjectId, plan) {
   await writeFile(join(stage, '.film/id'), `sd-${draftId}\n`);
   await writeFile(join(stage, STRUCTURE_DRAFT_META), JSON.stringify(meta, null, 2));
   // Publishing a complete child folder does not touch the parent's film or source files.
-  try { await rename(stage, root); }
+  try { await replaceFile(stage, root); }
   catch (error) { const current = await structureDraftContext(root); if (!current) throw error; }
   return { root, meta: await structureDraftContext(root) };
   } finally { if (within(base, stage)) await rm(stage, { recursive: true, force: true }); }

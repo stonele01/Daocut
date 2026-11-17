@@ -188,11 +188,14 @@ async function editingIdentity(library, source, onProgress) {
   const resultRoot = readPrefs().sharedAnalysis.resultRoots.find(item => item.libraryId === library.id)?.root;
   if (source.info.size > 8 * 1024 * 1024 && resultRoot) {
     const results = join(resultRoot, 'results');
+    let unreadable = false;
     const tasks = await readdir(results, { withFileTypes: true }).catch(error => { if (error.code === 'ENOENT') return []; throw error; });
     for (const task of tasks.filter(item => item.isDirectory() && /^[a-f0-9]{64}$/.test(item.name))) {
       const directory = join(results, task.name);
       for (const file of (await readdir(directory, { withFileTypes: true })).filter(item => item.isFile() && /^[a-f0-9]{64}\.json$/.test(item.name))) {
-        const value = JSON.parse(await readFile(join(directory, file.name), 'utf8'));
+        let value;
+        try { value = JSON.parse(await readFile(join(directory, file.name), 'utf8')); }
+        catch (error) { if (!(error instanceof SyntaxError)) throw error; unreadable = true; continue; }
         if (value?.schema !== 'daocut.shared-analysis.v1' || value.source?.libraryId !== library.id || value.source?.relativePath !== source.relativePath || value.source?.size !== source.info.size) continue;
         const identityKind = value.source.identityKind;
         const sha256 = await mediaContentHash(source.path, { identityKind, onProgress });
@@ -200,6 +203,7 @@ async function editingIdentity(library, source, onProgress) {
         return { ...(identityKind ? { identityKind } : {}), sha256 };
       }
     }
+    if (unreadable) throw new SharedMediaError('共享结果中有未完整保存的记录，暂不能确认原分析身份；请补存已有结果后重试，未创建重复分析', 409);
   }
   return mediaEditingIdentity(source.path, { onProgress });
 }

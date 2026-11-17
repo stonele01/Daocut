@@ -23,7 +23,7 @@ export type SourceTakeRange = TakeRange & { sourceId: string; label: string; can
 const SOURCE_BLOCK_DEFAULT = MAIN_TRACK_H;
 const SOURCE_HEIGHT_KEY = 'daocut:source-track-height';
 type Props = {
-  sourceId: string; duration: number; time: number; ranges: SourceProductRange[]; selectedProductId?: string | null; selectedIntervalId?: string | null;
+  sourceId: string; duration: number; sourceDurationMs?: number | null; time: number; ranges: SourceProductRange[]; selectedProductId?: string | null; selectedIntervalId?: string | null;
   selectedCandidateId?: string | null; selectedTag?: string; candidateSelectionTick?: number;
   focusRangeRequest?: number;
   onSelectRange?: (range: SourceProductRange) => void; onSeek: (seconds: number) => void;
@@ -49,7 +49,7 @@ function read<T>(key: string, fallback: T): T {
 export function SourceTimeline(props: Props) {
   const version = useSourceTakeVersion();
   const projectId = props.thumbnail?.projectId ?? '';
-  const totalMs = Math.max(0, Math.round(props.duration * 1000));
+  const totalMs = props.sourceDurationMs && props.sourceDurationMs > 0 ? props.sourceDurationMs : Math.max(0, Math.round(props.duration * 1000));
   const source = { projectId, sourceId: props.sourceId, assetPath: props.thumbnail?.path ?? props.sourceId, durationMs: totalMs, version: props.thumbnail?.version };
   const signature = sourceTakeSignature(source, props.ranges);
   const [loadError, setLoadError] = React.useState<string | null>(null);
@@ -69,7 +69,7 @@ export function SourceTimeline(props: Props) {
       <span>{error ?? (state?.saving ? '正在保存取用…' : ready ? state?.persisted ? '取用已保存在工程' : '取用就绪，修改后自动保存' : '正在读取取用…')}</span>
       {error ? <button type="button" onClick={() => void retrySourceTakeSave(projectId, props.sourceId).then(() => { setLoadError(null); setRetry(n => n + 1); })} className="rounded px-2 py-1 transition hover:bg-[var(--bg-hover)] active:scale-95">重试保存取用</button> : null}
     </div>
-    {ready ? <SourceTimelineEditor key={JSON.stringify([projectId, props.sourceId, signature])} {...props} totalMs={totalMs} initial={state!.document!.film} /> : null}
+    {ready ? <SourceTimelineEditor key={JSON.stringify([projectId, props.sourceId, signature])} {...props} duration={totalMs / 1000} totalMs={totalMs} initial={state!.document!.film} /> : null}
   </>;
 }
 
@@ -198,7 +198,7 @@ function SourceTimelineEditor({ sourceId, duration, time, ranges, selectedProduc
     const selectedLayer = selectedHere ? (block.clipId === focusedClipId ? 240 : 230) : null;
     if (!range) return { title: block.clipId && byId.get(block.clipId)?.attrs?.['data-source-kind'] === 'take' ? '保留取用' : '原片', label: block.clipId && byId.get(block.clipId)?.attrs?.['data-source-kind'] === 'take' ? '保留取用' : '原片', previewMuted: true, zIndex: selectedLayer ?? 1, background: '#4b5563', data: { ...common, 'data-source-context': block.clipId ?? block.id } };
     const tags = range.tags ?? [];
-    const highlighted = (!selectedProductId || range.productId === selectedProductId) && hasStructureTag(tags, selectedTag);
+    const highlighted = (!selectedProductId || range.productId === selectedProductId || range.displayProductIds?.includes(selectedProductId)) && hasStructureTag(tags, selectedTag);
     const previewMuted = !highlighted;
     const zIndex = selectedLayer ?? (highlighted ? 15 : 10);
     const label = [displayStructureTags(tags).join(' · '), range.text].filter(Boolean).join(' · ') || '候选';

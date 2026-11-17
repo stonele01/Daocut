@@ -1,0 +1,64 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdir, mkdtemp, readFile, writeFile} from 'node:fs/promises';
+import {join, resolve} from 'node:path';
+import {execFileSync} from 'node:child_process';
+import {chromium} from 'playwright-core';
+import {startStudio} from './server.mjs';
+import {ensureStructureDraft} from './structure-drafts.mjs';
+import {writeProjectFilm} from './film.mjs';
+
+test('a rejected stale export refreshes saved plans, closes the dialog, and preserves private edits', {timeout: 60000}, async () => {
+  const base=resolve(import.meta.dirname,'../../../../.tmp/export-refresh-browser');
+  await mkdir(base,{recursive:true}); const scratch=await mkdtemp(join(base,'case-'));
+  const env=['DAOCUT_STUDIO_HOME','DAOCUT_LIBRARY','DAOCUT_TRASH_DIR','DAOCUT_NO_UPDATE_CHECK'];
+  const before=Object.fromEntries(env.map(k=>[k,process.env[k]]));
+  Object.assign(process.env,{DAOCUT_STUDIO_HOME:join(scratch,'home'),DAOCUT_LIBRARY:join(scratch,'library'),DAOCUT_TRASH_DIR:join(scratch,'trash'),DAOCUT_NO_UPDATE_CHECK:'1'});
+  await mkdir(process.env.DAOCUT_TRASH_DIR);
+  let studio,browser,page;
+  try {
+    studio=await startStudio({port:0,openBrowser:()=>{},...(process.env.DAOCUT_STRUCTURE_UI?{editorDir:resolve(process.env.DAOCUT_STRUCTURE_UI)}:{})});
+    const api=async(path,method='GET',body)=>{const r=await fetch(studio.origin+path,{method,headers:{'x-studio-key':studio.key,'content-type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});const result=await r.json();assert.equal(r.status,200,JSON.stringify(result));return result;};
+    const {project}=await api('/api/projects','POST',{path:join(scratch,'project')});
+    await mkdir(join(project.path,'assets'),{recursive:true});
+    const assetPath='assets/synthetic.mp4';
+    execFileSync('ffmpeg',['-v','error','-f','lavfi','-i','color=c=blue:s=96x160:r=10:d=16','-c:v','libx264','-pix_fmt','yuv420p','-y',join(project.path,assetPath)],{windowsHide:true});
+    const scope={sourceId:'s',productId:'p',intervalId:'i',startMs:0,endMs:16000};
+    const clips=[{candidateId:'h',sourceId:'s',assetPath,startMs:0,endMs:2000,text:'合成开头',roles:['hook'],coreIds:[]},{candidateId:'core',sourceId:'s',assetPath,startMs:4000,endMs:7000,text:'合成卖点',roles:['core'],coreIds:['core']}];
+    const plan={id:'synthetic-plan',version:1,scope,speed:1,durationMs:5000,coreIds:['core'],coreLabels:{core:'合成卖点'},clips};
+    const analysis={version:1,sources:[{id:'s',assetPath,durationMs:16000}],products:[{id:'p',name:'合成商品',sourceIds:['s']}],intervals:[{id:'i',sourceId:'s',productId:'p',startMs:0,endMs:16000}],candidates:clips.map((c,i)=>({...c,id:c.candidateId,productId:'p',intervalId:'i',cueRange:[i,i],tags:[i?'卖点':'钩子'],origin:'synthetic-test',version:1}))};
+    await api(`/api/projects/${project.id}/product-analysis`,'PUT',{analysis});
+    await writeProjectFilm(project.path,{stage:{w:96,h:160},tracks:[{clips:[{id:'parent',src:assetPath,time:[14,15],at:0}]}]});
+    await writeFile(join(project.path,'assets/synthetic.vtt'),'WEBVTT\n\n00:00:00.000 --> 00:00:02.000\n合成字幕\n');
+    const draft=await ensureStructureDraft(project.path,{parentProjectId:project.id,plan});
+    await writeProjectFilm(draft.root,{stage:{w:96,h:160},tracks:[{clips:[{id:'personal-edit',src:assetPath,time:[4.2,6.5],at:0}]}]});
+    const files=[join(project.path,'film.html'),join(project.path,'.film/product-analysis.json'),join(draft.root,'film.html'),join(draft.root,'assets/synthetic.vtt')];
+    const originals=await Promise.all(files.map(p=>readFile(p,'utf8')));
+    const attempts=[],errors=[],paid=[];let taskKey='old-local-key',reads=0;
+    browser=await chromium.launch({executablePath:process.env.DAOCUT_TEST_BROWSER||'C:/Program Files/Google/Chrome/Application/chrome.exe',headless:true});
+    page=await browser.newPage({viewport:{width:1680,height:1050}});page.setDefaultTimeout(10000);
+    page.on('pageerror',e=>errors.push(e.message));
+    await page.route('**/*',route=>{const r=route.request(),u=new URL(r.url());if(![studio.origin,studio.filmOrigin].includes(u.origin))return route.abort();if(r.method()==='POST'&&/\/(?:live-analysis|product-workflow|product-discovery|turns|exports)(?:\/|$)/.test(u.pathname)){paid.push(u.pathname);return route.fulfill({status:409,json:{error:'disabled in fixture'}});}return route.continue();});
+    await page.route('**/live-analysis**',route=>route.fulfill({json:{transcription:{status:'complete',segments:[]},analysis:{status:'complete',intervalId:'i',productId:'p'}}}));
+    await page.route('**/structure-plans**',route=>{assert.equal(route.request().method(),'GET');reads++; const params=new URL(route.request().url()).searchParams; if(taskKey==='new-shared-key')assert.equal(params.has('rulesVersion'),false,'stale recovery must discover current saved version');return route.fulfill({json:{status:'complete',version:taskKey==='old-local-key'?'ai-structure-plans-v7':'ai-structure-plans-v8',taskKey,context:{...scope,visibility:taskKey==='old-local-key'?'local':'shared'},plans:[plan],complete:true,generationMethod:'ai',issues:[],requestCount:0}});});
+    await page.route('**/structure-exports',route=>{if(route.request().method()==='GET')return route.fulfill({json:{batches:[],folder:scratch,jianyingFolder:null}});attempts.push(route.request().postDataJSON());if(attempts.length===1){taskKey='new-shared-key';return route.fulfill({status:409,json:{code:'STRUCTURE_SELECTION_CHANGED',error:'方案标识不属于当前讲解和规则版本，请重新读取'}});}return route.fulfill({json:{id:'mock-only',status:'complete',total:1,completed:1,failed:0,progress:1,items:[],folder:scratch}});});
+    await page.goto(`${studio.origin}/projects/${project.id}?key=${studio.key}`);
+    await page.getByRole('button',{name:'商品与结构',exact:true}).click();
+    await page.locator('[data-product-card="p"]').getByRole('button',{name:'拼结构',exact:true}).click();
+    const select=page.getByRole('checkbox',{name:'选择方案 1 导出',exact:true});
+    await select.check();
+    const readsBefore=reads;
+    await page.getByRole('button',{name:'导出',exact:true}).click();
+    await page.getByRole('button',{name:'批量导出 1 份剪映草稿',exact:true}).click();
+    await page.getByRole('alert').filter({hasText:'已重新读取已有结果'}).waitFor();
+    assert.equal(await page.getByRole('button',{name:'批量导出 1 份剪映草稿',exact:true}).count(),0);
+    assert.equal(attempts.length,1,'no automatic export retry');assert.ok(reads>readsBefore);assert.equal(await select.isChecked(),false);
+    await select.check();await page.getByRole('button',{name:'导出',exact:true}).click();
+    await page.getByRole('button',{name:'批量导出 1 份剪映草稿',exact:true}).click();
+    await page.waitForFunction(()=>!document.querySelector('button[aria-haspopup="dialog"][aria-label="导出"][aria-expanded="true"]'));
+    assert.equal(attempts.length,2);assert.equal(attempts[1].taskKey,'new-shared-key');assert.deepEqual(attempts[1].planIds,attempts[0].planIds);assert.notEqual(attempts[1].requestId,attempts[0].requestId);
+    assert.deepEqual(await Promise.all(files.map(p=>readFile(p,'utf8'))),originals);assert.deepEqual(paid,[]);assert.deepEqual(errors,[]);
+    await writeFile(join(base,'result.json'),JSON.stringify({passed:true,modelRequests:0,realExports:0,mockedExportAttempts:2,oldDialogClosed:true,noAutomaticRetry:true,privateEditsPreserved:true},null,2));
+  } catch(e){await page?.screenshot({path:join(base,'failure.png')}).catch(()=>{});throw e;}
+  finally {await browser?.close();await studio?.close();for(const [k,v]of Object.entries(before)){if(v===undefined)delete process.env[k];else process.env[k]=v;}}
+});
