@@ -1,0 +1,9 @@
+# 0.2.74 — Original result associations and complete lecture ranges
+
+Reopening shared analysis on its originating computer could import the same paid results as unrelated recovery products. Local receipt identities now reconnect those copies to their original ranges and prevent further duplicate imports. Every stored product, candidate, scope and private reference is retained. Only identical imported copies are collapsed in the product view; different historical content remains accessible. Matching timestamps alone no longer establish product affiliation.
+
+The product's existing analysis button automatically uses its current saved lecture range. Viewing an older part does not change the target to that part or require another range-selection step. A completed whole-range result is used by the existing structure workflow and shared readers; old part results and compositions remain stored. Analysis status is tracked for the source independently of the range being viewed, so switching to an older range keeps the submitted task visible and prevents another submission while it runs. Finishing one part never marks the full lecture complete.
+
+Validation uses targeted backend/data tests, Studio and desktop types, and browser regressions with synthetic model responses and no paid model or transcription calls. Tests cover publisher reopen, older duplicate repair, colleague layout correction, full-range analysis and shared composition input, private data retention, viewing history before submission, and switching ranges while a task completes. Release artifact and CI status are recorded separately during delivery.
+
+No prompts, original recordings, user projects, or personal drafts were changed during validation. No automatic reanalysis or paid continuation is part of the repair. The selected-media export and combined-project export from 0.2.72/0.2.73 are retained. Publishing an update does not install it or close a running application.

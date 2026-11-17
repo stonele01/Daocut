@@ -55,6 +55,15 @@ jobs:
           scripts/daocut-release-config.test.mjs scripts/locked-versions.test.mjs
       - name: Check Studio authorization without media or model calls
         run: node --test packages/daocut/studio/server/company-authorize.test.mjs
+      - name: Check original result associations and complete manual scopes without paid calls
+        working-directory: packages/daocut
+        run: >-
+          node --test --test-concurrency=1
+          studio/server/shared-original-associations.test.mjs
+          studio/server/shared-workflow-folder-open.test.mjs
+          studio/server/shared-analysis-workflow.test.mjs
+          studio/server/shared-composition-scopes.test.mjs
+          studio/ui/src/lib/saved-structure-range.test.ts
       - name: Check bounded shared-video identities and opening progress
         run: >-
           node --test --test-concurrency=1

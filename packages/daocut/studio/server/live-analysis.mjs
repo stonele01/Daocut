@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, realpath, stat } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { writeAtomic } from './atomic.mjs';
+import { originalAnalysisScope, readOriginalAnalysisReceipts } from './shared-original-associations.mjs';
 import { HttpError, json, readJson } from './http.mjs';
 import { readProductAnalysis, updateProductAnalysis } from './product-analysis.mjs';
 import { productSourcePath, readProductTranscript } from './product-transcription.mjs';
@@ -669,6 +670,13 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
       const frozenFingerprint = await sourceFingerprint(root, source);
       if (expectedSourceFingerprint && frozenFingerprint !== expectedSourceFingerprint) throw new HttpError(409, '原片在核对后已变化，历史候选未导入');
       const scopeId = `history-${hash([sharedRef.sha256, sourceId])}`, existing = analysis.scopes?.find(s => s.id === scopeId);
+      const original = originalAnalysisScope(analysis, await load(root, sourceId), sourceId, await readOriginalAnalysisReceipts(root, sourceId), sharedRef.sha256, payload);
+      const content = c => ({ startMs: c.startMs, endMs: c.endMs, text: c.text, tags: c.tags, details: c.details, cueRange: c.cueRange });
+      const originalCandidates = original && [...analysis.candidates, ...(analysis.archivedCandidates ?? [])].filter(c => c.intervalId === original.id);
+      const alreadySaved = originalCandidates && payload.candidates.every(c => originalCandidates.some(o => hash(canonical(content(o))) === hash(canonical(content(c)))));
+      if (original && alreadySaved && !existing && (!productId || productId === original.productId)) {
+        return { imported: true, reusedOriginal: true, intervalId: original.id, productId: original.productId, count: payload.candidates.length, analysis };
+      }
       if (productId && !analysis.products.some(p => p.id === productId && p.sourceIds.includes(sourceId))) throw new HttpError(400, '本机商品不存在');
       if (existing && productId && existing.productId !== productId) throw new HttpError(409, '历史结果已关联其他本机商品，未覆盖关联');
       const localProductId = existing?.productId ?? productId ?? randomUUID(), scope = payload.scope;
@@ -683,7 +691,7 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
         const layoutCompatibility = data.sharedLayouts?.[sourceId] ? { sharedLayoutHidden: true } : {};
         if (!productId) data.products.push({ id: localProductId, name: productName.trim(), sourceIds: [sourceId], ...layoutCompatibility });
         data.scopes ??= [];
-        data.scopes.push({ id: scopeId, sourceId, productId: localProductId, ...scope, kind: 'historical-analysis', origin: 'shared-historical', confirmed: true, label: '历史话术原始分析范围', ...layoutCompatibility });
+        data.scopes.push({ id: scopeId, sourceId, productId: localProductId, ...scope, kind: 'historical-analysis', origin: 'shared-historical', confirmed: true, label: '历史话术原始分析范围', ...(!productId && original ? { originalScopeId: original.id } : {}), ...layoutCompatibility });
         data.candidates.push(...candidates); return data;
       }, probeSource, { preserveHistory: true });
       if (await sourceFingerprint(root, source) !== frozenFingerprint) throw new HttpError(409, '原片在导入期间变化，历史候选未启用，请核对素材');

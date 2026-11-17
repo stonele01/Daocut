@@ -193,7 +193,9 @@ test('joining lectures preserves completed scope and only analyzes the remaining
   }, probe);
   const saved = (await readProductAnalysis(f.roots[0])).analysis;
   assert.deepEqual(saved.candidates, oldCandidates);
-  await assert.rejects(f.workflows[0].plan(f.roots[0], { action: 'analysis', sourceId: 'assets/live.mp4', productId: first.productId, intervalId: 'joined-test' }), /避免重复提交/);
+  const wholePlan = await f.workflows[0].plan(f.roots[0], { action: 'analysis', sourceId: 'assets/live.mp4', productId: first.productId, intervalId: 'joined-test' });
+  assert.equal(wholePlan.scope.startMs, first.startMs); assert.equal(wholePlan.scope.endMs, second.endMs);
+  assert.equal(f.counts().text, calls, 'reading the full-range plan never submits it');
   const original = await f.workflows[0].plan(f.roots[0], { action: 'analysis', sourceId: 'assets/live.mp4', productId: first.productId, intervalId: first.id });
   assert.equal(original.requestCount, 0);
   assert.equal(f.counts().text, calls);
