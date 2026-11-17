@@ -6,6 +6,7 @@ import { join, resolve, relative, isAbsolute, sep } from 'node:path';
 import { HttpError } from './http.mjs';
 import { writeAtomic } from './atomic.mjs';
 import { exportDirectory, exportBaseName } from './exports.mjs';
+import { captureCombinedExport, materializeCombinedExport } from './structure-export-combined.mjs';
 
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const validId = id => typeof id === 'string' && /^[a-f0-9]{24}$/.test(id);
@@ -66,6 +67,7 @@ function totals(batch) {
 function view(batch) {
   totals(batch);
   return structuredClone({ id: batch.id, createdAt: batch.createdAt, status: batch.status, folder: draftsFolderOf(batch), storageFolder: batch.folder, destination: batch.destination ?? 'folder', name: batch.name,
+    mode: batch.mode ?? 'separate', planCount: batch.planCount ?? batch.items.length,
     total: batch.total, completed: batch.completed, failed: batch.failed, progress: batch.progress,
     items: batch.items.map(({ id, planId, label, exportName, origin, revision, sourceProjectId, status, progress, error, outputs, retryable, jobId }) =>
       ({ id, planId, label, exportName, origin, revision, sourceProjectId, status, progress, error, outputs, retryable, jobId })) });
@@ -143,6 +145,7 @@ export function createStructureBatchExports({ plans, exports, outputRoot, captur
       if (!batch) return null;
       if (batch.version !== 1 || batch.id !== id || batch.projectId !== project.id || !Array.isArray(batch.items)
         || !['folder', 'jianying'].includes(batch.destination ?? 'folder')
+        || !['separate', 'combined'].includes(batch.mode ?? 'separate')
         || typeof batch.outputBase !== 'string' || batch.folder !== storageFolderOf(batch.outputBase, id, batch.destination)
         || (batch.destination === 'jianying' ? batch.draftsFolder !== batch.outputBase : batch.draftsFolder && batch.draftsFolder !== batch.folder)
         || batch.items.some(item => typeof item.id !== 'string' || !/^\d+$/.test(item.id) || (item.snapshot && resolve(item.snapshot.root) !== resolve(batch.folder, '_snapshots', item.id)))) {
@@ -201,7 +204,10 @@ export function createStructureBatchExports({ plans, exports, outputRoot, captur
       await persist(project, batch);
       try {
         if (batch.destination === 'jianying') await existingDraftsFolder(batch.draftsFolder);
-        const prepared = await materialize(item.snapshot, { mediaRoot: join(batch.folder, '_media'), mediaCache });
+        const options = { mediaRoot: join(batch.folder, '_media'), mediaCache };
+        const prepared = item.snapshot.kind === 'combined'
+          ? await materializeCombinedExport(item.snapshot, { ...options, materialize })
+          : await materialize(item.snapshot, options);
         if (closed || batch.cancelRequested) { await interrupt(project, batch); return; }
         // Persist intent before dispatch: after a crash, a missing job/receipt is
         // an unknown result, not evidence that submitting again is harmless.
@@ -209,7 +215,7 @@ export function createStructureBatchExports({ plans, exports, outputRoot, captur
         const exportName = item.exportName ?? `${project.name} ${item.label}`;
         const job = exports.startSnapshot({ id: project.id, name: exportName, path: prepared?.exportRoot ?? item.snapshot.root },
           { kind: 'nle', format: 'jianying', media: 'link', ...(item.exportName ? { name: exportName } : {}), subtitles: true, fps: item.snapshot.fps ?? 30, folder: draftsFolderOf(batch),
-            receipt: { batchId: batch.id, itemId: item.id, revision: item.revision } });
+            ...(prepared?.cues ? { cues: prepared.cues } : {}), receipt: { batchId: batch.id, itemId: item.id, revision: item.revision } });
         item.jobId = job.id;
         await persist(project, batch);
         for (;;) {
@@ -263,6 +269,8 @@ export function createStructureBatchExports({ plans, exports, outputRoot, captur
       || new Set(request.planIds).size !== request.planIds.length) return Promise.reject(new HttpError(400, '请勾选要导出的方案，每条只能选择一次'));
     if (request.name !== undefined && (typeof request.name !== 'string' || request.name.length > 120)) return Promise.reject(new HttpError(400, '名称需为不超过 120 字的文字'));
     const destination = request.destination ?? 'folder';
+    const mode = request.mode ?? 'separate';
+    if (!['separate', 'combined'].includes(mode)) return Promise.reject(new HttpError(400, '请选择每条单独导出或合并到一个工程'));
     if (!['folder', 'jianying'].includes(destination)) return Promise.reject(new HttpError(400, '请选择剪映草稿库或指定文件夹'));
     let chosenFolder;
     try { if (request.folder !== undefined && request.folder !== null && request.folder !== '') chosenFolder = exportDirectory(request.folder); }
@@ -273,6 +281,7 @@ export function createStructureBatchExports({ plans, exports, outputRoot, captur
     // Preserve the signature of requests from older clients, so replaying them cannot create another batch.
     const inputs = [scope, request.taskKey, [...request.planIds].sort()];
     if (chosenName || chosenFolder || destination === 'jianying') inputs.push({ name: chosenName, folder: chosenFolder, ...(destination === 'jianying' ? { destination } : {}) });
+    if (mode === 'combined') inputs.push({ mode });
     const inputHash = hash(inputs);
     if (creating.has(key)) return creating.get(key).then(batch => {
       if (cached.get(key).inputHash !== inputHash) throw new HttpError(409, '同一次导出请求不能更换方案、名称或目录');
@@ -297,19 +306,22 @@ export function createStructureBatchExports({ plans, exports, outputRoot, captur
       if (!within(await realpath(outputBase), await realpath(folder))) throw new HttpError(409, '批量导出目录不能指向输出目录之外');
       const name = chosenName ?? project.name;
       const batch = { version: 1, id, projectId: project.id, requestId: request.requestId, inputHash, taskKey: request.taskKey, name,
-        createdAt: new Date().toISOString(), outputBase, folder, destination, draftsFolder: destination === 'jianying' ? outputBase : folder, cancelRequested: false,
-        items: selected.map(({ plan, ordinal }) => {
+        createdAt: new Date().toISOString(), outputBase, folder, destination, mode, planCount: selected.length, draftsFolder: destination === 'jianying' ? outputBase : folder, cancelRequested: false,
+        items: mode === 'combined' ? [{ id: '000', planId: selected.map(({ plan }) => plan.id).join(','), label: `合并 ${selected.length} 条方案`,
+          exportName: exportBaseName(name), status: 'preparing', progress: 0, outputs: [], retryable: false }] : selected.map(({ plan, ordinal }) => {
           const suffix = `_方案${String(ordinal).padStart(3, '0')}`;
           return { id: String(ordinal).padStart(3, '0'), planId: plan.id, label: `方案 ${String(ordinal).padStart(3, '0')}`,
             exportName: `${exportBaseName(name).slice(0, 80 - suffix.length).trimEnd()}${suffix}`,
             status: 'preparing', progress: 0, outputs: [], retryable: false };
         }) };
       cached.set(key, batch); await persist(project, batch);
-      for (let index = 0; index < selected.length; index++) {
+      for (let index = 0; index < batch.items.length; index++) {
         const item = batch.items[index];
         if (closed || batch.cancelRequested) break;
         try {
-          const snapshot = await capture(project, { plan: selected[index].plan, itemRoot: join(folder, '_snapshots', item.id) });
+          const itemRoot = join(folder, '_snapshots', item.id);
+          const snapshot = mode === 'combined' ? await captureCombinedExport(project, { selected, itemRoot, capture })
+            : await capture(project, { plan: selected[index].plan, itemRoot });
           if (resolve(snapshot.root) !== resolve(folder, '_snapshots', item.id) || !snapshot.revision) throw new Error('导出快照身份无效');
           Object.assign(item, { snapshot, revision: snapshot.revision, origin: snapshot.origin, sourceProjectId: snapshot.sourceProjectId, status: 'waiting', retryable: true });
         } catch (error) { item.status = 'failed'; item.error = error instanceof Error ? error.message : String(error); item.retryable = false; }

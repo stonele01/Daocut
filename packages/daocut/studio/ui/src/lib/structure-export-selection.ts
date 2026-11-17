@@ -15,14 +15,15 @@ export interface StructureBatchExportSelection {
   ordinals: number[];
   onExport: (options: StructureBatchExportOptions) => Promise<void>;
 }
-export interface StructureBatchExportOptions { name: string; folder: string; destination: 'jianying' | 'folder' }
+export interface StructureBatchExportOptions { name: string; folder: string; destination: 'jianying' | 'folder'; mode?: 'separate' | 'combined' }
 export interface StructureExportItem {
-  id: string; planId: string; label: string; exportName?: string; origin?: 'private' | 'public'; revision?: string;
+  id: string; planId: string; label: string; exportName?: string; origin?: 'private' | 'public' | 'mixed'; revision?: string;
   status: 'preparing' | 'waiting' | 'running' | 'done' | 'failed' | 'interrupted' | 'cancelled';
   progress: number; error?: string; outputs: string[]; retryable: boolean;
 }
 export interface StructureExportBatch {
   id: string; createdAt: string; folder: string; name?: string; destination?: 'jianying' | 'folder'; storageFolder?: string;
+  mode?: 'separate' | 'combined'; planCount?: number;
   status: 'preparing' | 'running' | 'complete' | 'failed' | 'interrupted' | 'cancelled';
   total: number; completed: number; failed: number; progress: number; items: StructureExportItem[];
 }

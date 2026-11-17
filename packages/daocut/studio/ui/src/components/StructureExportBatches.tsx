@@ -34,6 +34,7 @@ export function StructureExportBatches({ projectId, revision }: { projectId: str
       {batches.map(batch => <details key={batch.id} className="border-t border-[var(--border)] pt-2" open={batch === batches[0]}>
         <summary className="cursor-pointer">{statusText(batch.status)} · 成功 {batch.completed}/{batch.total}{batch.failed ? ` · 失败 ${batch.failed}` : ''}</summary>
         <progress className={`mt-1 w-full ${batch.failed ? 'accent-[var(--warn)]' : 'accent-[var(--accent)]'}`} aria-label="批量导出进度" max={1} value={batch.progress} />
+        {batch.mode === 'combined' && <p className="mt-1 text-[var(--text-muted)]">{batch.planCount} 条方案合并为 1 个工程</p>}
         <p className="break-all text-[var(--text-muted)]" title={batch.folder}>目录：{batch.folder}</p>
         <p className="mt-1 text-[var(--text-muted)]">{batch.destination === 'jianying' ? '目标为剪映草稿库，共用素材随库保留' : '草稿共用本批素材，请保留完整导出目录'}</p>
         <div className="my-2 flex flex-wrap gap-1">
@@ -43,7 +44,7 @@ export function StructureExportBatches({ projectId, revision }: { projectId: str
           {['preparing', 'running'].includes(batch.status) && <button className={button} disabled={!!busy} onClick={() => void act(batch.id, 'cancel')}>取消剩余</button>}
         </div>
         {batch.items.map(item => <div key={item.id} className="mb-1.5">
-          <p className="break-words">{item.exportName ?? item.label} · {item.status === 'failed' ? '失败' : statusText(item.status)}{item.status === 'running' ? ` ${Math.round(item.progress * 100)}%` : ''}{item.origin ? ` · ${item.origin === 'private' ? '个人草稿' : '公共方案'}` : ''}</p>
+          <p className="break-words">{item.exportName ?? item.label} · {item.status === 'failed' ? '失败' : statusText(item.status)}{item.status === 'running' ? ` ${Math.round(item.progress * 100)}%` : ''}{item.origin ? ` · ${item.origin === 'private' ? '个人草稿' : item.origin === 'mixed' ? '个人草稿及公共方案' : '公共方案'}` : ''}</p>
           {item.error && <p className="break-words text-[var(--warn)]">{item.error}</p>}
         </div>)}
       </details>)}

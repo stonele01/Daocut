@@ -84,6 +84,17 @@ test('selected media hands the rebased edit to the existing export queue and pre
   assert.equal((await m.list(f.project)).batches[0].completed, 1);
 });
 
+test('combined export captures every selected plan and never exports a partial result on capture failure', async t => {
+  const f = await fixture(t, { captureFailure: 'plan-2' }), m = f.make();
+  const request = { ...f.request(['plan-2', 'plan-1']), mode: 'combined' };
+  const batch = await m.create(f.project, request); const result = await m.wait(f.project, batch.id);
+  assert.equal(result.total, 1); assert.equal(result.planCount, 2); assert.equal(result.failed, 1);
+  assert.equal(result.items[0].retryable, false); assert.match(result.items[0].error, /private draft/);
+  assert.equal(f.sent.length, 0); assert.equal(f.captured.length, 1);
+  assert.equal((await m.retry(f.project, batch.id)).failed, 1); assert.equal(f.sent.length, 0);
+  await assert.rejects(m.create(f.project, { ...request, mode: 'invalid' }), /请选择每条/);
+});
+
 test('only checked plans are frozen and exported, in original plan order, without changing the parent film', async t => {
   const f = await fixture(t, { count: 256 }), m = f.make();
   const batch = await m.create(f.project, f.request(['plan-256', 'plan-2', 'plan-65']));
