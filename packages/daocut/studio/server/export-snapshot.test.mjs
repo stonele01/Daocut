@@ -85,21 +85,21 @@ test('shared historical public plans and private edits export real Jianying draf
     }
     const snapshot = await captureStructureExport(f.project, { plan, itemRoot: join(f.folder, privateEdit ? 'private-snapshot' : 'public-snapshot') });
     assert.equal(snapshot.origin, privateEdit ? 'private' : 'public');
-    await materializeStructureExport(snapshot, { mediaRoot: join(f.folder, '_media'), mediaCache });
-    const job = queue.startSnapshot({ ...f.project, path: snapshot.root, name: privateEdit ? 'Private' : 'Public' }, { kind: 'nle', format: 'jianying', media: 'link', subtitles: true, fps: 30, folder: join(f.folder, 'drafts') });
+    const prepared = await materializeStructureExport(snapshot, { mediaRoot: join(f.folder, '_media'), mediaCache });
+    const job = queue.startSnapshot({ ...f.project, path: prepared.exportRoot, name: privateEdit ? 'Private' : 'Public' }, { kind: 'nle', format: 'jianying', media: 'link', subtitles: true, fps: 30, folder: join(f.folder, 'drafts') });
     let current;
     do { await new Promise(r => setTimeout(r, 25)); current = queue.list(f.project.id).find(item => item.id === job.id); } while (['running', 'waiting'].includes(current.status));
     assert.equal(current.status, 'done', current.error);
     const draft = JSON.parse(await readFile(join(dirname(current.outputs[0]), 'draft_content.json'), 'utf8'));
     const clips = draft.tracks.filter(track => track.type === 'video').flatMap(track => track.segments);
     assert.deepEqual(clips.map(clip => clip.speed), privateEdit ? [2] : [1.3, 1.3]);
-    assert.deepEqual(clips.map(clip => clip.source_timerange.start), privateEdit ? [2600000] : [0, 2600000]);
+    assert.deepEqual(clips.map(clip => clip.source_timerange.start), privateEdit ? [0] : [0, 0]);
     assert.deepEqual(clips.map(clip => clip.target_timerange.duration), privateEdit ? [500000] : [1000000, 1000000]);
     const text = draft.materials.texts.map(item => JSON.parse(item.content).text);
     assert.deepEqual(text, privateEdit ? ['个人字幕'] : ['原开头', '原卖点']);
     if (edited) assert.equal(await readFile(join(snapshot.root, 'film.html'), 'utf8'), edited);
   }
-  assert.equal((await readdir(join(f.folder, '_media'))).length, 1);
+  assert.equal((await readdir(join(f.folder, '_media'))).filter(name => name.endsWith('.mp4')).length, 3);
   assert.equal(await readFile(join(f.root, 'film.html'), 'utf8'), parentFilm);
   assert.equal(await readFile(join(f.root, '.film/product-analysis.json'), 'utf8'), JSON.stringify(analysis));
 });

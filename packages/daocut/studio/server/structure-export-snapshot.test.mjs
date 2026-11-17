@@ -7,7 +7,14 @@ import { filmHtml } from '../../src/film-doc.mjs';
 import { readProjectFilm } from './film.mjs';
 import { filmCaptions } from './captions.mjs';
 import { ensureStructureDraft, listStructureDrafts } from './structure-drafts.mjs';
-import { captureStructureExport, materializeStructureExport } from './structure-export-snapshot.mjs';
+import { captureStructureExport as captureCurrent, materializeStructureExport } from './structure-export-snapshot.mjs';
+
+// Preserve regression coverage for version 1 batches that were already queued before upgrading.
+async function captureStructureExport(project, options) {
+  const snapshot = await captureCurrent(project, options); snapshot.version = 1;
+  await fs.writeFile(join(snapshot.root, '.film/structure-export-snapshot.json'), JSON.stringify(snapshot));
+  return snapshot;
+}
 
 const base = resolve(import.meta.dirname, '../../../../.tmp/structure-export-snapshots');
 const read = (root, path) => fs.readFile(join(root, path), 'utf8');

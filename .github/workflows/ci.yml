@@ -76,6 +76,17 @@ jobs:
           node --test --test-concurrency=1
           packages/daocut/studio/server/structure-export-snapshot.test.mjs
           packages/daocut/studio/server/structure-batch-exports.test.mjs
+      - name: Prepare the desktop's pinned FFmpeg for selected-media tests
+        shell: pwsh
+        run: |
+          node --input-type=module -e "import {fetchFfmpeg} from './apps/desktop/src/ffmpeg-runtime.mjs'; import {join} from 'node:path'; await fetchFfmpeg(join(process.env.RUNNER_TEMP,'selected-export-ffmpeg'));"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "$env:RUNNER_TEMP/selected-export-ffmpeg" >> $env:GITHUB_PATH
+      - name: Check selected ranges, audio, captions and real Jianying drafts
+        run: >-
+          node --test --test-concurrency=1
+          packages/daocut/studio/server/structure-export-media.test.mjs
+          packages/daocut/studio/server/export-snapshot.test.mjs
       - name: Check LAN publisher files and manifests
         # The combined publisher/service route test needs both independent installs.
         # The service job below covers the real HTTP/range/TLS routes; see README.md for the combined local test.

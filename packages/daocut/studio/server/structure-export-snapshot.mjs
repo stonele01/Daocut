@@ -11,6 +11,7 @@ import { FILM_SUBTITLE_DEFAULT } from './film-subtitle.mjs';
 import { frameRateOf } from './project-settings.mjs';
 import { transcriptPath, translationsOf } from './transcripts.mjs';
 import { savedStructureTranscriptVtt } from './structure-transcript.mjs';
+import { materializeSelectedMedia } from './structure-export-media.mjs';
 
 const SNAPSHOT = '.film/structure-export-snapshot.json';
 const STATIC_MEDIA = /\.(mp4|mov|mkv|avi|m4v|webm|wmv|flv|ts|mts|m2ts|wav|m4a|mp3|aac|ogg|flac|png|jpe?g|webp|gif|bmp|tiff?)$/i;
@@ -91,7 +92,9 @@ export async function captureStructureExport(project, { plan, itemRoot }) {
     if (!info.isFile()) fail(`原片不可用：${assetPath}`);
     const record = reference?.reference ?? manifest?.items?.[assetPath];
     if (record && (info.size !== record.size || (record.sha256 !== undefined && !/^[a-f0-9]{64}$/.test(record.sha256)) || (record.identityKind !== undefined && record.identityKind !== SAMPLED_MEDIA_IDENTITY))) fail(`原片身份已变化：${assetPath}`);
-    media.push({ assetPath, sourcePath, identity: identity(info), ...(record?.sha256 ? { sha256: record.sha256, ...(record.identityKind ? { identityKind: record.identityKind } : {}) } : {}) });
+    const captureHash = await mediaContentHash(sourcePath, { identityKind: SAMPLED_MEDIA_IDENTITY });
+    if (record?.identityKind === SAMPLED_MEDIA_IDENTITY && record.sha256 !== captureHash) fail(`原片身份已变化：${assetPath}`);
+    media.push({ assetPath, sourcePath, identity: identity(info), captureHash, ...(record?.sha256 ? { sha256: record.sha256, ...(record.identityKind ? { identityKind: record.identityKind } : {}) } : {}) });
     const translations = (await translationsOf(sourceRoot, assetPath)).sort(); transcriptLists.set(assetPath, translations);
     for (const rel of [transcriptPath(assetPath), ...translations.map(language => transcriptPath(assetPath, language))]) {
       const bytes = await small(sourceRoot, rel); if (bytes) files.set(rel, bytes);
@@ -109,7 +112,7 @@ export async function captureStructureExport(project, { plan, itemRoot }) {
   const settings = files.has('.film/settings.json') ? JSON.parse(files.get('.film/settings.json').toString('utf8')) : {};
   const fps = frameRateOf(settings.fps) ?? 30;
   const revision = hash({ planId: plan.id, planVersion: plan.version ?? 1, sourceProjectId, origin: draft ? 'private' : 'public', files: fileList, media, fps });
-  const snapshot = { version: 1, root: output, revision, origin: draft ? 'private' : 'public', sourceProjectId, planId: plan.id, planVersion: plan.version ?? 1, files: fileList, media, fps };
+  const snapshot = { version: 2, root: output, revision, origin: draft ? 'private' : 'public', sourceProjectId, planId: plan.id, planVersion: plan.version ?? 1, files: fileList, media, fps };
   await fs.mkdir(dirname(output), { recursive: true });
   const stage = `${output}.capturing-${randomUUID()}`;
   await fs.mkdir(stage);
@@ -132,7 +135,7 @@ export async function captureStructureExport(project, { plan, itemRoot }) {
 }
 
 async function validateSnapshot(snapshot) {
-  if (!snapshot || snapshot.version !== 1 || !isAbsolute(snapshot.root) || !/^[a-f0-9]{64}$/.test(snapshot.revision ?? '')) fail('导出快照身份无效');
+  if (!snapshot || ![1, 2].includes(snapshot.version) || !isAbsolute(snapshot.root) || !/^[a-f0-9]{64}$/.test(snapshot.revision ?? '')) fail('导出快照身份无效');
   const stored = JSON.parse(await fs.readFile(join(snapshot.root, SNAPSHOT), 'utf8'));
   const captured = { ...snapshot }; delete captured.frozenMedia;
   if (JSON.stringify(stored) !== JSON.stringify(captured)) fail('导出快照记录已变化');
@@ -178,6 +181,7 @@ async function frozenMedia(source, mediaRoot) {
 /** Materialize persistent media once per batch; hard links always point at our copy, never an original. */
 export async function materializeStructureExport(snapshot, { mediaRoot, mediaCache = new Map() }) {
   await validateSnapshot(snapshot);
+  if (snapshot.version === 2) return materializeSelectedMedia(snapshot, { mediaRoot, mediaCache, validateSnapshot });
   const root = resolve(mediaRoot); await fs.mkdir(root, { recursive: true });
   const frozen = [];
   for (const source of snapshot.media) {
