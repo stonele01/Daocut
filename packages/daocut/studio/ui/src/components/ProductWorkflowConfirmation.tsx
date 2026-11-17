@@ -77,7 +77,7 @@ export function ProductWorkflowConfirmation({ projectId, request, onDone, onClos
     {!plan && !error && <p>正在读取请求计划…</p>}
     {plan && <>
       {combined && <p>整条视频转写后自动识别商品；只有一个品就生成一个品。已有结果会复用，不自动开始话术分析。</p>}
-      {plan.newVersion && <p>{plan.cached ? '已有新版结果，本次不重复请求；当前工程继续使用原版本，请在版本列表中手动采用。' : '本次将生成新的共享版本，需要新请求；当前工程继续使用原版本，完成后由你决定是否采用。'}</p>}
+      {plan.newVersion && <p>{plan.rerun ? '重新分析成功并保存后默认使用新版；旧分析和旧结构保留在历史中，失败时继续保留旧版。' : plan.cached ? '已有新版结果，本次不重复请求；当前工程继续使用原版本，请在版本列表中手动采用。' : '本次将生成新的共享版本，需要新请求；当前工程继续使用原版本，完成后由你决定是否采用。'}</p>}
       {!combined && <p>{reviewBlocked ? '分段已完成，待核对字幕接缝，无需重新转写。' : publishOnly ? '仅补存共享结果，不请求模型。' : sharedBusy ? '同事正在处理，等待共享结果。' : sharedReuse ? '复用共享结果，不请求模型。' : plan.cached ? '复用已保存结果，不请求模型。' : request.action === 'transcription' ? '将整条原视频的音频转成文字，完成后保存；不会自动拆品或分析。' : visualRequests > 0 ? '分析所选讲解的文字，并发送抽帧进行看图核查。' : '仅发送转写文字、时间和识别指令。'}</p>}
       {plan.shared?.reason && <p>{plan.shared.reason}</p>}
       <p className="break-all">素材：{plan.source.assetPath}</p>

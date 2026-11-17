@@ -279,6 +279,11 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
         || (item.visualReview.productName !== undefined && item.visualReview.productName !== storedAnalysis.products.find(product => product.id === range?.productId)?.name);
       analyses[rangeId] = item;
     }
+    if (active) for (const [key, draft] of Object.entries(state.sharedDrafts ?? {})) {
+      if (draft.status !== 'running') continue;
+      const range = ranges.find(r => r.id === draft.intervalId);
+      analyses[`shared-draft-${key}`] = { ...draft, rangeStartMs: range?.startMs, rangeEndMs: range?.endMs, stale: false };
+    }
     const matching = requestedProductId === undefined ? ranges : ranges.filter(range => range.productId === requestedProductId);
     const selectedId = requestedIntervalId ?? (requestedProductId !== undefined ? (matching.length === 1 ? matching[0].id : matching.find(range => range.id === state.analysis.intervalId)?.id) : state.analysis.intervalId);
     const analysis = selectedId && analyses[selectedId] ? analyses[selectedId] : { status: 'idle', stale: true };
@@ -662,7 +667,7 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
       if (!version) throw new HttpError(409, '已有话术分析的原始请求身份无法确认，未改用新版提示词补存或重新请求');
       return { model: textResultCacheIdentity(model), prompt: hash(textStructureCachePrompt(version.prompt)), version: structureVersion, windowPolicy, ...encodingIdentity(version.cueEncoding) };
     },
-    importHistorical: async (root, sourceId, payload, sharedRef, { productId, productName, sourceSha, expectedSourceFingerprint, expectedAnalysis, sharedWorkflow } = {}) => {
+    importHistorical: async (root, sourceId, payload, sharedRef, { productId, productName, sourceSha, expectedSourceFingerprint, expectedAnalysis, sharedWorkflow, preserveVersion = false } = {}) => {
       if (payload?.version !== 1 || payload.kind !== 'historical-ai-structure' || !Array.isArray(payload.candidates) || !/^[a-f0-9]{64}$/.test(sharedRef?.sha256 ?? '')) throw new HttpError(409, '历史话术格式不兼容');
       if ((typeof productId === 'string' && !!productId) === (typeof productName === 'string' && !!productName.trim())) throw new HttpError(400, '请明确关联一个本机商品，或输入新本机商品名');
       const { source, analysis } = await sourceFor(root, sourceId), expectedHash = hash(canonical(analysis));
@@ -674,7 +679,7 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
       const content = c => ({ startMs: c.startMs, endMs: c.endMs, text: c.text, tags: c.tags, details: c.details, cueRange: c.cueRange });
       const originalCandidates = original && [...analysis.candidates, ...(analysis.archivedCandidates ?? [])].filter(c => c.intervalId === original.id);
       const alreadySaved = originalCandidates && payload.candidates.every(c => originalCandidates.some(o => hash(canonical(content(o))) === hash(canonical(content(c)))));
-      if (original && alreadySaved && !existing && (!productId || productId === original.productId)) {
+      if (!preserveVersion && original && alreadySaved && !existing && (!productId || productId === original.productId)) {
         return { imported: true, reusedOriginal: true, intervalId: original.id, productId: original.productId, count: payload.candidates.length, analysis };
       }
       if (productId && !analysis.products.some(p => p.id === productId && p.sourceIds.includes(sourceId))) throw new HttpError(400, '本机商品不存在');
@@ -714,7 +719,43 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
       const candidates = merged.candidates.map(candidate => ({ cueRange: candidate.cueRange, tags: candidate.tags, details: candidate.details }));
       const media = saved.mediaReview && validateProductMediaReview(saved.mediaReview, { startMs: saved.rangeStartMs, endMs: saved.rangeEndMs });
       const visual = saved.visualReview && validateProductVisualReview(saved.visualReview, { startMs: saved.rangeStartMs, endMs: saved.rangeEndMs });
-      return { ...(merged.schema ? { schema: merged.schema } : {}), ...(media ? { mediaReview: media } : {}), ...(visual ? { visualReview: visual } : {}), candidates, issues: saved.issues ?? [], version: structureVersion };
+      return { ...(draftKey ? { originalRunId: attempt.id } : {}), ...(merged.schema ? { schema: merged.schema } : {}), ...(media ? { mediaReview: media } : {}), ...(visual ? { visualReview: visual } : {}), candidates, issues: saved.issues ?? [], version: structureVersion };
+    },
+    activateSharedDraft: async (root, sourceId, scope, draftKey, sharedRef, previousSnapshot) => {
+      const { source, analysis } = await sourceFor(root, sourceId), state = await load(root, sourceId);
+      const saved = state.sharedDrafts?.[draftKey], attempt = state.attempts[saved?.attemptId];
+      const selected = frozenScope(source, analysis, scope.intervalId, scope.productId, { ...scope, lectureOnly: scope.lectureOnly !== false });
+      if (saved?.status !== 'complete' || attempt?.status !== 'complete' || !attempt.windows?.every(w => w.status === 'complete' && w.output)
+        || saved.rangeStartMs !== selected.startMs || saved.rangeEndMs !== selected.endMs
+        || saved.sourceFingerprint !== await sourceFingerprint(root, source)
+        || saved.transcriptHash !== transcriptHash(await readTranscript(root, source))) throw new HttpError(409, '新版分析尚未完整保存或输入已变化，旧结果继续保留');
+      const output = combineTextStructureWindows({ outputs: attempt.windows.map(w => w.output), sourceId, intervalId: selected.intervalId, cues: [], version: structureVersion });
+      const transcript = await readTranscript(root, source), { segments: cues, cueIndices } = productTranscriptRange(transcript, selected, source.durationMs);
+      const previous = previousSnapshot.payload;
+      const baseline = await analyzeTextStructure({ sourceId, productId: selected.productId, intervalId: selected.intervalId, cues, rangeStartMs: selected.startMs, rangeEndMs: selected.endMs, version: previous.version,
+        client: async () => ({ ...(!previous.candidates.length && previous.schema ? { schema: previous.schema } : {}), candidates: previous.candidates.map(c => ({ firstCue: cueIndices.indexOf(c.cueRange[0]), lastCue: cueIndices.indexOf(c.cueRange[1]), tags: c.tags, details: c.details })), issues: previous.issues }) });
+      baseline.candidates.forEach(c => { c.cueRange = c.cueRange.map(i => cueIndices[i]); });
+      await updateProductAnalysis(root, data => {
+        if (hash(canonical(data)) !== hash(canonical(analysis))) throw new HttpError(409, '采用新版期间工程发生变化，已有结果保留');
+        archivePreviousTextRuns(data, state, selected, attempt.id);
+        const previousSha = previousSnapshot && hash(canonical(previousSnapshot));
+        const content = c => ({ cueRange: c.cueRange, tags: [...c.tags].sort(), details: c.details, text: c.text, startMs: c.startMs, endMs: c.endMs });
+        data.candidates = data.candidates.filter(candidate => {
+          if (candidate.intervalId !== selected.intervalId || ![`shared-${previousSha}`, `historical-${previousSha}`].includes(candidate.runId)
+            || !baseline.candidates.some(c => hash(canonical(content(c))) === hash(canonical(content(candidate))))) return true;
+          data.archivedCandidates ??= [];
+          if (!data.archivedCandidates.some(c => c.id === candidate.id && c.runId === candidate.runId)) data.archivedCandidates.push(candidate);
+          return false;
+        });
+        for (const candidate of output.candidates) {
+          candidate.runId = attempt.id;
+          if (!data.candidates.some(c => c.id === candidate.id && c.runId === attempt.id)) data.candidates.push(candidate);
+        }
+        return data;
+      }, probeSource);
+      const active = { ...saved, sharedRef, sharedSignature: hash({ fingerprint: saved.sourceFingerprint, transcript: saved.transcriptHash, intervalId: selected.intervalId, productId: selected.productId, startMs: selected.startMs, endMs: selected.endMs }) };
+      state.analysis = active; state.analyses[selected.intervalId] = active; state.results[saved.cacheIdentity] = active;
+      await save(root, sourceId, state);
     },
     importShared: async (root, sourceId, scope, payload, sharedRef, { adopt = false, expectedAnalysis } = {}) => {
       const { source, analysis } = await sourceFor(root, sourceId);

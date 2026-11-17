@@ -104,6 +104,7 @@ export function createSharedAnalysis({ coordinate, settings = () => readPrefs().
     } else if (saved?.snapshot) {
       descriptor.taskKey = saved.snapshot.taskKey;
     }
+    if (saved?.descriptor?.activateOnComplete) descriptor.activateOnComplete = true;
     if (saved?.outbox) return { ...descriptor, mode: 'publish-pending', status: 'submitted', reason: '分析已完成并保存在本机，补保存只上传结果文件，不会重新分析' };
     if (saved?.status === 'needs-review') return { ...descriptor, ...localReview };
     if (saved?.snapshot && saved.result) {
@@ -268,6 +269,7 @@ export function createSharedAnalysis({ coordinate, settings = () => readPrefs().
   async function fail(descriptor, attemptId) {
     try {
       const saved = await readJson(fileFor(descriptor.root, descriptor.taskKey));
+      if (saved?.status === 'complete' && saved.snapshot && sharedHash(saved.snapshot) === saved.result?.sha256) return;
       if (saved && !saved.outbox) await saveLocal(descriptor.root, descriptor.taskKey, { ...saved, status: 'uncertain' });
       await coordinate('fail', { taskKey: descriptor.taskKey, attemptId, reason: 'unknown', ...guardCoordinator(descriptor.coordinationId) });
     } finally { active.delete(descriptor.taskKey); }
@@ -307,7 +309,7 @@ export function createSharedAnalysis({ coordinate, settings = () => readPrefs().
     if (!task) throw new HttpError(409, '目标版本尚未完整发布或不属于此直播');
     const descriptor = { ...saved.descriptor, root, familyKey, taskKey, newVersion: false, result: task.result };
     const snapshot = await artifact(root, descriptor, task.result);
-    return { descriptor, snapshot, currentSnapshot: saved.snapshot, result: task.result, sequence: task.sequence, createdAt: task.createdAt, expectedCurrentSha };
+    return { descriptor, snapshot, currentSnapshot: saved.snapshot, currentResult: saved.result, result: task.result, sequence: task.sequence, createdAt: task.createdAt, expectedCurrentSha };
   }
   async function validateSource(root, source, descriptor) {
     const current = await sourceIdentity(root, source);

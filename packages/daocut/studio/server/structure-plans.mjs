@@ -93,12 +93,15 @@ export function createStructurePlanInputReader({ readAnalysis = readProductAnaly
     const names = await readdir(dir).catch(error => { if (error.code === 'ENOENT') return []; throw error; });
     const matches = [];
     for (const name of names.filter(name => /^[a-f0-9]{64}\.json$/.test(name))) {
-      const saved = await read(join(dir, name)), snapshot = saved?.snapshot;
-      if (saved?.sourceId !== source.id || saved.status !== 'complete' || snapshot?.action !== 'analysis' || snapshot.scope?.startMs !== scope.startMs || snapshot.scope?.endMs !== scope.endMs) continue;
-      const ownScope = saved.descriptor?.localScope;
-      if (!(liveRef === saved.result?.sha256 || ownScope?.intervalId === interval.id && ownScope?.productId === product.id)) continue;
-      if (!saved.result || sharedHash(snapshot) !== saved.result.sha256 || snapshot.taskKey !== saved.descriptor?.taskKey || snapshot.sourceIdentity !== saved.descriptor?.sourceIdentity) return unavailable('PUBLIC_BASELINE_INVALID', '公共话术底稿校验失败，不能生成或覆盖已有结果');
-      if (!matches.some(item => item.result.sha256 === saved.result.sha256)) matches.push(saved);
+      const record = await read(join(dir, name));
+      for (const saved of [record, ...(record?.previousVersions ?? []).map(version => ({ ...version, sourceId: record.sourceId, status: 'complete' }))]) {
+        const snapshot = saved?.snapshot;
+        if (saved?.sourceId !== source.id || saved.status !== 'complete' || snapshot?.action !== 'analysis' || snapshot.scope?.startMs !== scope.startMs || snapshot.scope?.endMs !== scope.endMs) continue;
+        const ownScope = saved.descriptor?.localScope;
+        if (!(liveRef === saved.result?.sha256 || ownScope?.intervalId === interval.id && ownScope?.productId === product.id)) continue;
+        if (!saved.result || sharedHash(snapshot) !== saved.result.sha256 || snapshot.taskKey !== saved.descriptor?.taskKey || snapshot.sourceIdentity !== saved.descriptor?.sourceIdentity) return unavailable('PUBLIC_BASELINE_INVALID', '公共话术底稿校验失败，不能生成或覆盖已有结果');
+        if (!matches.some(item => item.result.sha256 === saved.result.sha256)) matches.push(saved);
+      }
     }
     const pinned = liveRef ? matches.filter(item => item.result.sha256 === liveRef) : matches;
     if (pinned.length > 1 || liveRef && !pinned.length) return unavailable('PUBLIC_BASELINE_REQUIRED', pinned.length ? '此讲解段有多个公共版本，需先固定要使用的版本' : '此讲解段绑定的公共话术底稿暂不可读取，请恢复已有结果');

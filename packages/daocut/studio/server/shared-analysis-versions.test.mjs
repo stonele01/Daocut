@@ -9,6 +9,7 @@ import { createProductDiscovery } from './product-discovery-route.mjs';
 import { createProductWorkflow } from './product-workflow.mjs';
 import { readProductTranscript, transcriptionLocation } from './product-transcription.mjs';
 import { readProductAnalysis, updateProductAnalysis, recordProductEdit } from './product-analysis.mjs';
+import { createStructurePlanInputReader } from './structure-plans.mjs';
 
 const probe = async () => ({ duration: 20 });
 const details = { subtypes: [], reason: '模拟完整原话', evidence: ['ASR'], context: '', repetition: '', review: [] };
@@ -64,6 +65,98 @@ async function fixture(t) {
 const sourceId = 'assets/live.mp4';
 const group = async (f, person, action) => (await f.workflows[person].sharedVersions(f.roots[person], sourceId)).groups.find(g => g.action === action);
 const adopt = async (f, person, g) => f.workflows[person].adoptShared(f.roots[person], { sourceId, action: g.action, ...g.scope, versionTaskKey: g.latestVersion.taskKey, expectedCurrentSha: g.currentVersion.sha256, confirmed: true });
+
+test('ordinary reanalysis publishes and uses the new result while retaining the previous shared version and private work', async t => {
+  const f = await fixture(t); await f.run(0, 'transcription'); await f.run(0, 'discovery');
+  const range = (await readProductAnalysis(f.roots[0])).analysis.intervals[0];
+  const scope = { productId: range.productId, intervalId: range.id };
+  await f.run(0, 'analysis', scope);
+  const old = await group(f, 0, 'analysis');
+  const reader = createStructurePlanInputReader();
+  const oldInput = await reader(f.roots[0], { sourceId, ...scope });
+  const before = (await readProductAnalysis(f.roots[0])).analysis.candidates;
+  f.revision(2);
+  const request = await f.run(0, 'analysis', { ...scope, rerun: true });
+  assert.equal(request.shared.mode, 'publish');
+  const current = await group(f, 0, 'analysis');
+  assert.notEqual(current.currentVersion.sha256, old.currentVersion.sha256);
+  assert.equal(current.currentVersion.sha256, current.latestVersion.sha256);
+  assert.equal(current.versions.length, 2);
+  const analysis = (await readProductAnalysis(f.roots[0])).analysis;
+  assert.deepEqual(analysis.archivedCandidates, before);
+  assert.ok(analysis.candidates.filter(c => c.intervalId === range.id).every(c => c.tags.includes('痛点')));
+  const nextInput = await reader(f.roots[0], { sourceId, ...scope });
+  assert.equal(nextInput.visibility, 'shared');
+  assert.notEqual(nextInput.analysisVersion, oldInput.analysisVersion);
+  const historical = analysis.scopes.find(r => r.kind === 'historical-analysis' && r.productId === scope.productId);
+  const previousInput = await reader(f.roots[0], { sourceId, productId: historical.productId, intervalId: historical.id });
+  assert.equal(previousInput.analysisVersion, oldInput.analysisVersion, 'old structure tasks still resolve their original analysis');
+  assert.deepEqual(previousInput.engineInput, oldInput.engineInput, 'saved structure identity is unchanged');
+  assert.equal(await readFile(join(f.roots[0], 'film.html'), 'utf8'), 'original film');
+  assert.equal(await readFile(join(f.roots[0], '.film/source-takes.json'), 'utf8'), 'private original takes');
+});
+
+test('failed ordinary reanalysis keeps the previous shared version active', async t => {
+  const f = await fixture(t); await f.run(0, 'transcription'); await f.run(0, 'discovery');
+  const range = (await readProductAnalysis(f.roots[0])).analysis.intervals[0];
+  const scope = { productId: range.productId, intervalId: range.id };
+  await f.run(0, 'analysis', scope);
+  const old = await group(f, 0, 'analysis'), before = (await readProductAnalysis(f.roots[0])).analysis;
+  f.revision(2); f.fail(true); await f.run(0, 'analysis', { ...scope, rerun: true });
+  assert.equal((await group(f, 0, 'analysis')).currentVersion.sha256, old.currentVersion.sha256);
+  assert.deepEqual((await readProductAnalysis(f.roots[0])).analysis, before);
+});
+
+for (const missingOutbox of [false, true]) test(`ordinary reanalysis recovers ${missingOutbox ? 'cached outputs' : 'pending publication'} and activates without another model call`, async t => {
+  const f = await fixture(t); await f.run(0, 'transcription'); await f.run(0, 'discovery');
+  const range = (await readProductAnalysis(f.roots[0])).analysis.intervals[0], scope = { productId: range.productId, intervalId: range.id };
+  await f.run(0, 'analysis', scope);
+  const old = await group(f, 0, 'analysis'), before = (await readProductAnalysis(f.roots[0])).analysis;
+  f.workflows[0] = f.make({ publishFile: async () => { throw Error('synthetic disconnected result folder'); } });
+  f.revision(2); await f.run(0, 'analysis', { ...scope, rerun: true });
+  const pending = (await f.workflows[0].status(f.roots[0], sourceId)).shared;
+  assert.equal(pending.mode, 'publish-pending');
+  assert.deepEqual((await readProductAnalysis(f.roots[0])).analysis, before);
+  if (missingOutbox) {
+    const path = join(f.roots[0], '.film/shared-analysis', `${pending.taskKey}.json`), saved = JSON.parse(await readFile(path, 'utf8'));
+    delete saved.outbox; delete saved.result; saved.status = 'submitted'; await writeFile(path, JSON.stringify(saved));
+  }
+  f.workflows[0] = f.make(); const counts = f.counts();
+  await f.workflows[0].publishShared(f.roots[0], { sourceId, taskKey: pending.taskKey, confirmed: true });
+  const current = await group(f, 0, 'analysis');
+  assert.notEqual(current.currentVersion.sha256, old.currentVersion.sha256);
+  assert.equal(current.currentVersion.sha256, current.latestVersion.sha256);
+  assert.ok((await readProductAnalysis(f.roots[0])).analysis.candidates.filter(c => c.intervalId === range.id).every(c => c.tags.includes('痛点')));
+  assert.deepEqual(f.counts(), counts);
+});
+
+for (const manualEdit of [false, true]) test(`rerunning an imported result retains history and ${manualEdit ? 'preserves edited text' : 'archives unchanged old candidates'}`, async t => {
+  const f = await fixture(t); await f.run(0, 'transcription'); await f.run(0, 'discovery');
+  const range = (await readProductAnalysis(f.roots[0])).analysis.intervals[0], scope = { productId: range.productId, intervalId: range.id };
+  await f.run(0, 'analysis', scope); await f.run(1, 'transcription'); await f.run(1, 'discovery'); await f.run(1, 'analysis', scope);
+  if (manualEdit) await updateProductAnalysis(f.roots[1], data => { data.candidates.find(c => c.intervalId === range.id).text = '私人修改的原话'; return data; }, probe);
+  const old = (await readProductAnalysis(f.roots[1])).analysis.candidates.find(c => c.intervalId === range.id);
+  f.revision(2); await f.run(1, 'analysis', { ...scope, rerun: true });
+  const analysis = (await readProductAnalysis(f.roots[1])).analysis;
+  assert.ok(analysis.candidates.some(c => c.intervalId === range.id && c.tags.includes('痛点')));
+  assert.deepEqual((manualEdit ? analysis.candidates : analysis.archivedCandidates).find(c => c.id === old.id), old);
+  assert.ok(analysis.scopes.some(r => r.kind === 'historical-analysis'));
+});
+
+test('ordinary reanalysis reconciles an interrupted version switch on reopen without another paid call', async t => {
+  const f = await fixture(t); await f.run(0, 'transcription'); await f.run(0, 'discovery');
+  const range = (await readProductAnalysis(f.roots[0])).analysis.intervals[0], scope = { productId: range.productId, intervalId: range.id };
+  await f.run(0, 'analysis', scope);
+  const old = await group(f, 0, 'analysis');
+  t.mock.method(f.stores[0], 'commitAdoption', async () => { throw Error('synthetic interruption after saving the effective result'); });
+  f.revision(2); await f.run(0, 'analysis', { ...scope, rerun: true });
+  const counts = f.counts(); f.workflows[0] = f.make();
+  const current = await group(f, 0, 'analysis');
+  assert.notEqual(current.currentVersion.sha256, old.currentVersion.sha256);
+  assert.equal(current.currentVersion.sha256, current.latestVersion.sha256);
+  assert.equal(current.needsReview, undefined);
+  assert.deepEqual(f.counts(), counts);
+});
 
 test('new discovery is published without changing pinned local results; explicit adoption changes effective products', async t => {
   const f = await fixture(t); await f.run(0, 'transcription'); await f.run(0, 'discovery'); await f.run(1, 'transcription'); await f.run(1, 'discovery');

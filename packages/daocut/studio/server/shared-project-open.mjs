@@ -43,6 +43,7 @@ export function resumeSharedAnalyses(root, sourceId, publication) {
       if (sharedHash((await readProductAnalysis(root)).analysis) !== sharedHash(expected) || sharedHash(await privateFiles(root)) !== sharedHash(privateBefore)) throw changeError();
     };
     const { results } = await publication.catalog(root, sourceId);
+    const preferred = await publication.preferredResults?.(root, sourceId) ?? new Set();
     await unchanged();
     const report = { readerRevision: 3, status: 'ready', imported: { transcription: 0, discovery: 0, analysis: 0 }, warnings: [], requestCount: 0, skippedRecords: 0, failedRecords: 0 };
     let live;
@@ -53,11 +54,13 @@ export function resumeSharedAnalyses(root, sourceId, publication) {
     for (const row of rows) {
       await unchanged();
       if (present.has(row.resultSha)) { report.skippedRecords++; continue; }
-      if (rows.filter(other => sharedHash(other.scope) === sharedHash(row.scope)).length > 1) {
-        report.warnings.push('同一范围有多个历史版本，请在已有分析记录中选择采用'); report.skippedRecords++; continue;
+      const versions = rows.filter(other => sharedHash(other.scope) === sharedHash(row.scope));
+      if (versions.length > 1 && !preferred.has(row.resultSha)) {
+        if (!versions.some(other => preferred.has(other.resultSha))) report.warnings.push('同一范围有多个历史版本，请在已有分析记录中选择采用');
+        report.skippedRecords++; continue;
       }
       try {
-        const imported = await publication.importResult(root, { sourceId, taskKey: row.taskKey, resultSha: row.resultSha, confirmed: true, expectedAnalysis: expected,
+        const imported = await publication.importResult(root, { sourceId, taskKey: row.taskKey, resultSha: row.resultSha, confirmed: true, expectedAnalysis: expected, preservePrevious: versions.length > 1,
           productName: `已有话术（商品待核对） ${Math.floor(row.scope.startMs / 1000)}–${Math.ceil(row.scope.endMs / 1000)}秒` });
         expected = imported.analysis;
         report.imported.analysis += row.count ?? imported.count ?? 0;
@@ -153,18 +156,20 @@ async function open(root, { assetPath, sourceId, expectedAnalysis, expectedPriva
     // Old publication files intentionally carried no product association. A
     // time overlap is not identity evidence: keep those candidates separate.
     const analyses = results.filter(row => row.action === 'analysis');
+    const preferred = await publication.preferredResults?.(root, sourceId) ?? new Set();
     let historicalAnalyses = 0;
     for (const row of analyses) {
-      if (analyses.filter(other => sharedHash(other.scope) === sharedHash(row.scope)).length > 1) {
+      const versions = analyses.filter(other => sharedHash(other.scope) === sharedHash(row.scope));
+      if (versions.length > 1 && !preferred.has(row.resultSha)) {
         const warning = '同一话术范围有多个历史版本，请在已有分析记录中选择，未自动替换';
-        if (!report.warnings.includes(warning)) report.warnings.push(warning);
+        if (!versions.some(other => preferred.has(other.resultSha)) && !report.warnings.includes(warning)) report.warnings.push(warning);
         continue;
       }
       await unchanged();
       const suffix = analyses.length > 1 ? ` ${Math.floor((row.scope?.startMs ?? 0) / 1000)}–${Math.ceil((row.scope?.endMs ?? 0) / 1000)}秒` : '';
       let imported;
       try {
-        imported = await publication.importResult(root, { ...request(row), expectedAnalysis: expected, productName: `已有话术（商品待核对）${suffix}` });
+        imported = await publication.importResult(root, { ...request(row), expectedAnalysis: expected, preservePrevious: versions.length > 1, productName: `已有话术（商品待核对）${suffix}` });
       } catch (error) {
         // A bad record must not hide unrelated completed work. If an import
         // changed the project before failing, or a user edited it, stop safely.

@@ -29,7 +29,7 @@ test('full manual scope submits once, running task survives selecting old parts,
     await writeFile(join(project.path, '.film/personal-draft.json'), JSON.stringify({ candidateId: candidate.id, intervalId: 'first', privateEdit: true }));
     const privateBefore = await readFile(join(project.path, '.film/personal-draft.json'), 'utf8');
     let phase = 'idle', reads = 0, submissions = 0;
-    const errors = [], unexpected = [], submitted = [];
+    const errors = [], unexpected = [], submitted = [], structureReads = [];
     const oldStatus = { status: 'complete', intervalId: 'first', productId: 'p', currentRunId: 'paid-first-run', rangeStartMs: 0, rangeEndMs: 5000 };
     const fullStatus = () => ({ status: phase, intervalId: 'whole', productId: 'p', ...(phase !== 'idle' ? { currentRunId: 'mock-whole-run', rangeStartMs: 0, rangeEndMs: 10000 } : {}) });
     const plan = { action: 'analysis', sourceId: 's', source, scope: { sourceId: 's', productId: 'p', intervalId: 'whole', startMs: 0, endMs: 10000, lectureOnly: true }, enabled: true, cached: false, requestCount: 1, reusedRequests: 0, service: { name: 'Synthetic only', model: 'stub' }, cost: { uncertain: false } };
@@ -41,6 +41,8 @@ test('full manual scope submits once, running task survives selecting old parts,
     await page.route('**/product-workflow/status?**', route => route.fulfill({ json: { source, busy: phase === 'running', transcription: { status: 'complete', segments: [] }, discovery: { status: 'complete' }, discoveryReady: true, needsReview: false } }));
     await page.route('**/product-workflow/plan?**', route => { const q = new URL(route.request().url()).searchParams; assert.equal(q.get('intervalId'), 'whole'); return route.fulfill({ json: plan }); });
     await page.route('**/product-workflow/execute', route => { submissions++; submitted.push(route.request().postDataJSON()); phase = 'running'; return route.fulfill({ json: { started: true } }); });
+    await page.route('**/structure-plans?**', route => { const q = new URL(route.request().url()).searchParams; structureReads.push(q.get('intervalId')); return route.fulfill({ json: { status: 'idle', version: 'ai-structure-plans-v8', plans: [], issues: [], confirmation: { id: 'mock-structure', enabled: true, requestCount: 1, openingCount: 1, service: { model: 'stub' } } } }); });
+    await page.route('**/structure-plans/generate', route => { unexpected.push('structure generation'); return route.abort(); });
     await page.goto(`${studio.origin}/projects/${project.id}?key=${studio.key}`);
     await page.getByRole('button', { name: '商品与结构', exact: true }).click();
     const card = page.locator('[data-product-card="p"]'); await card.getByRole('button', { name: /^Synthetic full lecture/ }).click();
@@ -62,6 +64,17 @@ test('full manual scope submits once, running task survives selecting old parts,
     await page.getByText('2 条话术', { exact: true }).waitFor();
     assert.ok(reads > readsBefore, 'the submitted range is polled even while another range is selected');
     await card.getByRole('button', { name: '重新分析 00:00 – 00:10', exact: true }).waitFor();
+    const historicalRead = page.waitForResponse(response => response.url().includes('/structure-plans?') && new URL(response.url()).searchParams.get('intervalId') === 'first');
+    await page.getByRole('button', { name: '查看旧结构', exact: true }).first().click();
+    await historicalRead;
+    await page.getByRole('button', { name: '拼结构', exact: true }).last().waitFor();
+    assert.equal(await page.getByRole('dialog').count(), 0, 'reading old structures never asks to generate');
+    assert.equal(structureReads.at(-1), 'first');
+    const currentRead = page.waitForResponse(response => response.url().includes('/structure-plans?') && new URL(response.url()).searchParams.get('intervalId') === 'whole');
+    await card.getByRole('button', { name: '拼结构', exact: true }).click();
+    await currentRead;
+    await page.getByRole('dialog').waitFor();
+    assert.equal(structureReads.at(-1), 'whole', 'ordinary compose uses the full latest range after reading history');
     assert.equal(submissions, 1); assert.deepEqual(submitted[0].plan.scope, plan.scope);
     assert.deepEqual(unexpected, []); assert.deepEqual(errors, []);
     assert.equal(await readFile(join(project.path, '.film/personal-draft.json'), 'utf8'), privateBefore);
