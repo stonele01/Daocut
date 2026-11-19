@@ -11,6 +11,7 @@ import { captureStructureExport, materializeStructureExport } from './structure-
 import { ensureStructureDraft } from './structure-drafts.mjs';
 import { createStructureBatchExports } from './structure-batch-exports.mjs';
 import { materializeCombinedExport } from './structure-export-combined.mjs';
+import { probeSource } from './nle.mjs';
 
 const base = fileURLToPath(new URL('../../../../.tmp/batch-export-tests/', import.meta.url));
 async function fixture(t) {
@@ -91,6 +92,46 @@ test('combined selected plans make one editable Jianying draft in plan order, wi
   const separate = await normal.create(f.project, { ...request, requestId: 'separate-test-002', mode: 'separate' });
   const splitDone = await normal.wait(f.project, separate.id);
   assert.equal(splitDone.total, 2); assert.equal(splitDone.completed, 2, JSON.stringify(splitDone.items));
+});
+
+test('12 saved plans cut between transport-stream keyframes export one draft with both tracks and 11 gaps', { timeout: 90000 }, async t => {
+  const f = await fixture(t), assetPath = 'assets/stream.mp4';
+  // Livestream captures can have an MP4 extension and an MPEG-TS container with long GOPs.
+  execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=s=96x96:r=30:d=42', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=42',
+    '-c:v', 'libx264', '-g', '240', '-keyint_min', '240', '-sc_threshold', '0', '-c:a', 'aac', '-f', 'mpegts', join(f.root, assetPath)], { windowsHide: true });
+  const scope = { sourceId: 's', productId: 'p', intervalId: 'lecture', startMs: 0, endMs: 42000 };
+  await mkdir(join(f.root, '.film'));
+  await writeFile(join(f.root, '.film/id'), f.project.id);
+  await writeFile(join(f.root, '.film/product-analysis.json'), JSON.stringify({ version: 1, sources: [{ id: 's', assetPath, durationMs: 42000 }],
+    products: [{ id: 'p', name: '合并验收' }], intervals: [{ ...scope, id: 'lecture' }], candidates: [] }));
+  await writeFile(join(f.root, 'film.html'), filmHtml({ stage: { w: 96, h: 96 }, tracks: [] }));
+  const plans = Array.from({ length: 12 }, (_, i) => {
+    const startMs = 5300 + 3000 * i;
+    return { id: `plan-${i + 1}`, version: 'v8', scope, speed: 1, durationMs: 1000,
+      clips: [{ sourceId: 's', startMs, endMs: startMs + 1000, text: `片段 ${i + 1}`, roles: ['hook'], coreIds: [] }] };
+  });
+  const taskKey = 'transport-12', queue = createExports({ drafts: () => { throw Error('Only use the test folder'); } });
+  const batches = createStructureBatchExports({ plans: { status: async () => ({ status: 'complete', context: { ...scope, visibility: 'local' }, taskKey, plans }) }, exports: queue, outputRoot: f.folder, pollMs: 5 });
+  t.after(async () => { await batches.stop(); await queue.stopAll(); });
+  const batch = await batches.create(f.project, { ...scope, taskKey, mode: 'combined', requestId: 'transport-12-plans', planIds: plans.map(p => p.id) });
+  const done = await batches.wait(f.project, batch.id);
+  assert.equal(done.status, 'complete', done.items[0].error);
+  assert.equal(done.items.length, 1);
+  const draft = JSON.parse(await readFile(join(dirname(done.items[0].outputs[0]), 'draft_content.json'), 'utf8'));
+  const clips = draft.tracks.filter(t => t.type === 'video').flatMap(t => t.segments);
+  assert.deepEqual(clips.map(c => c.target_timerange), plans.map((_, i) => ({ start: i * 2000000, duration: 1000000 })));
+  assert.equal(draft.duration, 23000000);
+  const media = join(batch.storageFolder, '_media');
+  const files = (await readdir(media)).filter(n => n.endsWith('.mp4'));
+  assert.equal(files.length, 12);
+  for (const file of files) {
+    const facts = await probeSource(join(media, file), true);
+    assert.deepEqual(facts.trackTimes.map(t => t.kind), ['video', 'audio']);
+    for (const track of facts.trackTimes) {
+      assert.ok(Math.abs(track.start) < 0.08);
+      assert.ok(Math.abs(track.start + track.duration - 1) < 0.08);
+    }
+  }
 });
 
 test('frozen Jianying export uses its batch folder and references one snapshot source', { timeout: 60000 }, async t => {

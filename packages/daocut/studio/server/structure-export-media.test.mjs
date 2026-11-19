@@ -111,6 +111,28 @@ test('changed selected media is rejected on resume and when another plan reuses 
   await assert.rejects(materializeStructureExport(b, { mediaRoot: f.mediaRoot }), /已保存选段发生变化/);
 });
 
+test('resuming an old combined batch repairs a frozen part whose video starts late while its audio spans the full range', async t => {
+  const f = await fixture(t), snapshot = await f.capture();
+  const prepared = await materializeStructureExport(snapshot, { mediaRoot: f.mediaRoot });
+  const film = readFilmFile(await fs.readFile(join(prepared.exportRoot, 'film.html'), 'utf8')).value;
+  const rel = film.tracks[0].clips[0].src, asset = join(prepared.exportRoot, rel);
+  // Recreate a legacy receipt whose file genuinely matched its recorded hash.
+  const delayed = join(f.dir, 'delayed.mp4');
+  execFileSync('ffmpeg', ['-v', 'error', '-i', asset, '-vf', 'trim=start=0.4', '-c:v', 'libx264', '-fps_mode', 'passthrough', '-c:a', 'copy', delayed], { windowsHide: true });
+  await fs.unlink(asset); await fs.rename(delayed, asset);
+  assert.ok((await probeSource(asset, true)).trackTimes.find(t => t.kind === 'video').start >= 0.39);
+  const receiptFile = join(prepared.exportRoot, '.film/selected-export.json');
+  const receipt = JSON.parse(await fs.readFile(receiptFile, 'utf8'));
+  delete receipt.verifiedTrackTimes;
+  receipt.files.find(file => file.path === rel).sha256 = createHash('sha256').update(await fs.readFile(asset)).digest('hex');
+  await fs.writeFile(receiptFile, JSON.stringify(receipt));
+  const repaired = await materializeStructureExport(snapshot, { mediaRoot: f.mediaRoot });
+  assert.notEqual(repaired.exportRoot, prepared.exportRoot);
+  const facts = await probeSource(join(repaired.exportRoot, rel), true);
+  for (const track of facts.trackTimes) assert.ok(track.start < 0.08 && Math.abs(track.start + track.duration - 1.3) < 0.08);
+  assert.equal((await materializeStructureExport(snapshot, { mediaRoot: f.mediaRoot })).exportRoot, repaired.exportRoot);
+});
+
 test('destinations without hard links copy only the selected short media', { timeout: 60000 }, async t => {
   const f = await fixture(t), a = await f.capture(), original = await fs.readFile(f.file);
   const copy = fs.copyFile, copiedVideos = [];
