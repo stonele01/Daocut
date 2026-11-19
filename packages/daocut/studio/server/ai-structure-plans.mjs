@@ -22,6 +22,14 @@ const errorIssue = message => ({ code: 'AI_STRUCTURE_FAILED', message });
 const failureMessage = error => error?.code === 'MODEL_HTTP' && Number.isInteger(error.httpStatus) && error.httpStatus >= 400 && error.httpStatus <= 599
   ? `${error.message} ${error.httpStatus}` : error.message;
 const OPENING_BATCH_SIZE = 8;
+function savedReply(round) {
+  try { return round.response ?? recoverDeepSeekTextResponse(round.receipt, round.request); }
+  catch (error) { if (error.code !== 'MODEL_INVALID_JSON') throw error; }
+}
+function canRecoverReply(round) {
+  try { return !!round?.request && savedReply(round) !== undefined; }
+  catch { return false; }
+}
 const OPENING_BATCH_ATTEMPTS = 2;
 const isCurated = m => [AI_STRUCTURE_CURATED_VERSION, AI_STRUCTURE_REQUIRED_VERSION, AI_STRUCTURE_PRICED_VERSION].includes(m.version);
 const isVariants = m => m.version === AI_STRUCTURE_VARIANTS_VERSION || isCurated(m);
@@ -262,7 +270,7 @@ export function createAiStructurePlans({ readInput = createStructurePlanInputRea
       materialComplete: m.inspected?.materialComplete === true, context: { ...m.input.context, visibility: m.input.visibility },
       issues: [...m.issues, ...rounds.flatMap(r => effectiveResult(m, r)?.issues ?? []), ...(last?.error ? [errorIssue(last.error)] : []), ...(m.saved?.operationError ? [errorIssue(m.saved.operationError)] : [])],
       canContinue: status === 'complete' && (m.version === AI_STRUCTURE_PRICED_VERSION ? coverage?.perOpening.some(item => item.distinctCount < MAX_OPENING_VARIANTS) : isVariants(m) ? (coverage?.total ?? 0) > 0 : coverage ? coverage.remainingIds.length > 0 : last?.result?.modelComplete === false),
-      recoverable: status === 'failed' && !!(last?.response || last?.receipt?.status === 'completed'),
+      recoverable: status === 'failed' && canRecoverReply(last),
       retryable: status === 'failed' && !m.blocked && isVariants(m) && last?.status === 'failed' && !!last?.request,
       requestCount: rounds.filter(r => r.submitted).length, mediaReview: m.input.mediaReview, mediaReviewOrigin: m.input.mediaReviewOrigin,
       visualReview: m.input.visualReview, visualReviewOrigin: m.input.visualReviewOrigin, visualReviewStale: m.input.visualReviewStale, ...extra };
@@ -593,7 +601,7 @@ export function createAiStructurePlans({ readInput = createStructurePlanInputRea
     const options = { openingIds: body.openingIds, passNumber: last.passNumber, correction: last.correction === true, feedback: body.feedback ?? [], retry: true };
     let prepared = await nextRound(m, options);
     if (sharedHash(prepared.request) !== sharedHash(last.request)) throw new HttpError(409, '失败批次的输入已变化，未重新发送');
-    const existing = last.response ?? recoverDeepSeekTextResponse(last.receipt, last.request);
+    const existing = savedReply(last);
     let valid = false, retryFeedback;
     if (existing !== undefined) {
       try { validateRound(m, existing, last.request); valid = true; }

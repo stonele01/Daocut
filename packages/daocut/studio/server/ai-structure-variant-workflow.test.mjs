@@ -24,8 +24,8 @@ function alternative(body, id) {
   const candidates = body.units.filter(unit => unit.roles.includes('core') && unit.id !== id).map(unit => [id, unit.id, end]);
   return candidates.filter(sequence => !body.previous.some(previous => JSON.stringify(previous) === JSON.stringify(sequence)));
 }
-async function receipt(args, value, usage = {}) {
-  const hash = value => createHash('sha256').update(value).digest('hex'), rawText = JSON.stringify(value);
+async function receipt(args, value, usage = {}, rawText = JSON.stringify(value)) {
+  const hash = value => createHash('sha256').update(value).digest('hex');
   await args.onReceipt({ responseVersion: 'deepseek-text-receipt-v1', provider: 'deepseek', status: 'completed', httpStatus: 200,
     inputSha256: hash(JSON.stringify([args.system, args.input])), rawText, rawTextSha256: hash(rawText), usage });
 }
@@ -86,14 +86,18 @@ function sharedStore({ reuseFirstBatch = false } = {}) {
 }
 
 test('explicit failed-batch retry preserves history, sends once, and does not resume other batches', async t => {
-  const f = await fixture(t, { seed: false, count: 4, respond: (body, _args, number) => {
-    if (number === 2) throw Error('simulated HTTP error');
+  const f = await fixture(t, { seed: false, count: 4, respond: async (body, args, number) => {
+    if (number === 2) {
+      await receipt(args, null, {}, '{"plans":[');
+      throw Error('模型输出 JSON 无效');
+    }
     return output(body.openingIds.flatMap(id => alternative(body, id).slice(0, 1)));
   } });
   const service = f.make(); await f.generate(service); await service.wait();
   const failed = await service.status(f.root, f.request), request = { ...f.request, taskKey: failed.taskKey };
   assert.equal(failed.status, 'failed'); assert.equal(failed.plans.length, 1);
   assert.equal(failed.retryable, true);
+  assert.equal(failed.recoverable, false);
   const file = join(f.root, '.film/ai-structure-plans', `${failed.taskKey}.json`), before = JSON.parse(await readFile(file, 'utf8'));
   await service.generate(f.root, { ...request, confirmed: true, continue: true });
   assert.equal(f.calls.length, 2, 'ordinary generate cannot resend a failure');
@@ -161,7 +165,8 @@ test('another malformed retry stays failed without automatic requests and requir
 
 test('retry recovers a valid saved reply without sending the model', async t => {
   const f = await fixture(t, { seed: false, respond: async (body, args) => {
-    await receipt(args, output(body.openingIds.flatMap(id => alternative(body, id).slice(0, 1))));
+    const reply = output(body.openingIds.flatMap(id => alternative(body, id).slice(0, 1)));
+    await receipt(args, reply, {}, ['```json', JSON.stringify(reply), '```'].join('\n'));
     throw Error('interrupted after receipt');
   } }), service = f.make();
   await f.generate(service); await service.wait();
