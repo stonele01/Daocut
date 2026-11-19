@@ -23,11 +23,13 @@ async function checkSource(source) {
   if (source.sha256 && !source.identityKind && await mediaContentHash(source.sourcePath) !== source.sha256) throw error('原片内容与保存的身份不一致');
 }
 
-async function encode(source, range, facts, part) {
+async function encode(source, range, facts, part, preroll) {
   const video = facts.hasVideo ? ['-map', '0:v:0', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p', '-threads', '2', '-fps_mode', 'passthrough'] : ['-vn'];
   const audio = facts.hasAudio ? ['-map', '0:a:0', '-af', 'aresample=48000:async=1:first_pts=0,apad', '-c:a', 'aac', '-b:a', '192k'] : ['-an'];
   await new Promise((done, reject) => {
-    const child = spawn('ffmpeg', ['-hide_banner', '-nostdin', '-v', 'error', '-y', '-ss', String(range.from), '-i', source.sourcePath,
+    const seek = Math.max(0, range.from - preroll);
+    const child = spawn('ffmpeg', ['-hide_banner', '-nostdin', '-v', 'error', '-y', ...(seek > 0 ? ['-ss', String(seek)] : []), '-i', source.sourcePath,
+      ...(range.from > seek ? ['-ss', String(range.from - seek)] : []),
       '-t', String(range.to - range.from), ...video, ...audio, '-sn', '-dn', '-movflags', '+faststart', part], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
     let message = '';
     child.stderr.on('data', bytes => { message = (message + bytes).slice(-6000); });
@@ -36,9 +38,29 @@ async function encode(source, range, facts, part) {
   });
 }
 
+function coversRange(actual, duration, fps) {
+  const tolerance = Math.max(0.08, 2 / (fps || 30));
+  return Math.abs(actual.duration - duration) <= tolerance && actual.trackTimes?.length > 0 &&
+    actual.trackTimes.every(track => Math.abs(track.start) <= tolerance && Math.abs(track.start + track.duration - duration) <= tolerance);
+}
+
+async function encodeVerifiedRange(source, range, facts, part) {
+  const duration = range.to - range.from;
+  // Transport streams may seek to an inter frame. Decode ahead of the cut to obtain its references.
+  const windows = facts.formatName === 'mpegts' ? [10, 60] : [0, 10, 60];
+  let actual;
+  for (const preroll of new Set(windows.map(seconds => Math.min(range.from, seconds)))) {
+    await encode(source, range, facts, part, preroll);
+    actual = await probeSource(part, true);
+    if (actual.hasVideo === facts.hasVideo && actual.hasAudio === facts.hasAudio && coversRange(actual, duration, facts.fps)) return;
+  }
+  const tracks = actual?.trackTimes?.map(t => `${t.kind === 'video' ? '视频' : '音频'} ${t.start.toFixed(3)}–${(t.start + t.duration).toFixed(3)} 秒`).join('，') || '未读到音视频轨';
+  throw error(`${source.assetPath}（${range.from}–${range.to} 秒）选段时长或音画轨道不符：预期 ${duration.toFixed(3)} 秒，实际${tracks}`);
+}
+
 async function segment(source, range, facts, mediaRoot) {
   await checkSource(source);
-  const key = sha(['selected-media-v1', source.sourcePath, source.identity, source.captureHash, range]);
+  const key = sha([range ? 'selected-media-v2' : 'selected-media-v1', source.sourcePath, source.identity, source.captureHash, range]);
   const target = join(mediaRoot, `${key}${range ? facts.hasVideo ? '.mp4' : '.m4a' : extname(source.assetPath)}`), receiptFile = target + '.json';
   const receiptText = await optional(receiptFile);
   if (receiptText) {
@@ -54,9 +76,7 @@ async function segment(source, range, facts, mediaRoot) {
   const part = join(mediaRoot, `${key}.${randomUUID()}.part${extname(target)}`);
   try {
     if (range) {
-      await encode(source, range, facts, part);
-      const actual = await probeSource(part), tolerance = Math.max(0.08, 2 / (facts.fps || 30));
-      if (!Number.isFinite(actual.duration) || Math.abs(actual.duration - (range.to - range.from)) > tolerance || Boolean(actual.hasVideo) !== Boolean(facts.hasVideo) || Boolean(actual.hasAudio) !== Boolean(facts.hasAudio)) throw error('选段时长或音画轨道不符，未发布不完整片段');
+      await encodeVerifiedRange(source, range, facts, part);
     } else await fs.copyFile(source.sourcePath, part, constants.COPYFILE_EXCL);
     await checkSource(source);
     const saved = { key, sha256: await hashFile(part), size: (await fs.stat(part)).size, range };
@@ -82,15 +102,34 @@ async function transcriptForClip(snapshot, source, asset, span, directory) {
   for (const language of languages) await fs.writeFile(join(directory, transcriptPath(asset, language)), vttOf(lines(language), { cut: true }));
 }
 
+async function preparedReceipt(exportRoot, revision) {
+  const saved = await optional(join(exportRoot, '.film/selected-export.json'));
+  if (!saved) return null;
+  const receipt = JSON.parse(saved);
+  if (receipt.revision !== revision) throw error('选段导出版本已变化');
+  for (const file of receipt.files) if (await hashFile(join(exportRoot, file.path)) !== file.sha256) throw error('已保存的选段导出内容已变化');
+  return receipt;
+}
+
+async function legacyRangesCovered(exportRoot) {
+  const film = readFilmFile(await fs.readFile(join(exportRoot, 'film.html'), 'utf8')).value;
+  for (const clip of film.tracks.flatMap(track => track.clips)) {
+    if (!['video', 'sound'].includes(kindOf(clip))) continue;
+    const facts = await probeSource(join(exportRoot, clip.src), true);
+    if (!coversRange(facts, clip.time[1] - clip.time[0], facts.fps)) return false;
+  }
+  return true;
+}
+
 export async function materializeSelectedMedia(snapshot, { mediaRoot, mediaCache, validateSnapshot }) {
   const root = resolve(mediaRoot); await fs.mkdir(root, { recursive: true });
-  const exportRoot = join(snapshot.root, 'selected-export'), receiptFile = join(exportRoot, '.film/selected-export.json');
-  const previous = await optional(receiptFile);
+  let exportRoot = join(snapshot.root, 'selected-export');
+  const previous = await preparedReceipt(exportRoot, snapshot.revision);
   if (previous) {
-    const receipt = JSON.parse(previous);
-    if (receipt.revision !== snapshot.revision) throw error('选段导出版本已变化');
-    for (const file of receipt.files) if (await hashFile(join(exportRoot, file.path)) !== file.sha256) throw error('已保存的选段导出内容已变化');
-    return { ...snapshot, exportRoot };
+    if (previous.verifiedTrackTimes || await legacyRangesCovered(exportRoot)) return { ...snapshot, exportRoot };
+    // Keep the frozen edit and old media intact while repairing a previously accepted late video track.
+    exportRoot = join(snapshot.root, 'selected-export-recut');
+    if (await preparedReceipt(exportRoot, snapshot.revision)) return { ...snapshot, exportRoot };
   }
   const stage = `${exportRoot}.preparing-${randomUUID()}`;
   await fs.mkdir(join(stage, '.film'), { recursive: true }); await fs.mkdir(join(stage, 'assets'));
@@ -104,7 +143,7 @@ export async function materializeSelectedMedia(snapshot, { mediaRoot, mediaCache
       const source = snapshot.media.find(s => s.assetPath === clip.src);
       if (!source) throw error('固定方案缺少片段原片');
       const moving = ['video', 'sound'].includes(kindOf(clip));
-      if (!factsCache.has(source.sourcePath)) factsCache.set(source.sourcePath, await probeSource(source.sourcePath));
+      if (!factsCache.has(source.sourcePath)) factsCache.set(source.sourcePath, await probeSource(source.sourcePath, true));
       const facts = factsCache.get(source.sourcePath), span = clipSpan(clip, facts.duration), range = moving ? { from: span.from, to: span.to } : null;
       const key = JSON.stringify([root, source.sourcePath, source.identity, source.captureHash, range]);
       let work = mediaCache.get(key);
@@ -122,7 +161,7 @@ export async function materializeSelectedMedia(snapshot, { mediaRoot, mediaCache
     const files = [];
     async function visit(dir, prefix = '') { for (const entry of await fs.readdir(dir, { withFileTypes: true })) { const rel = prefix + entry.name; if (entry.isDirectory()) await visit(join(dir, entry.name), rel + '/'); else files.push({ path: rel, sha256: await hashFile(join(dir, entry.name)) }); } }
     await visit(stage);
-    await fs.writeFile(join(stage, '.film/selected-export.json'), JSON.stringify({ revision: snapshot.revision, files }));
+    await fs.writeFile(join(stage, '.film/selected-export.json'), JSON.stringify({ revision: snapshot.revision, verifiedTrackTimes: true, files }));
     await fs.rename(stage, exportRoot);
     return { ...snapshot, exportRoot };
   } finally { await fs.rm(stage, { recursive: true, force: true }); }

@@ -33,8 +33,12 @@ export async function materializeCombinedExport(snapshot, { materialize, ...opti
     || snapshot.parts.some(part => resolve(dirname(part.root)) !== resolve(snapshot.root) || !/^\d+$/.test(part.root.split(/[\\/]/).at(-1)))) throw Error('合并导出版本不匹配');
   // Reuse range extraction, verification and the same media cache for every plan.
   const prepared = [];
-  for (const part of snapshot.parts) prepared.push(await materialize(part, options) ?? part);
-  const exportRoot = join(snapshot.root, 'combined-export');
+  for (const part of snapshot.parts) {
+    try { prepared.push(await materialize(part, options) ?? part); }
+    catch (error) { throw Object.assign(new Error(`方案 ${part.root.split(/[\\/]/).at(-1)}：${error.message}`, { cause: error }), { code: error.code, status: error.status }); }
+  }
+  const recut = prepared.some(part => part.exportRoot === join(part.root, 'selected-export-recut'));
+  const exportRoot = join(snapshot.root, recut ? 'combined-export-recut' : 'combined-export');
   const stage = `${exportRoot}.preparing-${randomUUID()}`;
   await fs.mkdir(join(stage, 'assets'), { recursive: true });
   try {

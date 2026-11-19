@@ -31,7 +31,8 @@ import { exactRate } from '../../src/rate.mjs';
 /**
  * @typedef {import('../../src/film-doc.mjs').FilmBox} FilmBox
  * @typedef {{ w?: number, h?: number, duration?: number, fps?: number, hasVideo?: boolean, hasAudio?: boolean,
- *   channels?: number, sampleRate?: number, alpha?: boolean }} SourceFacts
+ *   channels?: number, sampleRate?: number, alpha?: boolean, formatName?: string,
+ *   trackTimes?: { kind: string, start: number, duration: number }[] }} SourceFacts
  * @typedef {{ id: string, kind: 'page' | 'video' | 'still', src: string, path: string, at: number, end: number,
  *   from: number, speed: number, box?: FilmBox, track: number, hidden: boolean, styled?: boolean, faded?: boolean,
  *   facts: SourceFacts | null }} NlePicture
@@ -535,19 +536,19 @@ export function xmemlDocument(timeline) {
 /**
  * One ffprobe of a source: its length, picture size, rate, sound channels, and whether its picture has alpha. What
  * can't be read is missing.
- * @param {string} path @returns {Promise<SourceFacts>}
+ * @param {string} path @param {boolean} [withTrackTimes] @returns {Promise<SourceFacts>}
  */
-export function probeSource(path) {
+export function probeSource(path, withTrackTimes = false) {
   return new Promise((done) => {
     const proc = spawn('ffprobe', ['-v', 'error', '-show_entries',
-      'format=duration,format_name:stream=codec_type,width,height,avg_frame_rate,r_frame_rate,channels,sample_rate,pix_fmt:stream_tags=alpha_mode,rotate:stream_side_data=rotation',
+      'format=duration,format_name:stream=codec_type,width,height,avg_frame_rate,r_frame_rate,channels,sample_rate,pix_fmt,start_time,duration:stream_tags=alpha_mode,rotate:stream_side_data=rotation',
       '-of', 'json', path], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
     let out = '';
     proc.stdout.on('data', (c) => { out += c; });
     proc.on('error', () => done({}));
     proc.on('close', () => {
       try {
-        /** @type {{ format?: { duration?: string, format_name?: string }, streams?: { codec_type?: string, width?: number, height?: number, avg_frame_rate?: string, r_frame_rate?: string, channels?: number, sample_rate?: string, pix_fmt?: string, tags?: { alpha_mode?: string, rotate?: string }, side_data_list?: { rotation?: number }[] }[] }} */
+        /** @type {{ format?: { duration?: string, format_name?: string }, streams?: { codec_type?: string, start_time?: string, duration?: string, width?: number, height?: number, avg_frame_rate?: string, r_frame_rate?: string, channels?: number, sample_rate?: string, pix_fmt?: string, tags?: { alpha_mode?: string, rotate?: string }, side_data_list?: { rotation?: number }[] }[] }} */
         const json = JSON.parse(out);
         const streams = json.streams ?? [];
         const v = streams.find((s) => s.codec_type === 'video');
@@ -559,6 +560,7 @@ export function probeSource(path) {
         const rotation = Number(v?.side_data_list?.find(s => s.rotation != null)?.rotation ?? v?.tags?.rotate ?? 0);
         const quarter = Math.abs(Math.round(rotation / 90)) % 2 === 1;
         done({
+          ...(withTrackTimes ? { formatName: json.format?.format_name, trackTimes: streams.filter(s => s.codec_type === 'video' || s.codec_type === 'audio').map(s => ({ kind: s.codec_type ?? '', start: Number(s.start_time), duration: Number(s.duration) })) } : {}),
           ...(v?.width ? { w: quarter ? v.height : v.width } : {}),
           ...(v?.height ? { h: quarter ? v.width : v.height } : {}),
           ...(Number.isFinite(sec) && sec > 0 && !still ? { duration: sec } : {}),
