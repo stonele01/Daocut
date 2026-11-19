@@ -91,7 +91,7 @@ export function createProductDiscovery({ modelClient, modelIdentity, readTranscr
     const stale = Boolean(run && (!inputsMatch || (run.baseHash !== effectiveHash(analysis) && !state.applications?.some(a => a.runId === run.id && a.afterHash === effectiveHash(analysis)))));
     return { sourceId, status: interrupted ? 'failed' : run?.status ?? 'idle', modelIdentity: run?.modelIdentity ?? null, enabled: typeof modelClient === 'function', runId: run?.id, error: previousIncomplete ? '旧提示词下的拆品任务未完成；已完成窗口和原请求记录保留，不能混用新规则继续，请核查后明确发起新的拆品' : interrupted ? '任务已中断；已完成窗口保留，核查后可显式重试，重试可能计费' : run?.error, stale, canRetry: Boolean(run && !previousIncomplete && (run.status === 'failed' || interrupted)), proposal: run?.status === 'complete' ? run.proposal : undefined, difference: run?.proposal ? discoveryDifference(analysis, run.proposal) : undefined, runs: state.runs.map(({ id, status, createdAt, modelIdentity, windows, completed, error }) => ({ id, status, createdAt, modelIdentity, windows, completedWindows: completed?.length ?? 0, error })) };
   }
-  async function startInner(root, body) {
+  async function startInner(root, body, checkSharedAttempt) {
     const input = await inputFor(root, body.sourceId);
     if (body.expectedInputIdentity && body.expectedInputIdentity !== hash({ inputHash: input.inputHash, contractHash: input.contractHash, baseHash: effectiveHash(input.analysis) })) throw new HttpError(409, '来源、转写或拆品配置在确认后变化，请重新核对请求');
     const state = await load(root, body.sourceId);
@@ -118,6 +118,7 @@ export function createProductDiscovery({ modelClient, modelIdentity, readTranscr
         const guardedClient = async request => {
           const current = await inputFor(root, body.sourceId);
           if (current.inputHash !== input.inputHash || current.contractHash !== input.contractHash || effectiveHash(current.analysis) !== run.baseHash) throw Object.assign(new Error(), { code: 'DISCOVERY_INPUT_CHANGED' });
+          await checkSharedAttempt?.();
           return modelClient({ ...request, expectedIdentity: input.modelConfiguration, onReceipt: async receipt => { run.receipts ??= []; run.receipts.push(receipt); await save(root, state); } });
         };
         const proposal = await discoverProducts({ sourceId: body.sourceId, runId: run.id, durationMs: input.durationMs, cues: input.cues, client: guardedClient, maxBytes, contextCues, completed: run.completed, onWindow: async ({ results }) => { run.completed = results; await save(root, state); } });
@@ -134,13 +135,13 @@ export function createProductDiscovery({ modelClient, modelIdentity, readTranscr
     void completion.finally(() => completions.delete(key));
     return view(root, body.sourceId);
   }
-  function start(root, body) {
+  function start(root, body, checkSharedAttempt) {
     const key = `${root}\0${body.sourceId}`, identity = JSON.stringify([Boolean(body.rerun), Boolean(body.retry)]);
     if (applying.has(key)) throw new HttpError(409, '该来源正在应用拆品建议，请等待保存完成');
     const pending = starting.get(key);
     if (pending) { if (pending.identity !== identity) throw new HttpError(409, '该来源已有不同的拆品任务'); return pending.promise; }
     if (running.has(key)) { if (running.get(key) !== identity) throw new HttpError(409, '该来源已有不同的拆品任务'); return view(root, body.sourceId); }
-    const promise = startInner(root, body).finally(() => starting.delete(key));
+    const promise = startInner(root, body, checkSharedAttempt).finally(() => starting.delete(key));
     starting.set(key, { identity, promise });
     return promise;
   }

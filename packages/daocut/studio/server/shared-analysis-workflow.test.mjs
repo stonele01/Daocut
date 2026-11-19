@@ -39,11 +39,14 @@ async function fixture(t) {
   const tasks = new Map(); let serial = 0, asr = 0, text = 0, gate, fail = false, asrError, nextModelResult;
   const coordinate = async (op, body) => {
     let task = tasks.get(body.taskKey);
-    if (op === 'status') return { task: structuredClone(task ?? null) };
+    if (op === 'status') return { task: structuredClone(task ?? null), ownedByCaller: task?.ownerId === 'employee' };
     if (op === 'claim' || op === 'retry') {
       if (task && op === 'claim') return { task: structuredClone(task), acquired: false };
-      if (op === 'retry') assert.equal(body.inputHash, task.inputHash, 'match the company coordinator same-input requirement');
-      task = { taskKey: body.taskKey, inputHash: body.inputHash, status: 'claimed', attemptId: `attempt-${++serial}` }; tasks.set(body.taskKey, task); return { task: structuredClone(task), acquired: true };
+      if (op === 'retry') {
+        assert.equal(body.expectedAttemptId, task.attemptId);
+        assert.equal(body.inputHash, task.inputHash, 'match the company coordinator same-input requirement');
+      }
+      task = { taskKey: body.taskKey, inputHash: body.inputHash, ownerId: 'employee', updatedAt: new Date().toISOString(), status: 'claimed', attemptId: `attempt-${++serial}` }; tasks.set(body.taskKey, task); return { task: structuredClone(task), acquired: true };
     }
     assert.equal(body.attemptId, task.attemptId);
     if (op === 'submitted') { const sendAllowed = task.status === 'claimed'; task.status = 'submitted'; return { task: structuredClone(task), sendAllowed }; }
@@ -305,6 +308,56 @@ test('two ordinary projects cannot both submit the same new discovery task', asy
   const attempts = await Promise.allSettled(f.workflows.map((w, i) => w.execute(f.roots[i], { confirmed: true, plan: plans[i] })));
   assert.equal(attempts.filter(x => x.status === 'fulfilled').length, 1); release();
   await Promise.all(f.workflows.map((w, i) => w.wait(f.roots[i], 'assets/live.mp4'))); assert.equal(f.counts().text, 1);
+});
+test('opening a discovery plan while another project is processing shows zero new requests', async t => {
+  const f = await fixture(t), sourceId = 'assets/live.mp4';
+  await f.run(0, 'transcription'); await f.run(1, 'transcription');
+  let release; f.setGate(new Promise(resolve => { release = resolve; }));
+  const plan = await f.workflows[0].plan(f.roots[0], { action: 'discovery', sourceId });
+  await f.workflows[0].execute(f.roots[0], { confirmed: true, plan });
+  try {
+    f.tasks.get(plan.shared.taskKey).updatedAt = '2000-01-01T00:00:00Z';
+    const waiting = await f.workflows[1].plan(f.roots[1], { action: 'discovery', sourceId });
+    assert.equal(waiting.shared.mode, 'busy');
+    assert.ok(waiting.totalRequests > 0);
+    assert.equal(waiting.requestCount, 0);
+    assert.equal(waiting.cost.estimate, 0);
+    assert.equal(waiting.enabled, false);
+  } finally { release(); await f.workflows[0].wait(f.roots[0], sourceId); }
+  assert.equal(f.counts().text, 1);
+  assert.equal((await f.run(1, 'discovery')).shared.mode, 'reuse');
+  assert.equal(f.counts().text, 1);
+});
+test('legacy submitted discovery without a local receipt can be recovered from another project by its owner after review', async t => {
+  const f = await fixture(t), sourceId = 'assets/live.mp4';
+  await f.run(0, 'transcription'); await f.run(1, 'transcription');
+  const writer = f.workflows[0], reader = f.workflows[1], root = f.roots[1];
+  const request = { action: 'discovery', prepare: true, sourceId, retry: true };
+  // Retain the company submission but drop the local workflow before its first model call.
+  const original = await writer.plan(f.roots[0], request);
+  const shared = f.shared(), source = (await readProductAnalysis(f.roots[0])).analysis.sources[0];
+  const transcript = await readProductTranscript(f.roots[0], source);
+  const discovery = createProductDiscovery({ modelIdentity: () => f.service.text });
+  const descriptor = await shared.prepare(f.roots[0], source, { action: 'discovery', data: transcript.cues, contract: await discovery.sharedContract() });
+  assert.equal(descriptor.taskKey, original.shared.taskKey);
+  await shared.acquire(descriptor);
+  const task = f.tasks.get(descriptor.taskKey);
+  assert.equal((await reader.plan(root, request)).shared.mode, 'busy');
+  task.updatedAt = '2000-01-01T00:00:00Z'; task.ownerId = 'colleague';
+  assert.equal((await reader.plan(root, request)).requestCount, 0);
+  task.ownerId = 'employee';
+  const recovery = await reader.plan(root, request);
+  assert.equal(recovery.shared.mode, 'retry-required');
+  assert.ok(recovery.enabled && recovery.requestCount > 0);
+  await assert.rejects(reader.execute(root, { confirmed: true, plan: recovery }));
+  task.attemptId = 'replacement-attempt';
+  await assert.rejects(reader.execute(root, { confirmed: true, plan: recovery, retryAcknowledged: true }));
+  assert.equal(f.counts().text, 0);
+  await f.run(1, 'discovery', request, { retryAcknowledged: true });
+  assert.equal(f.tasks.get(descriptor.taskKey).status, 'complete');
+  assert.equal((await readProductAnalysis(root)).analysis.products.length, 2);
+  await f.run(0, 'discovery');
+  assert.equal(f.counts().text, 1);
 });
 test('ordinary failed request requires explicit shared retry after reopen', async t => {
   const f = await fixture(t); await f.run(0, 'transcription'); f.fail(true); await f.run(0, 'discovery');

@@ -105,7 +105,7 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
     if (preparation?.status === 'running' && !preparing.has(`${root}\0${sourceId}`)) Object.assign(preparation, { status: 'failed', error: '转写拆品已中断，已完成的结果会复用，请点击继续。' });
     return { ...(layoutState?.pending ? { sharingWarning: `商品关联待补存：${layoutState.error}。点击刷新共享分析和方案可免费重试保存` } : {}), source, ready, discoveryReady, needsReview, busy: starting.has(`${root}\0${sourceId}`) || running.has(`${root}\0${sourceId}`) || preparing.has(`${root}\0${sourceId}`), phase: discoveryReady ? 'ready' : live.transcription.status === 'complete' ? 'discovery' : 'transcription', transcription: live.transcription, discovery: split, ...(preparation ? { preparation } : {}), ...(binding ? { binding } : {}), ...(shared ? { shared } : {}) };
   }
-  const sharedPublic = descriptor => descriptor ? Object.fromEntries(['mode', 'taskKey', 'status', 'reason', 'result', 'coordinationId', 'familyKey', 'newVersion', 'recoverCached'].filter(k => descriptor[k] !== undefined).map(k => [k, descriptor[k]])) : undefined;
+  const sharedPublic = descriptor => descriptor ? Object.fromEntries(['mode', 'taskKey', 'attemptId', 'status', 'reason', 'result', 'coordinationId', 'familyKey', 'newVersion', 'recoverCached'].filter(k => descriptor[k] !== undefined).map(k => [k, descriptor[k]])) : undefined;
   async function sharedFor(root, source, analysis, action, scope, rerun, newVersion = false) {
     if (!sharedAnalysis) return null;
     let transcript = null;
@@ -323,12 +323,14 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
       if (split.status === 'running') error = '此视频正在拆品，请等待完成';
       if (split.status === 'failed') retryRequired = true;
     }
-    if (visual && cached) visual = { ...visual, requestCount: 0 };
-    const requestCount = Math.max(0, totalRequests - reusedRequests);
+    const waitingForShared = shared?.mode === 'busy';
+    if (visual && (cached || waitingForShared)) visual = { ...visual, requestCount: 0 };
+    const requestCount = waitingForShared ? 0 : Math.max(0, totalRequests - reusedRequests);
     let cost = cached ? { estimate: 0, currency: null, uncertain: false, basis: shared?.mode === 'reuse' ? '复用首次共享结果，不发起新模型请求' : '复用工程内已有结果，不发起新服务请求' }
       : noCost(action === 'transcription' ? `按本次实际上传音频时长计费；音频采用 MP3、16kHz、单声道。未取得当前账号有效单价，无法可靠估价。含重叠的计划音频共 ${audioSegments.reduce((sum, item) => sum + item.endMs - item.startMs, 0) / 1000} 秒，已完成分段不重传。` : '按实际输入与输出 token 计费；当前没有可核验的账号有效单价与最终输出长度，无法可靠估价。请求次数按现有分窗计划计算。');
     if (!cached && visual?.requestCount) cost.basis += ` 另含 ${visual.requestCount} 次画面理解请求，最多发送 ${visual.maxImages} 张本次讲解抽帧拼图。`;
     if (nextStage) cost = noCost('本次包含整条视频转写和随后商品识别，已完成结果会复用；新增音频与文字请求按服务实际用量计费。');
+    if (waitingForShared) cost = { estimate: 0, currency: null, uncertain: false, basis: '等待读取共享结果，本次新增请求 0 次。' };
     return { identity: hash({ action, sourceId, inputIdentity, generation, service: serviceIdentity(service), retry, rerun, newVersion, shared, ...(prepare ? { prepare, nextStage } : {}), ...(visual ? { visual } : {}) }), action, sourceId, source: { assetPath: source.assetPath, durationMs: source.durationMs }, ...(scope ? { scope, productId: scope.productId, intervalId: scope.intervalId } : {}), retry, rerun, newVersion, service, ...(prepare ? { prepare, nextStage } : {}), enabled: (cached || service.enabled) && !error && !localReviewRequired, cached, requestCount, totalRequests, reusedRequests, transcriptSegments, retryRequired, inputIdentity, ...(shared ? { shared } : {}), ...(audioSegments ? { audioSegments } : {}), ...(windows ? { windows } : {}), ...(visual ? { visual } : {}), cost, ...(error ? { error } : {}), ...(localReviewRequired ? { localReviewRequired } : {}) };
   }
   async function executeInner(root, body) {
@@ -342,6 +344,7 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
     const { sourceId, action } = current;
     const { source, analysis } = await sourceFor(root, sourceId);
     const descriptor = await sharedFor(root, source, analysis, action, current.scope, current.rerun, current.newVersion);
+    if (descriptor?.attemptId !== current.shared?.attemptId || (!current.shared?.recoverCached && descriptor?.mode !== current.shared?.mode)) throw new HttpError(409, '共享任务已变化，请重新确认');
     if (current.shared?.recoverCached) { await publishResult(root, source, current, descriptor, descriptor.attemptId, true); return { plan: current, accepted: true, sourceId }; }
     if (descriptor?.mode === 'publish-pending') return { plan: current, state: await publishShared(root, { sourceId, taskKey: descriptor.taskKey, confirmed: true }) };
     if (descriptor?.mode === 'reuse') {
@@ -357,7 +360,7 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
       await publishResult(root, source, current, descriptor, sharedAttempt.attemptId);
       return { plan: current, accepted: true, sourceId };
     }
-    let completion;
+    let completion, discoveryActivity;
     try {
     if (sharedAttempt) {
       const latest = await sharedFor(root, source, (await readProductAnalysis(root)).analysis, action, current.scope, false, current.newVersion);
@@ -374,13 +377,18 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
     } else {
       const before = (await readProductAnalysis(root)).analysis;
       const localRetry = current.retry && ['failed', 'running'].includes((await discovery.view(root, sourceId)).status);
-      await discovery.start(root, { sourceId, retry: localRetry, rerun: current.rerun || current.newVersion, ...(current.newVersion ? { draftKey: descriptor.taskKey } : {}), expectedInputIdentity: current.inputIdentity });
+      if (sharedAttempt) discoveryActivity = await sharedAnalysis.watchDiscovery(descriptor, sharedAttempt.attemptId);
+      await discovery.start(root, { sourceId, retry: localRetry, rerun: current.rerun || current.newVersion, ...(current.newVersion ? { draftKey: descriptor.taskKey } : {}), expectedInputIdentity: current.inputIdentity }, discoveryActivity?.check);
       completion = (async () => {
         await discovery.wait(root, sourceId);
         if (!current.newVersion) await applyFirstDiscovery(root, sourceId, before);
       })();
     }
-    } catch (error) { if (sharedAttempt) await sharedAnalysis.fail(descriptor, sharedAttempt.attemptId).catch(() => {}); throw error; }
+    } catch (error) {
+      try { if (sharedAttempt) await sharedAnalysis.fail(descriptor, sharedAttempt.attemptId).catch(() => {}); }
+      finally { await discoveryActivity?.stop(); }
+      throw error;
+    }
     if (sharedAttempt) completion = Promise.resolve(completion).then(async () => {
       try {
         const reviewRequired = action === 'transcription' && (await liveAnalysis.view(root, sourceId)).transcription.code === 'ASR_BOUNDARY_REVIEW';
@@ -394,17 +402,18 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
       }
       catch { if (!['publish-pending', 'local-review'].includes((await sharedAnalysis.status(root, sourceId))?.mode)) await sharedAnalysis.fail(descriptor, sharedAttempt.attemptId); }
     });
-    const settled = Promise.resolve(completion).catch(() => {}).finally(() => { if (running.get(key)?.promise === settled) running.delete(key); });
+    const settled = Promise.resolve(completion).finally(() => discoveryActivity?.stop()).catch(() => {}).finally(() => { if (running.get(key)?.promise === settled) running.delete(key); });
     running.set(key, { identity: current.identity, promise: settled });
     return { plan: current, accepted: true, sourceId };
   }
   async function executePreparation(root, body) {
+    if (body.confirmed !== true) throw new HttpError(400, '请确认本次转写拆品');
     const current = await plan(root, body.plan);
     if (current.identity !== body.plan.identity) throw new HttpError(409, '素材或服务配置已变化，请重新确认转写拆品');
     if (!current.enabled) throw new HttpError(403, current.error || '转写拆品服务尚未配置');
     if (current.retryRequired && (!current.retry || body.retryAcknowledged !== true)) throw new HttpError(409, '上次请求未完成，请明确重试');
     const firstPlan = await plan(root, { ...current, prepare: false });
-    if (firstPlan.inputIdentity !== current.inputIdentity || hash(serviceIdentity(firstPlan.service)) !== hash(serviceIdentity(current.service))) throw new HttpError(409, '素材或服务配置已变化，请重新确认转写拆品');
+    if (firstPlan.inputIdentity !== current.inputIdentity || hash(firstPlan.shared ?? null) !== hash(current.shared ?? null) || hash(serviceIdentity(firstPlan.service)) !== hash(serviceIdentity(current.service))) throw new HttpError(409, '共享任务、素材或服务配置已变化，请重新确认转写拆品');
     const sourceId = current.sourceId, key = `${root}\0${sourceId}`;
     const before = (await readProductAnalysis(root)).analysis;
     const state = { version: 1, id: randomUUID(), sourceId, createdAt: new Date().toISOString(), status: 'running', phase: current.action };

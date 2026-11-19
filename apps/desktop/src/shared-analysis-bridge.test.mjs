@@ -37,6 +37,10 @@ test('normal desktop exposes metadata coordination without using audio, model co
   assert.equal(result.task, null); assert.equal(models, 0);
   assert.deepEqual(f.calls.map(call => [call.endpoint, call.options.body]), [['/shared-analysis/status', { taskKey }]]);
   assert.equal(JSON.stringify(result).includes('synthetic-auth-only-main'), false);
+  for (const ownerId of [user.id, 'another-user']) {
+    f.reply({ task: { ownerId, status: 'submitted' } });
+    assert.equal((await services.sharedAnalysis.coordinate('status', { taskKey })).ownedByCaller, ownerId === user.id);
+  }
 });
 
 test('shared task mutations are forwarded once with main-process authorization and a stable coordinator identity', async t => {

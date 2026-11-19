@@ -33,8 +33,22 @@ export function ProductWorkflowConfirmation({ projectId, request, onDone, onClos
     let active = true;
     submitted.current = false;
     setPlan(null); setError(''); setReviewed(false); setBusy(false);
-    void api.productWorkflowPlan(projectId, request).then(value => { if (active) setPlan(value); }, reason => { if (active) setError(String(reason.message ?? reason)); });
-    return () => { active = false; };
+    let timer: ReturnType<typeof setTimeout>;
+    const readPlan = async () => {
+      try {
+        let value = await api.productWorkflowPlan(projectId, request);
+        if (active && request.action === 'discovery' && value.shared?.mode === 'retry-required' && !value.retry && !value.rerun) {
+          value = await api.productWorkflowPlan(projectId, { ...request, retry: true });
+        }
+        if (!active) return;
+        setPlan(value); setError('');
+        if (value.shared?.mode === 'busy') timer = setTimeout(readPlan, 15000);
+      } catch (reason) {
+        if (active) { setPlan(null); setError(String((reason as Error).message ?? reason)); }
+      }
+    };
+    void readPlan();
+    return () => { active = false; clearTimeout(timer); };
   }, [projectId, requestKey, tick]);
   const sharedBusy = plan?.shared?.mode === 'busy';
   const reviewBlocked = plan?.shared?.mode === 'local-review';
@@ -78,7 +92,7 @@ export function ProductWorkflowConfirmation({ projectId, request, onDone, onClos
     {plan && <>
       {combined && <p>整条视频转写后自动识别商品；只有一个品就生成一个品。已有结果会复用，不自动开始话术分析。</p>}
       {plan.newVersion && <p>{plan.rerun ? '重新分析成功并保存后默认使用新版；旧分析和旧结构保留在历史中，失败时继续保留旧版。' : plan.cached ? '已有新版结果，本次不重复请求；当前工程继续使用原版本，请在版本列表中手动采用。' : '本次将生成新的共享版本，需要新请求；当前工程继续使用原版本，完成后由你决定是否采用。'}</p>}
-      {!combined && <p>{reviewBlocked ? '分段已完成，待核对字幕接缝，无需重新转写。' : publishOnly ? '仅补存共享结果，不请求模型。' : sharedBusy ? '同事正在处理，等待共享结果。' : sharedReuse ? '复用共享结果，不请求模型。' : plan.cached ? '复用已保存结果，不请求模型。' : request.action === 'transcription' ? '将整条原视频的音频转成文字，完成后保存；不会自动拆品或分析。' : visualRequests > 0 ? '分析所选讲解的文字，并发送抽帧进行看图核查。' : '仅发送转写文字、时间和识别指令。'}</p>}
+      {!combined && !sharedBusy && <p>{reviewBlocked ? '分段已完成，待核对字幕接缝，无需重新转写。' : publishOnly ? '仅补存共享结果，不请求模型。' : sharedReuse ? '复用共享结果，不请求模型。' : plan.cached ? '复用已保存结果，不请求模型。' : request.action === 'transcription' ? '将整条原视频的音频转成文字，完成后保存；不会自动拆品或分析。' : visualRequests > 0 ? '分析所选讲解的文字，并发送抽帧进行看图核查。' : '仅发送转写文字、时间和识别指令。'}</p>}
       {plan.shared?.reason && <p>{plan.shared.reason}</p>}
       <p className="break-all">素材：{plan.source.assetPath}</p>
       <p>范围：{sourceTime(from)} – {sourceTime(to)}</p>
@@ -91,9 +105,9 @@ export function ProductWorkflowConfirmation({ projectId, request, onDone, onClos
         {!plan.visual.enabled && !plan.cached && !sharedReuse && <p>AI 看图未配置：本次只做文字分析，画面仍待核查。{plan.visual.error}</p>}
       </>}
       {(!plan.cached || !!plan.nextStage) && !publishOnly && !sharedBusy && (plan.cost.uncertain || !!plan.nextStage) && <p className="text-[var(--text-muted)]">本次请求可能计费，费用以服务账单为准。</p>}
-      {plan.rerun && !plan.cached && !publishOnly && <p>本次重新分析会产生新请求；人工修正和取用修改保留。</p>}
-      {plan.retryRequired && !reviewBlocked && <label className="flex items-start gap-2"><input type="checkbox" aria-label="已核查服务记录，确认显式重试" checked={reviewed} onChange={event => setReviewed(event.target.checked)} />已核查服务记录，确认重试未完成部分，可能再次计费</label>}
-      {(plan.error || (!plan.enabled && !plan.cached && !publishOnly && !sharedBusy && !reviewBlocked)) && <p role="alert" className="text-red-400">{plan.error || plan.service.error || '请先在设置中配置此服务。已有结果仍保留。'}</p>}
+      {!sharedBusy && plan.rerun && !plan.cached && !publishOnly && <p>本次重新分析会产生新请求；人工修正和取用修改保留。</p>}
+      {plan.retryRequired && !sharedBusy && !reviewBlocked && <label className="flex items-start gap-2"><input type="checkbox" aria-label="已核查服务记录，确认显式重试" checked={reviewed} onChange={event => setReviewed(event.target.checked)} />{request.action === 'discovery' ? '已确认原任务停止，按上方请求次数重试，可能再次计费' : '已核查服务记录，确认重试未完成部分，可能再次计费'}</label>}
+      {(!sharedBusy && plan.error || (!plan.enabled && !plan.cached && !publishOnly && !sharedBusy && !reviewBlocked)) && <p role="alert" className="text-red-400">{plan.error || plan.service.error || '请先在设置中配置此服务。已有结果仍保留。'}</p>}
       <details aria-label="请求详情" className="text-[var(--text-muted)]">
         <summary className="cursor-pointer transition-colors hover:text-[var(--accent)]">请求与费用详情</summary>
         <div className="mt-2 space-y-2 animate-in fade-in slide-in-from-top-1 duration-150">

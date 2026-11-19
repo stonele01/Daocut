@@ -236,7 +236,7 @@ export function createCompanyClient({ dataDir, appVersion, platform = process.pl
       const identity = { serverUrl: profile.serverUrl, userId: current.user?.id, epoch };
       if (!identity.userId) { await assertSession(); identity.userId = current.user?.id; }
       const result = await authenticated('/shared-analysis/' + action, { method: 'POST', body }, identity);
-      return { ...result, coordinationId };
+      return { ...result, coordinationId, ...(action === 'status' && result.task ? { ownedByCaller: result.task.ownerId === identity.userId } : {}) };
     },
     transportProfile: () => profile ? structuredClone(profile) : null,
     configure(input) {
