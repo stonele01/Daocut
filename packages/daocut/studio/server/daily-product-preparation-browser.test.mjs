@@ -27,9 +27,11 @@ test('daily preparation keeps transcription separate from explicit product disco
         enabled:true,cached:fixture.reuse,requestCount:fixture.reuse?0:1,reusedRequests:fixture.reuse?1:0,
         service:{name:'模拟服务',model:'fake',endpoint:'local://fake'},cost:{basis:'模拟请求',uncertain:false},
         ...(fixture.reuse ? {shared:{mode:'reuse',result:{sha256:'a'.repeat(64)}}}:{}),
-        retryRequired:fixture.state(request.sourceId).transcription.status==='failed', identity:'fixture-plan' }},
+        retryRequired:fixture.state(request.sourceId).transcription.status==='failed', identity:'fixture-plan',
+        ...(fixture.discoveryMode ? { shared:{mode:fixture.discoveryMode}, enabled:fixture.discoveryMode !== 'busy',
+          retryRequired:fixture.discoveryMode === 'retry-required', requestCount:fixture.discoveryMode === 'busy' ? 0 : 29 } : {}) }},
       executeProductWorkflow: async (_,plan,reviewed) => {
-        fixture.calls.push({prepare:plan.prepare,action:plan.action,sourceId:plan.sourceId,reviewed,requestCount:plan.requestCount});
+        fixture.calls.push({prepare:plan.prepare,action:plan.action,sourceId:plan.sourceId,reviewed,retry:plan.retry,requestCount:plan.requestCount});
         if(fixture.hold) await new Promise(resolve=>fixture.pending=resolve);
         if(fixture.fail) {fixture.state(plan.sourceId).transcription={status:'failed',error:'提交状态不明'};throw Error('提交状态不明，请先核查');}
         if(fixture.accepted){Object.assign(fixture.state(plan.sourceId),{busy:true,transcription:{status:'running'},shared:{mode:'busy',reason:'共享任务未完成，请核查记录；不会自动重发请求'}});return;}
@@ -122,6 +124,30 @@ test('daily preparation keeps transcription separate from explicit product disco
       await page.getByText('转写已就绪',{exact:true}).waitFor();
       assert.equal(await page.evaluate(()=>window.fixture.calls.length),1);
       assert.equal(await page.evaluate(()=>window.fixture.calls.reduce((n,x)=>n+x.requestCount,0)),0);
+    });
+    await t.test('waiting discovery polls without submitting and the owner can explicitly confirm the recovery plan', async () => {
+      await page.clock.install();
+      await open();
+      await page.evaluate(() => {
+        window.fixture.state('a').transcription.status = 'complete';
+        window.fixture.discoveryMode = 'busy';
+        window.fixture.refresh();
+      });
+      await page.getByRole('button', { name: '继续拆品', exact: true }).click();
+      const dialog = page.getByRole('dialog', { name: '确认拆品' });
+      await dialog.getByText('新增请求 0 次', { exact: true }).waitFor();
+      assert.equal(await dialog.getByRole('button', { name: '等待共享结果' }).isDisabled(), true);
+      await page.evaluate(() => { window.fixture.discoveryMode = 'retry-required'; });
+      await page.clock.fastForward(16000);
+      await dialog.getByText('新增请求 29 次', { exact: true }).waitFor();
+      const confirm = dialog.getByRole('button', { name: '确认拆品', exact: true });
+      assert.equal(await confirm.isDisabled(), true);
+      assert.equal(await page.evaluate(() => window.fixture.calls.length), 0);
+      await dialog.getByRole('checkbox').check();
+      await confirm.click();
+      assert.deepEqual(await page.evaluate(() => window.fixture.calls), [
+        { prepare: true, action: 'discovery', sourceId: 'a', reviewed: true, retry: true, requestCount: 29 },
+      ]);
     });
   }finally{await browser?.close();await new Promise(resolve=>server.close(resolve));}
 });

@@ -67,11 +67,11 @@ test('combined selected plans make one editable Jianying draft in plan order, wi
   const clips = draft.tracks.filter(track => track.type === 'video').flatMap(track => track.segments);
   assert.deepEqual(clips.map(c => c.speed), [1.3, 2]);
   assert.deepEqual(clips.map(c => c.source_timerange.start), [0, 0]);
-  assert.deepEqual(clips.map(c => c.target_timerange), [{ start: 0, duration: 1000000 }, { start: 1000000, duration: 500000 }]);
-  assert.equal(draft.duration, 1500000);
+  assert.deepEqual(clips.map(c => c.target_timerange), [{ start: 0, duration: 1000000 }, { start: 2000000, duration: 500000 }]);
+  assert.equal(draft.duration, 2500000);
   assert.deepEqual(draft.materials.texts.map(c => JSON.parse(c.content).text), ['公共第一条', '个人第二条']);
   const captions = draft.tracks.filter(track => track.type === 'text').flatMap(track => track.segments);
-  assert.deepEqual(captions.map(c => c.target_timerange.start), [0, 1000000]);
+  assert.deepEqual(captions.map(c => c.target_timerange), [{ start: 0, duration: 1000000 }, { start: 2000000, duration: 500000 }]);
   assert.equal((await readdir(join(batch.storageFolder, '_media'))).filter(name => name.endsWith('.mp4')).length, 2);
   const ledger = JSON.parse(await readFile(join(f.root, '.film/structure-export-batches', `${batch.id}.json`), 'utf8'));
   const recovered = await materializeCombinedExport(ledger.items[0].snapshot, { materialize: materializeStructureExport, mediaRoot: join(batch.storageFolder, '_media'), mediaCache: new Map() });

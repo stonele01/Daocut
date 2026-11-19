@@ -699,7 +699,7 @@ export function ExportCenter(props: ExportCenterProps) {
                   <div className="flex flex-wrap gap-2" role="group" aria-label="工程方式">
                     {(['separate', 'combined'] as const).map(mode => <button key={mode} type="button" disabled={Boolean(working)} aria-pressed={batchMode === mode} onClick={() => { setBatchMode(mode); setResult(null); }} style={batchMode === mode ? { borderColor: 'var(--accent)', backgroundColor: 'var(--accent)', color: 'var(--on-accent)' } : undefined} className="flex items-center gap-1.5 rounded-lg border border-[var(--border)] px-3 py-2 text-[13px] transition duration-150 hover:bg-[var(--bg-hover)] active:scale-95 disabled:opacity-40"><Check size={13} className={`transition-opacity duration-150 ${batchMode === mode ? 'opacity-100' : 'opacity-0'}`} />{mode === 'separate' ? '每条一个工程' : '合并到一个工程'}</button>)}
                   </div>
-                  <p className="mt-2 text-[12px] leading-relaxed text-[var(--text-muted)]">{batchMode === 'combined' ? '新建一个剪映工程，保留每条方案的片段、字幕和倍速。画布使用第一条方案的尺寸。' : '保持当前方式，每条方案生成独立的剪映工程。'}</p>
+                  <p className="mt-2 text-[12px] leading-relaxed text-[var(--text-muted)]">{batchMode === 'combined' ? '相邻方案之间留 1 秒空白。保留每条方案的片段、字幕和倍速，画布使用第一条方案的尺寸。' : '保持当前方式，每条方案生成独立的剪映工程。'}</p>
                 </Field>
                 <Field label="导出到">
                   <div className="flex gap-2">

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { createSharedAnalysis } from './shared-analysis.mjs';
 import fs from 'node:fs';
@@ -130,6 +130,29 @@ test('interrupted submitted attempt can explicitly recover on reopen without aut
   const reopened = f.make(), q = await reopened.prepare(f.roots[0], f.source, f.input);
   assert.equal(q.mode, 'retry-required'); await assert.rejects(reopened.acquire(q));
   assert.notEqual((await reopened.acquire(q, { retryAcknowledged: true })).attemptId, claim.attemptId);
+});
+test('expired discovery activity offers reviewed recovery and a superseded worker cannot send its next window', async t => {
+  const f = await fixture(t);
+  const client = () => f.make({ coordinate: async (op, body) => ({ ...await f.options.coordinate(op, body), ownedByCaller: true }) });
+  const writer = client(), reader = client();
+  const descriptor = await writer.prepare(f.roots[0], f.source, f.input);
+  const { attemptId } = await writer.acquire(descriptor);
+  const activity = await writer.watchDiscovery(descriptor, attemptId);
+  try {
+    const old = new Date(Date.now() - 11 * 60 * 1000);
+    f.coordinator.tasks.get(descriptor.taskKey).updatedAt = old.toISOString();
+    const [marker] = (await readdir(f.results)).filter(name => name.endsWith('.active'));
+    await utimes(join(f.results, marker), old, old);
+    const plan = () => reader.prepare(f.roots[1], f.source, f.input);
+    const stalePlan = await plan();
+    assert.equal(stalePlan.mode, 'retry-required');
+    await activity.check();
+    assert.equal((await plan()).mode, 'busy');
+    await assert.rejects(reader.acquire(stalePlan, { retryAcknowledged: true }), /恢复运行/);
+    await utimes(join(f.results, marker), old, old);
+    await reader.acquire(await plan(), { retryAcknowledged: true });
+    await assert.rejects(activity.check(), /任务已变更/);
+  } finally { await activity.stop(); }
 });
 test('company or result mapping change cannot publish outbox into another destination', async t => {
   const f = await fixture(t); let company = 'company-a', writes = 0;

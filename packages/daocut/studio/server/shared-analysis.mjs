@@ -1,7 +1,7 @@
 /** Shared AI baselines only. Personal edits and film documents never enter this store. */
 import { createHash, randomUUID } from 'node:crypto';
 import { mediaContentHash } from '../../src/shared-media-reference.mjs';
-import { mkdir, readFile, readdir, realpath, stat, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, realpath, stat, unlink, utimes, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { writeAtomic } from './atomic.mjs';
 import { sharedMediaManifest } from './shared-media.mjs';
@@ -18,6 +18,9 @@ const inside = (root, path) => { const part = relative(root, path); return !isAb
 const readJson = async path => { try { return JSON.parse(await readFile(path, 'utf8')); } catch (e) { if (e.code === 'ENOENT') return null; throw new HttpError(409, '共享结果记录无法读取，已保留原文件'); } };
 const saveLocal = async (root, key, value) => { const path = fileFor(root, key); await mkdir(dirname(path), { recursive: true }); await writeAtomic(path, `${JSON.stringify(value)}\n`); };
 const guardCoordinator = value => value ? { expectedCoordinatorId: value } : {};
+const discoveryGraceMs = 10 * 60 * 1000;
+const activityPath = (root, taskKey, attemptId) => join(root, `.discovery-${sharedHash([taskKey, attemptId])}.active`);
+const recentDiscoveryActivity = stamp => Date.now() - stamp < discoveryGraceMs;
 const localReview = { mode: 'local-review', status: 'review-required', reason: '分段音频已完成，接缝需原分析者在本机核对；不会重新上传。跨电脑接缝原始结果导入暂未接通' };
 
 /** Probe only before a new paid shared task or explicit folder initialization, never while reusing results. */
@@ -38,6 +41,14 @@ export async function probeSharedResultWritable(root) {
 
 export function createSharedAnalysis({ coordinate, settings = () => readPrefs().sharedAnalysis, readManifest = sharedMediaManifest, resolveSource = productSourcePath, publishFile = writeAtomic } = {}) {
   const active = new Set();
+  async function discoveryActive(descriptor, attemptId) {
+    if (active.has(descriptor.taskKey)) return true;
+    try {
+      const root = await realpath(descriptor.resultRoot);
+      const signal = await stat(activityPath(root, descriptor.taskKey, attemptId)).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
+      return !!signal && recentDiscoveryActivity(signal.mtimeMs);
+    } catch { throw new HttpError(409, '无法核查共享目录中的拆品状态，请恢复目录连接后重新读取计划'); }
+  }
   async function mapping(libraryId) {
     const config = await settings();
     const root = config?.enabled && config.resultRoots?.find(item => item.libraryId === libraryId)?.root;
@@ -122,9 +133,22 @@ export function createSharedAnalysis({ coordinate, settings = () => readPrefs().
       if (value.dataHash !== descriptor.dataHash) return { ...descriptor, mode: 'local-only', reason: '当前转写或范围与共享首版不同；新分析仅保存在本机，不覆盖共享结果' };
       return { ...descriptor, mode: 'reuse', status: 'complete', result: { ...task.result, service: value.service }, reason: '复用首次保存的共享 AI 结果；人工修改仍只保存在本机' };
     }
-    const interrupted = saved && !active.has(descriptor.taskKey) && (saved.attemptId === task.attemptId || saved.status === 'claiming');
+    const localAttempt = saved?.attemptId === task.attemptId && !!task.attemptId;
+    if (action === 'discovery' && ['claimed', 'submitted'].includes(task.status)) {
+      const running = await discoveryActive(descriptor, task.attemptId);
+      const lastUpdate = Date.parse(task.updatedAt);
+      const pastGrace = Number.isFinite(lastUpdate) ? !recentDiscoveryActivity(lastUpdate) : localAttempt;
+      const canRecover = !running && pastGrace && (response.ownedByCaller ?? localAttempt) && task.inputHash === descriptor.inputHash;
+      const reason = canRecover ? '共享拆品尚无结果。请先核查原电脑是否已停止，以及原工程是否已有结果可补保存。确认重试可能再次计费。'
+        : running ? '共享拆品仍在运行，完成后会自动刷新。'
+        : task.inputHash !== descriptor.inputHash ? '原共享拆品的输入或设置与当前工程不同，请回原工程核查并恢复。'
+        : response.ownedByCaller === false ? '共享拆品尚无结果。若原任务已停止，请发起人登录原账号核查并恢复。这里会自动刷新。'
+        : '共享拆品已登记，正在等待结果。这里会自动刷新。';
+      return { ...descriptor, attemptId: task.attemptId, mode: canRecover ? 'retry-required' : 'busy', status: task.status, reason };
+    }
+    const interrupted = saved && response.ownedByCaller !== false && !active.has(descriptor.taskKey) && (localAttempt || saved.status === 'claiming');
     const retry = ['uncertain', 'failed'].includes(task.status) || interrupted;
-    return { ...descriptor, attemptId: task.attemptId, mode: retry ? 'retry-required' : 'busy', status: task.status, reason: retry ? '共享任务未完成，核查后才能明确重试，可能再次计费' : '已有同事正在处理，等待共享结果；不会再次提交请求' };
+    return { ...descriptor, attemptId: task.attemptId, mode: retry ? 'retry-required' : 'busy', status: task.status, reason: retry ? '共享任务未完成，核查后才能明确重试，可能再次计费' : '共享任务已领取，尚未收到结果。请在发起任务的原工程查看进度或恢复任务，保存后在这里重新读取计划。' };
   }
   async function prepareExisting(root, source, artifact, { allowRetry = false } = {}) {
     const identity = await sourceIdentity(root, source);
@@ -196,11 +220,17 @@ export function createSharedAnalysis({ coordinate, settings = () => readPrefs().
     descriptor.coordinationId = await coordinatorFor(descriptor.libraryId, descriptor.coordinationId);
     if (await mapping(descriptor.libraryId) !== descriptor.resultRoot) throw new HttpError(409, '共享结果目录已变化，未提交分析');
     await probeSharedResultWritable(descriptor.resultRoot);
+    if (descriptor.action === 'discovery' && descriptor.mode === 'retry-required' && ['claimed', 'submitted'].includes(descriptor.status) && await discoveryActive(descriptor, descriptor.attemptId)) {
+      throw new HttpError(409, '原拆品任务已恢复运行，请等待共享结果');
+    }
     // A retry keeps the catalog and version association recorded by the original claim.
     const body = { taskKey: descriptor.taskKey, inputHash: descriptor.inputHash, clientAttemptId: randomUUID(), ...(descriptor.catalog && descriptor.mode === 'publish' ? { catalog: descriptor.catalog } : {}), ...(descriptor.newVersion && descriptor.mode === 'publish' ? { familyKey: descriptor.familyKey, baseResultSha256: descriptor.baseResultSha256 } : {}), ...guardCoordinator(descriptor.coordinationId) };
     await saveLocal(descriptor.root, descriptor.taskKey, { sourceId: descriptor.sourceId, descriptor, clientAttemptId: body.clientAttemptId, coordinationId: descriptor.coordinationId, status: 'claiming' });
     const response = await coordinate(descriptor.mode === 'retry-required' ? 'retry' : 'claim', { ...body, ...(descriptor.mode === 'retry-required' ? { expectedAttemptId: descriptor.attemptId, acknowledged: true } : {}) });
-    if (!response.acquired) throw new HttpError(409, '此直播已有共享任务或结果，请刷新后复用，不会重复发送');
+    if (!response.acquired) {
+      await saveLocal(descriptor.root, descriptor.taskKey, { sourceId: descriptor.sourceId, descriptor, coordinationId: descriptor.coordinationId, status: 'not-acquired' });
+      throw new HttpError(409, '此直播已有共享任务或结果，请刷新后复用，不会重复发送');
+    }
     const attemptId = response.task.attemptId, coordinationId = response.coordinationId ?? descriptor.coordinationId;
     descriptor.coordinationId = coordinationId;
     await saveLocal(descriptor.root, descriptor.taskKey, { sourceId: descriptor.sourceId, descriptor, attemptId, coordinationId, status: 'claimed' });
@@ -209,6 +239,29 @@ export function createSharedAnalysis({ coordinate, settings = () => readPrefs().
     await saveLocal(descriptor.root, descriptor.taskKey, { sourceId: descriptor.sourceId, descriptor, attemptId, coordinationId, status: 'submitted' });
     active.add(descriptor.taskKey);
     return { attemptId, coordinationId };
+  }
+  async function watchDiscovery(descriptor, attemptId) {
+    const path = activityPath(await realpath(descriptor.resultRoot), descriptor.taskKey, attemptId);
+    await writeFile(path, '', { flag: 'wx' });
+    const touch = () => {
+      const now = new Date();
+      return utimes(path, now, now);
+    };
+    // Close each update so another SMB client can observe it during long provider calls.
+    const timer = setInterval(() => { void touch().catch(() => {}); }, 30000);
+    timer.unref();
+    return {
+      async check() {
+        const { task } = await coordinate('status', { taskKey: descriptor.taskKey, ...guardCoordinator(descriptor.coordinationId) });
+        if (task?.attemptId !== attemptId || task.status !== 'submitted') throw new HttpError(409, '原拆品任务已变更，请刷新共享状态');
+        await touch();
+      },
+      async stop() {
+        clearInterval(timer);
+        active.delete(descriptor.taskKey);
+        await unlink(path).catch(() => {});
+      },
+    };
   }
   async function read(root, descriptor) {
     const task = descriptor.result ? { result: descriptor.result } : (await coordinate('status', { taskKey: descriptor.taskKey })).task;
@@ -363,5 +416,5 @@ export function createSharedAnalysis({ coordinate, settings = () => readPrefs().
     if (!identity || identity.localOnly) return null;
     return { sourceIdentity: sharedHash(identity), directory: join(await mapping(identity.libraryId), 'product-layouts', sharedHash(identity)) };
   }
-  return { layoutLocation, prepare, prepareExisting, resumeExisting, history, historicalArtifact, pinHistorical, acquire, read, complete, publish, fail, markReview, status, versions, adoption, validateSource, pendingAdoption, pendingAdoptions, commitAdoption, reconcileAdoptions, recoverable, recover };
+  return { layoutLocation, prepare, prepareExisting, resumeExisting, history, historicalArtifact, pinHistorical, acquire, watchDiscovery, read, complete, publish, fail, markReview, status, versions, adoption, validateSource, pendingAdoption, pendingAdoptions, commitAdoption, reconcileAdoptions, recoverable, recover };
 }

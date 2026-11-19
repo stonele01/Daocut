@@ -8,7 +8,12 @@ import { subtitlesForExport } from './captions.mjs';
 import { filmSubtitleShown } from './film-subtitle.mjs';
 
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-const revisionOf = parts => hash(parts.map(part => [part.root, part.revision]));
+const planGapSeconds = 1;
+const revisionOf = (parts, gapSeconds) => {
+  const revisions = parts.map(part => [part.root, part.revision]);
+  // Batches saved before timeline gaps were introduced must still resume their original edit.
+  return hash(gapSeconds === undefined ? revisions : { revisions, gapSeconds });
+};
 const hashFile = async file => { const h = createHash('sha256'); for await (const bytes of createReadStream(file)) h.update(bytes); return h.digest('hex'); };
 
 export async function captureCombinedExport(project, { selected, itemRoot, capture }) {
@@ -19,12 +24,12 @@ export async function captureCombinedExport(project, { selected, itemRoot, captu
     if (resolve(snapshot.root) !== resolve(root) || !snapshot.revision) throw Error('导出快照身份无效');
     parts.push(snapshot);
   }
-  return { kind: 'combined', root: itemRoot, parts, revision: revisionOf(parts), fps: parts[0].fps,
+  return { kind: 'combined', root: itemRoot, parts, gapSeconds: planGapSeconds, revision: revisionOf(parts, planGapSeconds), fps: parts[0].fps,
     origin: parts.every(part => part.origin === parts[0].origin) ? parts[0].origin : 'mixed' };
 }
 
 export async function materializeCombinedExport(snapshot, { materialize, ...options }) {
-  if (!snapshot.parts?.length || snapshot.revision !== revisionOf(snapshot.parts)
+  if (!snapshot.parts?.length || snapshot.revision !== revisionOf(snapshot.parts, snapshot.gapSeconds)
     || snapshot.parts.some(part => resolve(dirname(part.root)) !== resolve(snapshot.root) || !/^\d+$/.test(part.root.split(/[\\/]/).at(-1)))) throw Error('合并导出版本不匹配');
   // Reuse range extraction, verification and the same media cache for every plan.
   const prepared = [];
@@ -36,6 +41,7 @@ export async function materializeCombinedExport(snapshot, { materialize, ...opti
     const tracks = [], cues = [], sources = new Map();
     let canvas, offset = 0, serial = 0;
     for (const [index, part] of prepared.entries()) {
+      if (index > 0) offset += snapshot.gapSeconds ?? 0;
       const root = part.exportRoot ?? part.root;
       const film = readFilmFile(await fs.readFile(join(root, 'film.html'), 'utf8')).value;
       if (!film) throw Error('固定方案无法读取');
