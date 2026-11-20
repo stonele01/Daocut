@@ -225,25 +225,36 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
     try {
       fingerprint = await sourceFingerprint(root, source);
       transcript = await readTranscript(root, source);
-      identityValue = await publicModelIdentity();
-      identityHash = identityValue ? hash(canonical(textResultCacheIdentity(identityValue))) : null;
-      sourceInput = await sourceInputIdentity(root, source, transcript, identityHash);
-      transcriptDigest = sourceInput?.transcript ?? transcriptHash(transcript);
+      transcriptDigest = transcriptHash(transcript);
       readable = true;
       if (transcription.status === 'complete' && (!transcript || state.transcription.sourceFingerprint !== fingerprint || state.transcription.transcriptHash !== transcriptDigest)) Object.assign(transcription, { status: 'idle', error: '素材或字幕已变化，请重新检查转写' });
       if (transcript) {
         // The chat task only needs status; do not send the full source transcript to it.
         transcription.segments = scope ? [] : segmentsOf(transcript);
-        if (transcription.status === 'idle' || ((transcript.localReconciled || transcript.recoveredFromResponse) && state.transcription.status !== 'running')) {
+        if (transcription.status === 'idle' || (!active && transcript.cached === true) || ((transcript.localReconciled || transcript.recoveredFromResponse) && state.transcription.status !== 'running')) {
           transcription.status = 'complete';
           delete transcription.code; delete transcription.error; delete transcription.localReviewRequired; delete transcription.retryBlocked;
         }
       }
     } catch (error) {
       if (error.code === 'ASR_BOUNDARY_REVIEW') Object.assign(transcription, { status: 'failed', code: 'ASR_BOUNDARY_REVIEW', localReviewRequired: true, retryBlocked: false, error: '分段转写已保存，接缝待核对；无需重新上传音频' });
-      else if (transcription.status !== 'running' && transcription.code !== 'ASR_BOUNDARY_REVIEW') Object.assign(transcription, { status: 'failed', error: '转写不可读取或上次提交状态不确定' });
+      else if (!active && error.code === 'ASR_SUBMISSION_UNCERTAIN') {
+        Object.assign(transcription, { status: 'failed', code: error.code, retryBlocked: true, error: '上次转写有提交记录，尚未找到完整结果。请先核查服务记录，再决定是否重试。' });
+      } else if (!active && transcription.code !== 'ASR_BOUNDARY_REVIEW') {
+        const message = !fingerprint ? '无法读取原视频。请检查工程中的原片能否播放、共享盘是否已连接，然后刷新。'
+          : error.code === 'ASR_BINDING_REQUIRED' ? '发现已有字幕，请核对字幕来源并关联到这条原片。'
+          : error.code === 'EXISTING_ASR_IMPORT_INCOMPLETE' ? '共享字幕尚未完整导入，请恢复导入。'
+          : '无法读取当前原片的转写记录。请检查工程字幕文件的完整性和读取权限，然后刷新。';
+        Object.assign(transcription, { status: 'failed', code: 'ASR_READ_BLOCKED', error: message });
+      }
     }
-    if (!active && transcription.status === 'running') Object.assign(transcription, { status: 'failed', error: '任务中断，提交状态不确定，请先核查后再操作' });
+    if (readable) {
+      identityValue = await publicModelIdentity();
+      identityHash = identityValue ? hash(canonical(textResultCacheIdentity(identityValue))) : null;
+      try { sourceInput = await sourceInputIdentity(root, source, transcript, identityHash); }
+      catch { readable = false; }
+    }
+    if (!active && transcription.status === 'running') Object.assign(transcription, { status: 'failed', retryBlocked: true, error: '任务中断，提交状态不确定，请先核查后再操作' });
     const ids = new Set(scope ? [scope.intervalId] : [...Object.keys(state.analyses), ...ranges.map(range => range.id)]);
     const resultRangeIds = new Set(Object.values(state.results ?? {}).map(item => item.intervalId));
     for (const rangeId of ids) {
@@ -262,7 +273,7 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
       // scope and its candidates without changing the shared AI input or times.
       const historicalEditable = saved.status === 'complete' && /^[a-f0-9]{64}$/.test(saved.historicalRef?.sha256 ?? '') && saved.currentRunId === `historical-${saved.historicalRef.sha256}` && range?.kind === 'historical-analysis' && saved.sourceFingerprint === fingerprint && saved.rangeStartMs === range.startMs && saved.rangeEndMs === range.endMs;
       const item = { ...(cached && !['running', 'failed'].includes(saved.status) ? cached : saved), ...(historicalEditable ? { productId: range.productId } : {}), stale: true, legacyEditable: legacyEditable(saved, range, source, fingerprint), historicalEditable };
-      if (item.status === 'running' && (!active || state.analysis.intervalId !== rangeId)) Object.assign(item, { status: 'failed', error: '任务中断，提交状态不确定，请先核查后再操作' });
+      if (item.status === 'running' && (!active || state.analysis.intervalId !== rangeId)) Object.assign(item, { status: 'failed', retryBlocked: true, error: '任务中断，提交状态不确定，请先核查后再操作' });
       if (item.status === 'failed') {
         const failedWindow = state.attempts[item.attemptId]?.windows?.find(window => window.status === 'failed');
         if (failedWindow?.error === 'MODEL_INCOMPLETE') item.error = textResponseIncompleteMessage(failedWindow.receipt);
@@ -322,7 +333,8 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
     if (type === 'analysis' && expected?.visualIdentity && hash(canonical(expected.visualIdentity)) !== hash(canonical((await visualDescription()).identity))) throw new HttpError(409, '画面理解模型在确认期间变化，请重新核对本次请求');
     if (type === 'analysis' && expected?.inputIdentity && expected.inputIdentity !== existing.analysisPlan?.inputIdentity) throw new HttpError(409, '商品段、转写或模型配置在确认期间发生变化，请重新核对请求。');
     if (type === 'analysis' && expected && existing.analysis.status === 'failed' && !expected.retryFailed && !rerun) throw new HttpError(409, '上次结构分析失败或提交状态不确定；不会自动重试。核查后请明确重试本段结构。');
-    if (type === 'transcription' && state[type].retryBlocked && !retryUncertain) throw new HttpError(409, '上次转写可能已提交，不能自动重试，请先核查服务状态');
+    if (type === 'transcription' && existing.transcription.code === 'ASR_READ_BLOCKED') throw new HttpError(409, existing.transcription.error);
+    if (type === 'transcription' && existing.transcription.retryBlocked && !retryUncertain) throw new HttpError(409, '上次转写可能已提交，不能自动重试，请先核查服务状态');
     if (type === 'transcription') {
       if (existing.transcription.status === 'complete') return existing;
     }

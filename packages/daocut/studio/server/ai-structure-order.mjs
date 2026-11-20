@@ -46,7 +46,7 @@ export function inspectAiOrderInput(engineInput) {
   const openingIds = eligible.filter(item => item.review.roles.length && !item.review.roles.includes('purchase') && !item.review.requires.length).map(item => item.candidateId);
   if (!openingIds.length) issues.push({ code: 'AI_ORDER_OPENING_REQUIRED', message: '没有已确认且无需前置话术的非逼单开头。' });
   if (!eligible.some(item => item.review.roles.includes('core'))) issues.push({ code: 'AI_ORDER_CORE_REQUIRED', message: '没有已确认的完整卖点话术。' });
-  if (!eligible.some(item => item.review.roles.includes('purchase'))) issues.push({ code: 'AI_ORDER_PURCHASE_REQUIRED', message: '没有已确认的购买逼单结尾。' });
+  if (!engineInput.flexibleClosing && !eligible.some(item => item.review.roles.includes('purchase'))) issues.push({ code: 'AI_ORDER_PURCHASE_REQUIRED', message: '没有已确认的购买逼单结尾。' });
   return { ...inspected, version: AI_STRUCTURE_ORDER_VERSION, inputHash: hash([AI_STRUCTURE_ORDER_VERSION, SPEED, inspected.inputHash, reviewItems.map(item => [item.candidateId, item.issues])]),
     ready: openingIds.length > 0 && !issues.some(issue => ['SCOPE_INVALID', 'AI_ORDER_CORE_REQUIRED', 'AI_ORDER_PURCHASE_REQUIRED'].includes(issue.code)),
     materialComplete: inspected.materialComplete && !issues.length, eligibleCount: eligible.length, openingIds, issues, reviewItems };
@@ -76,7 +76,7 @@ export function createAiOrderRequest(input, { previous = [], openingIds = [], fe
     openingIds: targets, units, previous, feedback,
     ...(visual ? { visualReview: { status: visual.status, issues: visual.issues ?? [] } } : {}) };
   const request = { system: AI_STRUCTURE_ORDER_PROMPT, input: JSON.stringify(body) };
-  if (Buffer.byteLength(request.system + request.input, 'utf8') > 128000) throw Object.assign(Error('本轮完整话术与覆盖记录超过输入预算，请缩小本轮开头范围；未截断话术或发送请求'), { code: 'AI_STRUCTURE_INPUT_TOO_LARGE' });
+  if (!input.engineInput.flexibleClosing && Buffer.byteLength(request.system + request.input, 'utf8') > 128000) throw Object.assign(Error('本轮完整话术与覆盖记录超过输入预算，请缩小本轮开头范围；未截断话术或发送请求'), { code: 'AI_STRUCTURE_INPUT_TOO_LARGE' });
   return request;
 }
 
@@ -138,7 +138,8 @@ function checkedSequences(input, sequences, inspected) {
       chosen.push(item);
     }
     const coreIds = unique(clips.flatMap(clip => clip.coreIds));
-    if (!clips.at(-1)?.roles.includes('purchase') || coreIds.length < 1 || coreIds.length > 2
+    const needsPurchase = !engine.flexibleClosing || inspected.reviewItems.some(item => !item.issues.length && item.review.roles.includes('purchase'));
+    if ((needsPurchase && !clips.at(-1)?.roles.includes('purchase')) || coreIds.length < 1 || coreIds.length > 2
       || chosen.some(item => !item.review.roles.length && !chosen.some(other => other.review.requires.includes(item.candidateId)))) {
       reject('AI_ORDER_STRUCTURE', '需要1～2个完整卖点及最后的购买逼单；无作用的上下文只能供有明确依赖的后文使用。'); return;
     }

@@ -363,7 +363,7 @@ test('a colleague discovers an existing v1 public task even without any local re
   acquire: async () => { claims++; throw Error('Must not claim'); } };
   const state = await f.make({ sharedAnalysis: shared }).status(f.root, f.material.scope);
   assert.equal(state.status, 'complete'); assert.equal(state.taskKey, old.key); assert.equal(state.plans[0].speed, 1); assert.equal(reads, 1); assert.equal(claims, 0); assert.equal(f.calls(), 0);
-  assert.deepEqual(probes, ['ai-structure-plans-v7', 'ai-structure-plans-v6', 'ai-structure-plans-v5', 'ai-structure-plans-v4', 'ai-structure-plans-v3', 'ai-structure-plans-v2', old.version]);
+  assert.deepEqual(probes, ['ai-structure-plans-v8', 'ai-structure-plans-v7', 'ai-structure-plans-v6', 'ai-structure-plans-v5', 'ai-structure-plans-v4', 'ai-structure-plans-v3', 'ai-structure-plans-v2', old.version]);
 });
 
 test('an uncertain or unreadable old public task blocks a new paid request and reports the recovery gap', async t => {
@@ -377,7 +377,7 @@ test('an uncertain or unreadable old public task blocks a new paid request and r
     const service = f.make({ sharedAnalysis: shared }), state = await service.status(f.root, f.material.scope);
     assert.ok(['busy', 'unavailable'].includes(state.status)); assert.equal(state.confirmation, undefined); assert.ok(state.issues.some(issue => /已有提交|旧|尚未|无法|核查/.test(issue.message)));
     await service.generate(f.root, { ...f.material.scope, confirmed: true, confirmationId: 'not-valid' });
-    assert.equal(probes, 14); assert.equal(claims, 0); assert.equal(f.calls(), 0);
+    assert.equal(probes, 16); assert.equal(claims, 0); assert.equal(f.calls(), 0);
   });
 });
 
@@ -625,7 +625,7 @@ async function seedRange(f, version, status = 'complete', complete = true) {
 }
 
 for (const version of ['ai-structure-plans-v2', 'ai-structure-plans-v3']) test(`v5 keeps exact ${version} task, input and plan identities beside v1 without implicit upgrade`, async t => {
-  assert.equal(aiStructure.AI_STRUCTURE_VERSION, 'ai-structure-plans-v8');
+  assert.equal(aiStructure.AI_STRUCTURE_VERSION, 'ai-structure-plans-v9');
   const f = await currentFixture(t, async () => orderResponse()), v1 = await seedLegacy(f, 'complete'), v2 = await seedRange(f, version), service = f.make();
   const before = await readFile(v2.path, 'utf8'), initial = await service.status(f.root, f.material.scope);
   assert.equal(initial.version, v2.version); assert.equal(initial.taskKey, v2.key); assert.equal(initial.plans[0].inputHash, v2.inputHash);
@@ -670,7 +670,7 @@ for (const version of ['ai-structure-plans-v2', 'ai-structure-plans-v3']) test(`
   const probes = [];
   const shared = { validateSource: async () => {}, prepareExisting: async (_root, _source, artifact) => {
     probes.push(artifact.payload.kind);
-    if (['ai-structure-plans-v4', 'ai-structure-plans-v5', 'ai-structure-plans-v6', 'ai-structure-plans-v7'].includes(artifact.payload.kind)) return { mode: 'publish', taskKey: 'no-saved-v4' };
+    if (['ai-structure-plans-v4', 'ai-structure-plans-v5', 'ai-structure-plans-v6', 'ai-structure-plans-v7', 'ai-structure-plans-v8'].includes(artifact.payload.kind)) return { mode: 'publish', taskKey: 'no-saved-v4' };
     if (artifact.payload.kind === 'ai-structure-plans-v3' && old.version === 'ai-structure-plans-v2') return { mode: 'publish', taskKey: 'no-saved-v3' };
     assert.equal(artifact.payload.kind, old.version); assert.equal(artifact.payload.key, old.key);
     assert.equal(artifact.payload.requestHash, sharedHash(old.request)); return { mode: 'reuse', taskKey: 'saved-v2-public' };
@@ -678,7 +678,7 @@ for (const version of ['ai-structure-plans-v2', 'ai-structure-plans-v3']) test(`
   acquire: async () => { throw Error('Do not claim'); } };
   const done = await f.make({ sharedAnalysis: shared }).status(f.root, f.material.scope);
   assert.equal(done.status, 'complete'); assert.equal(done.taskKey, old.key); assert.equal(done.plans[0].version, old.version); assert.equal(f.calls(), 0);
-  assert.deepEqual(probes, version === 'ai-structure-plans-v2' ? ['ai-structure-plans-v7', 'ai-structure-plans-v6', 'ai-structure-plans-v5', 'ai-structure-plans-v4', 'ai-structure-plans-v3', version] : ['ai-structure-plans-v7', 'ai-structure-plans-v6', 'ai-structure-plans-v5', 'ai-structure-plans-v4', version]);
+  assert.deepEqual(probes, version === 'ai-structure-plans-v2' ? ['ai-structure-plans-v8', 'ai-structure-plans-v7', 'ai-structure-plans-v6', 'ai-structure-plans-v5', 'ai-structure-plans-v4', 'ai-structure-plans-v3', version] : ['ai-structure-plans-v8', 'ai-structure-plans-v7', 'ai-structure-plans-v6', 'ai-structure-plans-v5', 'ai-structure-plans-v4', version]);
 });
 
 for (const version of ['ai-structure-plans-v2', 'ai-structure-plans-v3']) test(`pending ${version} publication retains its original response and request hash after v5 upgrade`, async t => {

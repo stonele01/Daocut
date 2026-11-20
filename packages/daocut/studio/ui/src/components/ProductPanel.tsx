@@ -1,6 +1,6 @@
 import React from 'react';
 import { api, type LiveAnalysisState, type ProductWorkflowStatus, type SharedProjectOpen } from '@/api';
-import { sourceTime, visibleProducts, savedStructureRange, productAnalysisRange, productResultRanges, productResultCandidates, isRecoveredProduct, type ProductAnalysis, type ProductInterval } from '@/lib/product-analysis';
+import { productId, sourceTime, visibleProducts, savedStructureRange, productAnalysisRange, productResultRanges, productResultCandidates, isRecoveredProduct, type ProductAnalysis, type ProductInterval } from '@/lib/product-analysis';
 import { structureColor } from '@/lib/structure-colors';
 import { displayStructureTag, displayStructureTags, hasStructureTag, productStructureTags } from '@/lib/product-structure-tags';
 import type { WorkspaceResource } from '@/lib/workspace-resources';
@@ -29,7 +29,9 @@ export interface ProductPanelProps {
 const btn = 'rounded border border-white/15 px-2 py-1 text-[11px] transition duration-150 hover:bg-white/10 active:scale-95 disabled:opacity-40';
 const tags = productStructureTags;
 
-function LiveAnalysis({ refreshKey, projectId, sources, ranges: productRanges, sourceId, intervalId, onSelectSource, onSelectRange, onLocate, onAnalysisComplete, onWorkflowStarted, onReviewTranscript, children }: { refreshKey: number; projectId: string; sources: ProductAnalysis['sources']; ranges: ProductAnalysis['intervals']; sourceId: string; intervalId: string; onSelectSource: (id: string) => void; onSelectRange: (id: string) => void; onLocate: ProductPanelProps['onLocate']; onAnalysisComplete: () => Promise<void>; onWorkflowStarted: () => void; onReviewTranscript: (discovery?: boolean) => void; children: (parts: { action: React.ReactNode; transcription: React.ReactNode; feedback: React.ReactNode; details: React.ReactNode }) => React.ReactNode }) {
+type WholeVideoAction = (sourceId: string) => React.ReactNode;
+
+function LiveAnalysis({ wholeVideoAction, refreshKey, projectId, sources, ranges: productRanges, sourceId, intervalId, onSelectSource, onSelectRange, onLocate, onAnalysisComplete, onWorkflowStarted, onReviewTranscript, children }: { wholeVideoAction: WholeVideoAction; refreshKey: number; projectId: string; sources: ProductAnalysis['sources']; ranges: ProductAnalysis['intervals']; sourceId: string; intervalId: string; onSelectSource: (id: string) => void; onSelectRange: (id: string) => void; onLocate: ProductPanelProps['onLocate']; onAnalysisComplete: () => Promise<void>; onWorkflowStarted: () => void; onReviewTranscript: (discovery?: boolean) => void; children: (parts: { action: React.ReactNode; transcription: React.ReactNode; feedback: React.ReactNode; details: React.ReactNode }) => React.ReactNode }) {
   const ranges = productRanges.filter(r => r.sourceId === sourceId);
   const selectedRange = ranges.find(r => r.id === intervalId);
   const [state, setState] = React.useState<LiveAnalysisState | null>(null);
@@ -102,17 +104,19 @@ function LiveAnalysis({ refreshKey, projectId, sources, ranges: productRanges, s
   const reviewTranscript = needsTranscript && !!(state?.transcription.boundaryReview || state?.transcription.code === 'ASR_BOUNDARY_REVIEW');
   const transcribing = state?.transcription.status === 'running';
   const actionLabel = historical ? '历史结果' : runningAnalysis ? '分析中…' : selectedComplete ? '重新分析' : starting ? '提交中…' : selectedAnalysis?.status === 'failed' ? '重试分析' : '分析';
-  const action = <button type="button" className="min-h-9 flex-1 rounded-md border border-[var(--accent)]/60 bg-[var(--accent)]/20 px-4 py-2 text-[12px] font-medium transition duration-150 hover:bg-[var(--accent)]/30 active:scale-[.98] disabled:opacity-50" aria-label={`${actionLabel} ${rangeLabel}`} title={needsTranscript ? '请先完成整条原视频的转写' : `${selectedComplete ? '重新分析此商品段' : '仅分析此商品段'}：${rangeLabel}`} disabled={historical || !state || needsTranscript || analyzing || preparation?.busy || !!confirm || !selectedRange} onClick={() => setConfirm(selectedComplete ? 'rerun' : 'analyze')}>{actionLabel}</button>;
+  const wholeVideoButton = state?.transcription.status === 'complete' && !selectedRange && !analyzing && !preparation?.busy && !confirm ? wholeVideoAction(sourceId) : null;
+  const action = wholeVideoButton ?? <button type="button" className="min-h-9 flex-1 rounded-md border border-[var(--accent)]/60 bg-[var(--accent)]/20 px-4 py-2 text-[12px] font-medium transition duration-150 hover:bg-[var(--accent)]/30 active:scale-[.98] disabled:opacity-50" aria-label={`${actionLabel} ${rangeLabel}`} title={needsTranscript ? '请先完成整条原视频的转写' : `${selectedComplete ? '重新分析此商品段' : '仅分析此商品段'}：${rangeLabel}`} disabled={historical || !state || needsTranscript || analyzing || preparation?.busy || !!confirm || !selectedRange} onClick={() => setConfirm(selectedComplete ? 'rerun' : 'analyze')}>{actionLabel}</button>;
   const source = sources.find(item => item.id === sourceId);
   const preparing = transcribing || preparation?.preparation?.status === 'running' || preparation?.discovery.status === 'running';
   const reviewDiscovery = !needsTranscript && preparation?.needsReview;
   const prepared = !needsTranscript && preparation?.discoveryReady && !reviewDiscovery;
-  const transcriptLabel = reviewTranscript ? '核对转写' : reviewDiscovery ? '核对拆品' : transcribing ? '转写中…' : preparing ? '拆品中…' : needsTranscript ? state?.transcription.status === 'failed' ? '重试转写' : '转写' : '继续拆品';
+  const readBlocked = state?.transcription.code === 'ASR_READ_BLOCKED';
+  const transcriptLabel = readBlocked ? '重新检查原片和字幕' : reviewTranscript ? '核对转写' : reviewDiscovery ? '核对拆品' : transcribing ? '转写中…' : preparing ? '拆品中…' : needsTranscript ? state?.transcription.status === 'failed' ? '重试转写' : '转写' : '继续拆品';
   const transcription = source && <section aria-label="原视频转写" className="-order-2 shrink-0 space-y-2 border-b border-[var(--border)] px-3 py-3 transition duration-150">
     <div className="flex items-center justify-between gap-2"><strong>原视频</strong>{prepared && !preparing && <span className="text-[11px] text-[var(--text-muted)]">商品已准备好</span>}</div>
     <p className="break-all text-[11px] text-[var(--text-muted)]" title={source.assetPath}>{source.assetPath.split(/[\\/]/).at(-1)} · 整条视频{source.durationMs ? ` ${sourceTime(source.durationMs)}` : ''}</p>
-    {state && preparation && (!prepared || preparing) && <button type="button" className="min-h-10 w-full rounded-md border border-blue-600 bg-blue-600 px-4 py-2 text-[13px] font-medium text-white transition duration-150 hover:bg-blue-700 active:scale-[.98] disabled:opacity-50" aria-label={`${transcriptLabel} ${source.assetPath}`} disabled={!!(analyzing || preparing || confirm)} onClick={() => { if (reviewTranscript) onReviewTranscript(); else if (reviewDiscovery) onReviewTranscript(true); else setConfirm('transcribe'); }}>{transcriptLabel}</button>}
-    {state && !prepared && <p role="status" className="text-[11px] text-[var(--text-muted)]">{reviewTranscript ? '分段转写已完成，请核对交界处的字幕。' : reviewDiscovery ? '商品识别已完成，请核对与现有商品范围的差异。' : transcribing ? '正在转写整条视频，完成后保存字幕。' : preparing ? '正在识别商品，完成后显示商品列表。' : !needsTranscript ? '转写已完成，可分析已选范围；需要按商品分段时再拆品。' : '先将整条视频转成文字，完成后再选择分析或拆品。'}</p>}
+    {state && preparation && (!prepared || preparing) && <button type="button" className="min-h-10 w-full rounded-md border border-blue-600 bg-blue-600 px-4 py-2 text-[13px] font-medium text-white transition duration-150 hover:bg-blue-700 active:scale-[.98] disabled:opacity-50" aria-label={`${transcriptLabel} ${source.assetPath}`} disabled={!!(analyzing || preparing || confirm)} onClick={() => { if (readBlocked) setTick(n => n + 1); else if (reviewTranscript) onReviewTranscript(); else if (reviewDiscovery) onReviewTranscript(true); else setConfirm('transcribe'); }}>{transcriptLabel}</button>}
+    {state && !prepared && !readBlocked && <p role="status" className="text-[11px] text-[var(--text-muted)]">{reviewTranscript ? '分段转写已完成，请核对交界处的字幕。' : reviewDiscovery ? '商品识别已完成，请核对与现有商品范围的差异。' : transcribing ? '正在转写整条视频，完成后保存字幕。' : preparing ? '正在识别商品，完成后显示商品列表。' : !needsTranscript ? '转写已完成，可分析已选范围；需要按商品分段时再拆品。' : '先将整条视频转成文字，完成后再选择分析或拆品。'}</p>}
     {state?.transcription.status === 'failed' && !reviewTranscript && state.transcription.error && <p role="alert" className="text-[11px] text-[var(--warn)]">{state.transcription.error}</p>}
     {transcribing && state?.transcription.progress && <p role="status" className="text-[11px]">{state.transcription.progress.phase === 'extracting' ? '正在准备音频' : '正在识别音频'} · 第 {state.transcription.progress.currentSegment}/{state.transcription.progress.totalSegments} 段 · 已完成 {state.transcription.progress.completedSegments} 段</p>}
     {!reviewTranscript && preparation?.preparation?.status === 'failed' && !(preparation.preparation.phase === 'transcription' && !needsTranscript) && <p role="alert" className="text-[11px] text-[var(--warn)]">{preparation.preparation.error}</p>}
@@ -148,6 +152,30 @@ export function ProductPanel(props: ProductPanelProps) {
   const [sharedError, setSharedError] = React.useState('');
   const [refresh, setRefresh] = React.useState(0);
   const [reading, setReading] = React.useState(false);
+  const [wholeRequest, setWholeRequest] = React.useState<{ sourceId: string; productId: string; intervalId: string } | null>(null);
+  const [savingScope, setSavingScope] = React.useState(false);
+  const saving = React.useRef(false);
+  const wholeVideoAction: WholeVideoAction = id => {
+    const data = props.analysis, source = data.sources.find(s => s.id === id);
+    const linked = data.products.filter(p => p.sourceIds.includes(id));
+    if (!source?.durationMs || props.onReturnToProject || linked.length > 1 ||
+        [...data.intervals, ...(data.scopes ?? []), ...(data.unassigned ?? []), ...data.candidates].some(r => r.sourceId === id)) return null;
+    const begin = async () => {
+      if (saving.current) return;
+      saving.current = true; setSavingScope(true); setSharedError('');
+      try {
+        const intervalId = productId(), owner = linked[0]?.id ?? productId();
+        const next = applyProductEdit(data, { type: 'range', id: intervalId, sourceId: id, productId: owner,
+          startMs: 0, endMs: source.durationMs!, ...(linked.length ? {} : { newProductName: source.assetPath.split('/').pop() || '整条视频' }) });
+        await props.onSave(next);
+        props.onSelectProduct(owner);
+        props.onRangeSelectionChange({ sourceId: id, intervalId });
+        setWholeRequest({ sourceId: id, productId: owner, intervalId });
+      } catch (e) { setSharedError(e instanceof Error ? e.message : String(e)); }
+      finally { saving.current = false; setSavingScope(false); }
+    };
+    return <button type="button" className={btn} disabled={savingScope || !!wholeRequest} onClick={() => void begin()}>分析整条视频</button>;
+  };
   const attempted = React.useRef(new Set<string>());
   const sourceId = props.analysis.sources.length === 1 ? props.analysis.sources[0]!.id : props.rangeSelection.sourceId;
   const identity = `${props.projectId}:${sourceId}`;
@@ -195,11 +223,12 @@ export function ProductPanel(props: ProductPanelProps) {
       {sharedOpen?.warnings.map((warning, index) => <p key={index} className="mt-1 text-[var(--warn)]">{warning}</p>)}
       {sharedError && <p>读取已有分析状态失败：{sharedError} <button type="button" className={btn} onClick={() => setRefresh(value => value + 1)}>重试读取</button></p>}
     </div>}
-    <ProductPanelContent key={props.selectedProductId ?? ''} {...props} />
+        {wholeRequest && <ProductWorkflowConfirmation key={wholeRequest.intervalId} projectId={props.projectId} request={{ ...wholeRequest, action: 'analysis' }} onClose={() => setWholeRequest(null)} onDone={async () => { setWholeRequest(null); await props.onAnalysisComplete(); setRefresh(n => n + 1); }} />}
+    <ProductPanelContent panelRefresh={refresh} wholeVideoAction={wholeVideoAction} key={props.selectedProductId ?? ''} {...props} />
   </>;
 }
 
-function ProductPanelContent({ files, currentSourcePath, analysis, selectedProductId, rangeSelection: selected, onRangeSelectionChange: setSelection, onSelectProduct, onSave, onLocate, onAddCandidate, onDragCandidate, onDragCandidateEnd, sharedAdd, projectId, onAnalysisComplete, candidateUnavailable, tag, onTagChange, canDragCandidate, onCompose, onReturnToProject }: ProductPanelProps) {
+function ProductPanelContent({ panelRefresh, wholeVideoAction, files, currentSourcePath, analysis, selectedProductId, rangeSelection: selected, onRangeSelectionChange: setSelection, onSelectProduct, onSave, onLocate, onAddCandidate, onDragCandidate, onDragCandidateEnd, sharedAdd, projectId, onAnalysisComplete, candidateUnavailable, tag, onTagChange, canDragCandidate, onCompose, onReturnToProject }: ProductPanelProps & { panelRefresh: number; wholeVideoAction: WholeVideoAction }) {
   const [error, setError] = React.useState('');
   const [renaming, setRenaming] = React.useState(false);
   const [transcriptRefresh, setTranscriptRefresh] = React.useState(0);
@@ -264,7 +293,7 @@ function ProductPanelContent({ files, currentSourcePath, analysis, selectedProdu
     setShowRecovered(value => !value);
   };
   const dailyEntry = !!analysis.sources.length && !analysis.intervals.length && !analysis.candidates.length;
-  return <LiveAnalysis refreshKey={transcriptRefresh} projectId={projectId} sources={analysis.sources.filter((s) => product?.sourceIds.includes(s.id))} ranges={analysisRanges} sourceId={analysisRange?.sourceId ?? selected.sourceId} intervalId={analysisRange?.id ?? ''} onSelectSource={selectSource} onSelectRange={id => { const range = ranges.find(range => range.id === id); if (range) selectRange(range); else setSelection({ sourceId: selected.sourceId, intervalId: '' }); }} onLocate={onLocate} onAnalysisComplete={onAnalysisComplete} onWorkflowStarted={() => setTranscriptRefresh(value => value + 1)} onReviewTranscript={(discovery = false) => setTranscriptReviewRequest(previous => ({ sourceId: selected.sourceId, id: (previous?.id ?? 0) + 1, kind: discovery ? 'discovery' : 'transcript' }))}>{({ action, transcription, feedback, details }) => <div className="flex min-h-0 flex-1 flex-col overflow-y-auto text-[12px] text-[var(--text)]">
+  return <LiveAnalysis wholeVideoAction={wholeVideoAction} refreshKey={transcriptRefresh + panelRefresh} projectId={projectId} sources={analysis.sources.filter((s) => product?.sourceIds.includes(s.id))} ranges={analysisRanges} sourceId={analysisRange?.sourceId ?? selected.sourceId} intervalId={analysisRange?.id ?? ''} onSelectSource={selectSource} onSelectRange={id => { const range = ranges.find(range => range.id === id); if (range) selectRange(range); else setSelection({ sourceId: selected.sourceId, intervalId: '' }); }} onLocate={onLocate} onAnalysisComplete={onAnalysisComplete} onWorkflowStarted={() => setTranscriptRefresh(value => value + 1)} onReviewTranscript={(discovery = false) => setTranscriptReviewRequest(previous => ({ sourceId: selected.sourceId, id: (previous?.id ?? 0) + 1, kind: discovery ? 'discovery' : 'transcript' }))}>{({ action, transcription, feedback, details }) => <div className="flex min-h-0 flex-1 flex-col overflow-y-auto text-[12px] text-[var(--text)]">
     {!onReturnToProject && transcription}
     <div className="shrink-0 border-b border-[var(--border)] px-3 pb-3 pt-3">
       <div className="mb-2 flex flex-wrap items-center gap-2"><strong className="flex-1">{showRecovered ? '待确认的已有分析' : '商品'}</strong>{pendingProducts.length > 0 && <button type="button" className={btn} aria-expanded={showRecovered} onClick={toggleRecovered}>{showRecovered ? '返回商品列表' : `待确认的已有分析 ${pendingProducts.length}`}</button>}</div>{showRecovered && <p className="mb-2 text-[11px] text-[var(--text-muted)]">这些原分析尚未对应到当前商品，内容已保留，可查看原话后确认归属。</p>}
@@ -309,6 +338,6 @@ function ProductPanelContent({ files, currentSourcePath, analysis, selectedProdu
       </section>
     </>}
     <div className="order-3 shrink-0 border-t border-[var(--border)] px-3 py-2">{onReturnToProject ? <p className="text-[11px] text-[var(--text-muted)]">这里沿用原工程的分析。商品范围和分析在原工程管理，当前个人草稿单独保存。</p> : details}</div>
-    {!onReturnToProject && <div className="order-3 shrink-0 px-3 py-2 transition-all"><ProductDiscovery primaryAction={!transcription} refreshKey={transcriptRefresh} projectId={projectId} files={files} currentSourcePath={currentSourcePath} analysis={analysis} dailyEntry={dailyEntry} transcriptReviewRequest={transcriptReviewRequest} onApplied={async () => { await onAnalysisComplete(); setTranscriptRefresh(value => value + 1); }} onLocate={onLocate} /></div>}
+    {!onReturnToProject && <div className="order-3 shrink-0 px-3 py-2 transition-all"><ProductDiscovery wholeVideoAction={wholeVideoAction} primaryAction={!transcription} refreshKey={transcriptRefresh} projectId={projectId} files={files} currentSourcePath={currentSourcePath} analysis={analysis} dailyEntry={dailyEntry} transcriptReviewRequest={transcriptReviewRequest} onApplied={async () => { await onAnalysisComplete(); setTranscriptRefresh(value => value + 1); }} onLocate={onLocate} /></div>}
   </div>}</LiveAnalysis>;
 }

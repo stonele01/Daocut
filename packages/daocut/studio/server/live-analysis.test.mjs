@@ -323,3 +323,23 @@ test('safe pre-upload failures explain manual retry and never invoke provider', 
     } finally { await rm(root, { recursive: true, force: true }); }
   }
 });
+
+test('status distinguishes a missing source, a readable saved transcript and a pending upload without sending', async () => {
+  const root = await setup();
+  try {
+    let calls = 0, saved = null;
+    const route = createLiveAnalysis({ readTranscript: async () => saved, transcribe: async () => { calls++; } });
+    const dir = resolve(root, '.film/live-analysis');
+    await mkdir(dir, { recursive: true });
+    const file = resolve(dir, createHash('sha256').update('s').digest('hex') + '.json');
+    await writeFile(file, JSON.stringify({ version: 2, sourceId: 's', transcription: { status: 'running' }, analyses: {}, analysis: { status: 'idle' }, attempts: {}, results: {} }));
+    assert.equal((await route.view(root, 's')).transcription.retryBlocked, true);
+    saved = { ...transcript, cached: true };
+    assert.equal((await route.view(root, 's')).transcription.status, 'complete');
+    await rm(resolve(root, 'assets/a.mp4'));
+    const missing = (await route.view(root, 's')).transcription;
+    assert.equal(missing.code, 'ASR_READ_BLOCKED');
+    assert.match(missing.error, /原视频/);
+    assert.equal(calls, 0);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

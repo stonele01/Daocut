@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import { createAiStructureRequest, validateAiStructureResponse, AI_STRUCTURE_VERSION } from './ai-structure.mjs';
 import { aiStructurePrompt } from './ai-structure.mjs';
-import { getAiPricedCoverage, inspectAiPricedInput } from './ai-structure-priced.mjs';
+import { flexibleInput, getAiPricedCoverage, inspectAiPricedInput } from './ai-structure-priced.mjs';
 import { createAiStructurePlans } from './ai-structure-plans.mjs';
 import { sharedHash } from './shared-analysis.mjs';
 
@@ -145,7 +145,7 @@ test('a verified saved response is rechecked without changing the original resul
     rawText, rawTextSha256: digest(rawText), inputSha256: digest(JSON.stringify([request.system, request.input])) };
   const original = { ...checked, plans: [], sequences: [], issues: [{ code: 'AI_ORDER_CONDITIONS', message: '旧校验误判' }] };
   const key = sharedHash({ kind: AI_STRUCTURE_VERSION, prompt: aiStructurePrompt(AI_STRUCTURE_VERSION), analysis: input.analysisVersion,
-    semantic: input.semanticVersion, input: inspectAiPricedInput(input.engineInput).inputHash, visibility: input.visibility });
+    semantic: input.semanticVersion, input: inspectAiPricedInput(flexibleInput(input).engineInput).inputHash, visibility: input.visibility });
   const dir = join(root, '.film/ai-structure-plans'); await mkdir(dir, { recursive: true });
   const file = join(dir, `${key}.json`), bytes = JSON.stringify({ version: AI_STRUCTURE_VERSION, key, sourceId: input.source.id,
     rounds: [{ status: 'complete', submitted: true, request, response, receipt, result: original }] });
@@ -170,4 +170,60 @@ test('three substantive routes per opening across rounds, no extra route for a d
   assert.equal(short.modelComplete, true, 'one feasible route is not a failed round');
   assert.equal(getAiPricedCoverage(input, first.sequences).perOpening[0].distinctCount, 3);
   assert.equal(validate(input, [['c0', 'c4', 'c5']]).plans.length, 0, 'no selling point and too short');
+});
+
+test('fallback closing accepts verified unit price, benefit, or price-free core', () => {
+  const input = fixture(), engine = input.engineInput;
+  engine.candidates = engine.candidates.filter(c => ['c0', 'c1', 'c3', 'c6'].includes(c.id));
+  const price = engine.candidates.find(c => c.id === 'c3');
+  price.text = engine.cues[3].text = '十九块九，到手二十四包，一包卫生纸八毛钱';
+  delete price.details.composition.price;
+  const quote = [{ id: 'c3', kind: 'current', evidence: [123] }];
+  const plan = ['c0', 'c1', 'c6', 'c3'];
+  assert.ok(inspectAiPricedInput(flexibleInput(input).engineInput).ready);
+  assert.equal(validate(input, [plan], { prices: quote }).plans.length, 1);
+  assert.equal(validate(input, [['c0','c1','c3','c6']], { prices: quote }).plans.length, 0);
+  price.tags = ['价格机制'];
+  price.details.composition.roles = ['trust'];
+  const body = JSON.parse(createAiStructureRequest(input).input);
+  assert.equal(body.rules.purchaseLast, false);
+  assert.ok(body.units.find(unit => unit.id === 'c3').roles.includes('price'));
+  assert.equal(validate(input, [plan], { prices: quote }).plans.length, 1);
+  assert.throws(() => validate(input, [plan], { prices: [] }), /全部价格/);
+  price.tags = [];
+  price.text = engine.cues[3].text = '下单还额外赠送一个收纳袋';
+  price.details.composition.roles = ['offer'];
+  assert.equal(validate(input, [plan], { prices: [] }).plans.length, 1);
+  price.text = engine.cues[3].text = '有多个老顾客回购';
+  price.details.composition.roles = ['trust'];
+  assert.equal(validate(input, [['c0','c1','c3','c6']], { prices: [] }).plans.length, 1);
+  assert.equal(validateAiStructureResponse(input, {schema:'ai-structure-plans-v8', plans:[plan], prices:[]}).plans.length, 0);
+});
+
+test('v9 references exact transcript text, preserves differing wording, and v8 retains its original request', () => {
+  const input = fixture();
+  const legacy = JSON.parse(createAiStructureRequest(input, {version: 'ai-structure-plans-v8'}).input);
+  assert.ok(legacy.units.every(unit => typeof unit.text === 'string'));
+  const modern = JSON.parse(createAiStructureRequest(input).input);
+  assert.ok(modern.units.length > 0 && modern.units.every(unit => !Object.hasOwn(unit, 'text')));
+  assert.deepEqual(modern.transcript, legacy.transcript);
+  const changed = input.engineInput.candidates[0];
+  const first = input.engineInput.cues[0];
+  const split = Math.floor((first.startMs + first.endMs) / 2);
+  input.engineInput.cues.splice(0, 1, { ...first, text: 'Brand', endMs: split }, { ...first, text: 'Name', startMs: split });
+  input.engineInput.cueIndices.unshift(119);
+  changed.cueRange = [119, 120];
+  changed.text = 'Brand Name';
+  const revised = JSON.parse(createAiStructureRequest(input).input);
+  assert.equal(revised.units.find(unit => unit.id === changed.id).text, changed.text);
+});
+
+test('v9 applies the input limit to the compact request including the full transcript', () => {
+  const input = fixture(), engine = input.engineInput, first = engine.candidates[0];
+  first.text = engine.cues[0].text = '衣'.repeat(11000);
+  for (let i = 0; i < 6; i++) engine.candidates.push({ ...first, id: 'overlap-' + i });
+  assert.throws(() => createAiStructureRequest(input, { version: 'ai-structure-plans-v8' }), { code: 'AI_STRUCTURE_INPUT_TOO_LARGE' });
+  assert.ok(JSON.parse(createAiStructureRequest(input).input).units.length >= 6);
+  first.text = engine.cues[0].text = '衣'.repeat(45000);
+  assert.throws(() => createAiStructureRequest(input), { code: 'AI_STRUCTURE_INPUT_TOO_LARGE' });
 });

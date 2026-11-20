@@ -58,7 +58,7 @@ export function createAiCuratedRequest(input, { openingIds, previous = [], feedb
   const body = { rules: catalog.rules, units, openingIds: targets,
     ...(history.length ? { previous: history } : {}), ...(relevantFeedback.length ? { feedback: relevantFeedback } : {}) };
   const request = { system: AI_STRUCTURE_CURATED_PROMPT, input: JSON.stringify(body) };
-  if (Buffer.byteLength(request.system + request.input, 'utf8') > 128000) throw Object.assign(Error('完整话术库超过本轮输入预算，未截断素材或发送请求'), { code: 'AI_STRUCTURE_INPUT_TOO_LARGE' });
+  if (!input.engineInput.flexibleClosing && Buffer.byteLength(request.system + request.input, 'utf8') > 128000) throw Object.assign(Error('完整话术库超过本轮输入预算，未截断素材或发送请求'), { code: 'AI_STRUCTURE_INPUT_TOO_LARGE' });
   return request;
 }
 

@@ -112,7 +112,7 @@ const same = (value, loc) => value.assetPath === loc.assetPath && ['size', 'mtim
 function legacyProvenance(value, loc) {
   if (value?.status === 'complete' && value.fingerprint?.size === loc.fingerprint.size && value.fingerprint?.mtimeMs === loc.fingerprint.mtimeMs && (value.fingerprint.ctimeMs === undefined || value.fingerprint.path === undefined)) {
     view(value, loc.durationMs);
-    throw new Error('Existing transcript provenance needs explicit confirmation; it was preserved and no audio was uploaded.');
+    throw Object.assign(new Error('Existing transcript provenance needs explicit confirmation; it was preserved and no audio was uploaded.'), { code: 'ASR_BINDING_REQUIRED' });
   }
 }
 const save = async (loc, data) => {
@@ -144,7 +144,7 @@ async function existingTranscript(root, source, loc) {
   // Copying a video can make its mtime newer than an already-existing subtitle.
   // An explicit fingerprint/hash binding remains the authority for that case.
   if (info.mtimeMs < loc.fingerprint.mtimeMs && (!binding || !same(binding, loc))) return null;
-  if (!binding || !same(binding, loc) || binding.sourceId !== source.id || binding.vttHash !== digest(body) || !Number.isFinite(binding.durationMs) || (Number.isFinite(source.durationMs) && source.durationMs !== binding.durationMs)) throw new Error('Existing VTT needs explicit source, duration and coverage confirmation before reuse; no audio was uploaded.');
+  if (!binding || !same(binding, loc) || binding.sourceId !== source.id || binding.vttHash !== digest(body) || !Number.isFinite(binding.durationMs) || (Number.isFinite(source.durationMs) && source.durationMs !== binding.durationMs)) throw Object.assign(new Error('Existing VTT needs explicit source, duration and coverage confirmation before reuse; no audio was uploaded.'), { code: 'ASR_BINDING_REQUIRED' });
   const cues = strictVtt(body, binding.durationMs);
   // A sidecar does not erase the origin of the effective transcript from which it was made.
   const cache = await load(loc);
@@ -198,7 +198,7 @@ export async function readProductTranscript(root, source) {
     if (value.segmented) { const completed = await readCompletedSegmentTranscript(loc); if (completed) return completed; }
     const recovered = await savedResponse(loc, value);
     if (recovered) return view(recovered);
-    throw new Error('The previous transcription may have been submitted. Check the service before retrying.');
+    throw Object.assign(new Error('The previous transcription may have been submitted. Check the service before retrying.'), { code: 'ASR_SUBMISSION_UNCERTAIN' });
   }
   legacyProvenance(value, loc);
   return same(value, loc) ? view(value, source.durationMs) : null;
@@ -275,7 +275,7 @@ export async function transcribeProductSource(root, source, { getKey, signal = n
     }
     const recovered = await savedResponse(loc, previous);
     if (recovered) { await save(loc, recovered); return view(recovered); }
-    if (previous?.status === 'pending' && !previous.segmented && !retryUncertain) throw new Error('The previous transcription may have been submitted. Check the service before retrying.');
+    if (previous?.status === 'pending' && !previous.segmented && !retryUncertain) throw Object.assign(new Error('The previous transcription may have been submitted. Check the service before retrying.'), { code: 'ASR_SUBMISSION_UNCERTAIN' });
     if (!Number.isFinite(source.durationMs) || source.durationMs <= 0) {
       let durationMs;
       try { durationMs = Math.floor((await probeSource(root, source.assetPath)).duration * 1000); } catch { throw notSubmitted('source'); }
@@ -283,7 +283,7 @@ export async function transcribeProductSource(root, source, { getKey, signal = n
       source = { ...source, durationMs }; loc.durationMs = durationMs;
     }
     if (Number.isFinite(source.durationMs) && source.durationMs > audioPolicy.targetMs) return transcribeSegments(root, source, loc, { getKey, signal, retryUncertain, runProvider, readAudio, audioPolicy, onProgress });
-    if (previous?.status === 'pending' && !retryUncertain) throw new Error('The previous transcription may have been submitted. Check the service before retrying.');
+    if (previous?.status === 'pending' && !retryUncertain) throw Object.assign(new Error('The previous transcription may have been submitted. Check the service before retrying.'), { code: 'ASR_SUBMISSION_UNCERTAIN' });
     if (typeof getKey !== 'function') throw notSubmitted('configuration');
     let credential;
     try { credential = await getKey(); } catch { throw notSubmitted('configuration'); }
@@ -321,7 +321,7 @@ async function transcribeSegments(root, source, loc, { getKey, signal, retryUnce
   try { manifest = JSON.parse(await readFile(manifestPath, 'utf8')); } catch (e) { if (e.code !== 'ENOENT') throw new Error('Audio segment state cannot be read; it was not overwritten.'); }
   if (manifest && (manifest.version !== 1 || !Array.isArray(manifest.segments))) throw new Error('Invalid audio segment state; it was not overwritten.');
   if (manifest?.identity === identity && (manifest.segments.length !== plan.length || manifest.segments.some((s, i) => !['idle', 'pending', 'complete'].includes(s.status) || ['id', 'startMs', 'endMs', 'coreStartMs', 'coreEndMs'].some(field => s[field] !== plan[i][field])))) throw new Error('Audio segment plan does not match the source; it was not overwritten.');
-  if (manifest?.segments.some(s => s.status === 'pending') && (!retryUncertain || manifest.identity !== identity)) throw new Error('The previous transcription may have been submitted. Check the service before retrying.');
+  if (manifest?.segments.some(s => s.status === 'pending') && (!retryUncertain || manifest.identity !== identity)) throw Object.assign(new Error('The previous transcription may have been submitted. Check the service before retrying.'), { code: 'ASR_SUBMISSION_UNCERTAIN' });
   if (!manifest || manifest.identity !== identity) manifest = { version: 1, identity, sourceId: source.id, durationMs: source.durationMs, segments: plan.map(range => ({ ...range, status: 'idle' })) };
   const persist = async () => { await checkCachePath(loc.root, loc.dir); await mkdir(loc.dir, { recursive: true }); await writeAtomic(manifestPath, JSON.stringify(manifest)); };
   const state = { version: 1, status: 'pending', sourceId: source.id, assetPath: source.assetPath, durationMs: source.durationMs, fingerprint: loc.fingerprint, segmented: true };

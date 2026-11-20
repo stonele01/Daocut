@@ -13,7 +13,7 @@ export function inspectAiRequiredInput(engineInput) {
   const eligible = base.reviewItems.filter(item => !item.issues.length);
   const issues = [...base.issues];
   if (!eligible.some(item => item.review.roles.includes('intro'))) issues.push({ code: 'AI_REQUIRED_INTRO', message: '缺少说明正在卖什么产品的完整产品介绍，请按新规则分析；已有方案保留。' });
-  if (!eligible.some(item => currentPrice(item.review))) issues.push({ code: 'AI_REQUIRED_PRICE', message: '缺少已区分现价与参考价的实际报价，请按新规则分析；福利、参考价不能替代报价格，已有方案保留。' });
+  if (!engineInput.flexibleClosing && !eligible.some(item => currentPrice(item.review))) issues.push({ code: 'AI_REQUIRED_PRICE', message: '缺少已区分现价与参考价的实际报价，请按新规则分析；福利、参考价不能替代报价格，已有方案保留。' });
   return { ...base, version: AI_STRUCTURE_REQUIRED_VERSION, issues,
     ready: base.ready && !issues.some(issue => issue.code.startsWith('AI_REQUIRED_')),
     inputHash: hash([AI_STRUCTURE_REQUIRED_VERSION, base.inputHash, base.reviewItems.map(item => [item.candidateId, item.review?.price])]) };
@@ -26,7 +26,7 @@ export function createAiRequiredRequest(input, options = {}) {
   body.rules = { ...body.rules, requiredRoles: ['intro', 'core', 'price', 'purchase'], currentPriceRequired: true };
   body.units = body.units.map(unit => ({ ...unit, ...(reviews.get(unit.id)?.price ? { price: reviews.get(unit.id).price } : {}) }));
   const next = { system: AI_STRUCTURE_REQUIRED_PROMPT, input: JSON.stringify(body) };
-  if (Buffer.byteLength(next.system + next.input, 'utf8') > 128000) throw Object.assign(Error('完整话术库超过本轮输入预算，未截断素材或发送请求'), { code: 'AI_STRUCTURE_INPUT_TOO_LARGE' });
+  if (!input.engineInput.flexibleClosing && Buffer.byteLength(next.system + next.input, 'utf8') > 128000) throw Object.assign(Error('完整话术库超过本轮输入预算，未截断素材或发送请求'), { code: 'AI_STRUCTURE_INPUT_TOO_LARGE' });
   return next;
 }
 
