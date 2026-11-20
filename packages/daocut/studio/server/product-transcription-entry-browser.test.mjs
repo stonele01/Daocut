@@ -9,7 +9,7 @@ import { startStudio } from './server.mjs';
 
 const artifactRoot = resolve(process.env.DAOCUT_TRANSCRIPTION_TEST_ROOT || resolve(import.meta.dirname, '../../../../.tmp/transcription-entry'));
 
-async function fixture(initial, run, { hasInterval = true, emptyProducts = false, planError = false, multipleProducts = false, needsReview = false, analysisRunning = false } = {}) {
+async function fixture(initial, run, { hasInterval = true, emptyProducts = false, planError = false, sharedRetry = false, multipleProducts = false, needsReview = false, analysisRunning = false } = {}) {
   await mkdir(artifactRoot, { recursive: true });
   const scratch = await mkdtemp(join(artifactRoot, 'case-'));
   const names = ['DAOCUT_STUDIO_HOME', 'DAOCUT_LIBRARY', 'DAOCUT_TRASH_DIR', 'DAOCUT_NO_UPDATE_CHECK', 'TEMP', 'TMP'];
@@ -52,7 +52,7 @@ async function fixture(initial, run, { hasInterval = true, emptyProducts = false
     await page.route('**/product-workflow/status**', route => route.fulfill({ json: { source, transcription: transcription(), discovery: { status: needsReview || discoveryReady ? 'complete' : 'idle' }, ready: hasInterval, discoveryReady, needsReview, busy: status === 'running' || analysisRunning } }));
     await page.route('**/product-workflow/plan**', route => {
       calls.plans.push(Object.fromEntries(new URL(route.request().url()).searchParams));
-      return route.fulfill(planError ? { status: 503, json: { error: '模拟服务暂时不可用' } } : { json: { id: 'mock-confirmation', prepare: calls.plans.at(-1).prepare === 'true', action: calls.plans.at(-1).action, sourceId: 's', source, enabled: true, cached: false, requestCount: 1, reusedRequests: 0, service: { name: '模拟服务', model: 'mock', endpoint: 'local://mock' }, cost: { uncertain: false, basis: '仅模拟' } } });
+      return route.fulfill(planError ? { status: 503, json: { error: '模拟服务暂时不可用' } } : { json: { id: 'mock-confirmation', ...(sharedRetry ? { retryRequired: true, retry: calls.plans.at(-1).retry === 'true', shared: { mode: 'retry-required' } } : {}), prepare: calls.plans.at(-1).prepare === 'true', action: calls.plans.at(-1).action, sourceId: 's', source, enabled: true, cached: false, requestCount: 1, reusedRequests: 0, service: { name: '模拟服务', model: 'mock', endpoint: 'local://mock' }, cost: { uncertain: false, basis: '仅模拟' } } });
     });
     await page.route('**/product-workflow/execute', route => { calls.executions.push(route.request().postDataJSON()); status = 'complete'; discoveryReady = calls.executions.at(-1).plan.action === 'discovery'; return route.fulfill({ json: { ok: true } }); });
     await page.route('**/product-discovery**', route => route.fulfill({ json: needsReview ? { status: 'complete', enabled: true, proposal: { runId: 'review', products: analysis.products, intervals: analysis.intervals, unassigned: [], issues: [] } } : { status: 'idle', enabled: true } }));
@@ -216,3 +216,20 @@ test('transcribed source with no product can open and confirm a full-video analy
   await dialog.waitFor({ state: 'hidden' });
   assert.deepEqual(calls.executions.map(call => call.plan.action), ['analysis']);
 }, { hasInterval: false, emptyProducts: true }));
+
+test('idle local transcript can explicitly retry a failed shared transcription', () => fixture('idle', async ({ page, calls }) => {
+  await page.getByRole('button', { name: '转写 assets/synthetic.mp4', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: '确认转写', exact: true });
+  const review = dialog.getByRole('checkbox');
+  await review.waitFor();
+  const confirm = dialog.getByRole('button', { name: '确认转写', exact: true });
+  assert.equal(await confirm.isDisabled(), true);
+  assert.deepEqual(calls.plans.map(plan => plan.retry), ['false', 'true']);
+  assert.equal(calls.executions.length, 0);
+  await review.check();
+  await confirm.click();
+  await dialog.waitFor({ state: 'hidden' });
+  assert.equal(calls.executions.length, 1);
+  assert.equal(calls.executions[0].plan.retry, true);
+  assert.equal(calls.executions[0].retryAcknowledged, true);
+}, { sharedRetry: true }));
