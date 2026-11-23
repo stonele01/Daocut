@@ -73,3 +73,21 @@ test('existing callers without an archive callback retain successful and HTTP er
   await assert.rejects(run(), /balance/);
   assert.equal(sent, 2);
 });
+
+test('DNS failure retries before upload; loss after connection never resends', async t => {
+  let attempts = 0, uploads = 0;
+  const mock = t.mock.method(globalThis, 'fetch', async () => {
+    if (++attempts === 1) throw Object.assign(Error('fetch'), { cause: { code: 'EAI_AGAIN' } });
+    uploads++;
+    return reply(responseBody());
+  });
+  await run();
+  assert.equal(attempts, 2);
+  assert.equal(uploads, 1);
+  mock.mock.mockImplementation(async () => {
+    uploads++;
+    throw Object.assign(Error('fetch'), { cause: { code: 'ECONNRESET' } });
+  });
+  await assert.rejects(run(), { diagnostic: '网络请求中断（连接被重置）' });
+  assert.equal(uploads, 2);
+});

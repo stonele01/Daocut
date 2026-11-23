@@ -239,7 +239,7 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
     } catch (error) {
       if (error.code === 'ASR_BOUNDARY_REVIEW') Object.assign(transcription, { status: 'failed', code: 'ASR_BOUNDARY_REVIEW', localReviewRequired: true, retryBlocked: false, error: '分段转写已保存，接缝待核对；无需重新上传音频' });
       else if (!active && error.code === 'ASR_SUBMISSION_UNCERTAIN') {
-        Object.assign(transcription, { status: 'failed', code: error.code, retryBlocked: true, error: '上次转写有提交记录，尚未找到完整结果。请先核查服务记录，再决定是否重试。' });
+        Object.assign(transcription, { status: 'failed', code: error.code, retryBlocked: true, error: error.segmentSummary ?? '上次转写有提交记录，尚未找到完整结果。请先核查服务记录，再决定是否重试。' });
       } else if (!active && transcription.code !== 'ASR_BOUNDARY_REVIEW') {
         const message = !fingerprint ? '无法读取原视频。请检查工程中的原片能否播放、共享盘是否已连接，然后刷新。'
           : error.code === 'ASR_BINDING_REQUIRED' ? '发现已有字幕，请核对字幕来源并关联到这条原片。'

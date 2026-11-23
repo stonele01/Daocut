@@ -55,16 +55,22 @@ export function restoreProductTranscriptCache(previous, response) {
 
 async function savedResponse(loc, previous) {
   if (previous?.status !== 'pending' || previous.segmented || !same(previous, loc) || previous.durationMs !== loc.durationMs || !/^[a-f0-9-]{36}$/i.test(previous.requestId ?? '')) return null;
+  const response = await readReceipt(loc, previous.requestId);
+  try { return restoreProductTranscriptCache(previous, response); } catch { return null; }
+}
+
+async function readReceipt(loc, requestId) {
+  if (!/^[a-f0-9-]{36}$/i.test(requestId ?? '')) return null;
   const dir = join(loc.dir, 'raw-responses');
   await checkCachePath(loc.root, dir);
   let response;
   try {
-    const path = join(dir, `${previous.requestId}.json`);
+    const path = join(dir, `${requestId}.json`);
     await checkCachePath(loc.root, path);
     response = JSON.parse(await readFile(path, 'utf8'));
   }
   catch { return null; }
-  try { return restoreProductTranscriptCache(previous, response); } catch { return null; }
+  return response;
 }
 
 export async function productSourcePath(root, assetPath) {
@@ -195,10 +201,10 @@ export async function readProductTranscript(root, source) {
   await guardPartialSharedImport(loc, value);
   if (!value) return null;
   if (value.status === 'pending') {
-    if (value.segmented) { const completed = await readCompletedSegmentTranscript(loc); if (completed) return completed; }
+    if (value.segmented) { const completed = await readCompletedSegmentTranscript(loc, true); if (completed) return completed; }
     const recovered = await savedResponse(loc, value);
     if (recovered) return view(recovered);
-    throw Object.assign(new Error('The previous transcription may have been submitted. Check the service before retrying.'), { code: 'ASR_SUBMISSION_UNCERTAIN' });
+    throw Object.assign(new Error('The previous transcription may have been submitted. Check the service before retrying.'), { code: 'ASR_SUBMISSION_UNCERTAIN', segmentSummary: value.attempts?.at(-1)?.failure && ('上次转写：' + value.attempts.at(-1).failure + '。请求编号：' + value.requestId + '。请核查后再重试。') });
   }
   legacyProvenance(value, loc);
   return same(value, loc) ? view(value, source.durationMs) : null;
@@ -299,8 +305,23 @@ export async function transcribeProductSource(root, source, { getKey, signal = n
     await save(loc, state);
     let result;
     try { result = await runProvider('asr', { src: source.assetPath, requestId: state.requestId }, { key: credential, signal, read: async () => audio, say: () => {}, root, onResponse: rawResponseWriter(loc, state.requestId) }); }
-    catch (error) { if (error.code === 'ASR_RESPONSE_SAVE_FAILED') throw error; throw new Error('Transcription failed or was interrupted after submission may have begun. Check the service before retrying.'); }
-    const row = boundedResult(result?.index?.[0], source.durationMs);
+    catch (error) {
+      const recovered = await savedResponse(loc, state);
+      if (recovered) { await save(loc, recovered); return view(recovered); }
+      const attempt = state.attempts.at(-1);
+      attempt.failure = error.diagnostic ?? (error.code === 'ASR_RESPONSE_save(loc, state)_FAILED' ? '本地回包保存失败' : '请求中断，未取得明确原因');
+      attempt.failedAt = new Date().toISOString();
+      await save(loc, state);
+      if (error.code === 'ASR_RESPONSE_save(loc, state)_FAILED') throw error;
+      throw new Error('Transcription failed after submission may have begun. Check the service before retrying.');
+    }
+    let row;
+    try { row = boundedResult(result?.index?.[0], source.durationMs); }
+    catch (error) {
+      Object.assign(state.attempts.at(-1), { failure: '回包时间戳或字幕校验失败', failedAt: new Date().toISOString() });
+      await save(loc, state);
+      throw error;
+    }
     const latest = await stat(loc.input);
     if (latest.size !== loc.fingerprint.size || latest.mtimeMs !== loc.fingerprint.mtimeMs || latest.ctimeMs !== loc.fingerprint.ctimeMs || await realpath(loc.input) !== loc.fingerprint.path) throw new Error('Source changed during transcription; the result was not accepted. Check the service before retrying.');
     state.attempts.at(-1).status = 'complete';
@@ -321,6 +342,24 @@ async function transcribeSegments(root, source, loc, { getKey, signal, retryUnce
   try { manifest = JSON.parse(await readFile(manifestPath, 'utf8')); } catch (e) { if (e.code !== 'ENOENT') throw new Error('Audio segment state cannot be read; it was not overwritten.'); }
   if (manifest && (manifest.version !== 1 || !Array.isArray(manifest.segments))) throw new Error('Invalid audio segment state; it was not overwritten.');
   if (manifest?.identity === identity && (manifest.segments.length !== plan.length || manifest.segments.some((s, i) => !['idle', 'pending', 'complete'].includes(s.status) || ['id', 'startMs', 'endMs', 'coreStartMs', 'coreEndMs'].some(field => s[field] !== plan[i][field])))) throw new Error('Audio segment plan does not match the source; it was not overwritten.');
+  // Restore a successful receipt for this exact segment before considering another upload.
+  async function restoreSegment(segment) {
+    const receipt = await readReceipt(loc, segment.requestId);
+    if (!receipt) return false;
+    const durationMs = segment.endMs - segment.startMs;
+    let restored;
+    try {
+      restored = restoreProductTranscriptCache({ ...segment, sourceId: source.id, assetPath: source.assetPath, fingerprint: loc.fingerprint, durationMs }, receipt);
+    } catch { return false; }
+    Object.assign(segment, { status: 'complete', completedAt: new Date().toISOString(), text: restored.text,
+      cues: restored.cues, rawWords: restored.rawWords, words: restored.words.map(w => ({ token: w.text, start: w.startMs / 1000, end: w.endMs / 1000 })),
+      attempts: restored.attempts });
+    await writeAtomic(manifestPath, JSON.stringify(manifest));
+    return true;
+  }
+  if (manifest?.identity === identity) {
+    for (const segment of manifest.segments) if (segment.status === 'pending') await restoreSegment(segment);
+  }
   if (manifest?.segments.some(s => s.status === 'pending') && (!retryUncertain || manifest.identity !== identity)) throw Object.assign(new Error('The previous transcription may have been submitted. Check the service before retrying.'), { code: 'ASR_SUBMISSION_UNCERTAIN' });
   if (!manifest || manifest.identity !== identity) manifest = { version: 1, identity, sourceId: source.id, durationMs: source.durationMs, segments: plan.map(range => ({ ...range, status: 'idle' })) };
   const persist = async () => { await checkCachePath(loc.root, loc.dir); await mkdir(loc.dir, { recursive: true }); await writeAtomic(manifestPath, JSON.stringify(manifest)); };
@@ -343,8 +382,22 @@ async function transcribeSegments(root, source, loc, { getKey, signal, retryUnce
     await progress('transcribing');
     let result;
     try { result = await runProvider('asr', { src: source.assetPath, requestId: segment.requestId }, { key: credential, signal, read: async () => audio, say: () => {}, root, onResponse: rawResponseWriter(loc, segment.requestId) }); }
-    catch (error) { if (error.code === 'ASR_RESPONSE_SAVE_FAILED') throw error; throw new Error('Transcription failed or was interrupted after submission may have begun. Check the service before retrying.'); }
-    const row = boundedResult(result?.index?.[0], segment.endMs - segment.startMs);
+    catch (error) {
+      if (await restoreSegment(segment)) continue;
+      const attempt = segment.attempts.at(-1);
+      attempt.failure = error.diagnostic ?? (error.code === 'ASR_RESPONSE_persist()_FAILED' ? '本地回包保存失败' : '请求中断，未取得明确原因');
+      attempt.failedAt = new Date().toISOString();
+      await persist();
+      if (error.code === 'ASR_RESPONSE_persist()_FAILED') throw error;
+      throw new Error('Transcription failed after submission may have begun. Check the service before retrying.');
+    }
+    let row;
+    try { row = boundedResult(result?.index?.[0], segment.endMs - segment.startMs); }
+    catch (error) {
+      Object.assign(segment.attempts.at(-1), { failure: '回包时间戳或字幕校验失败', failedAt: new Date().toISOString() });
+      await persist();
+      throw error;
+    }
     segment.cues = validateTranscriptCues(row?.cues, segment.endMs - segment.startMs);
     segment.words = row.words; segment.rawWords = row.rawWords; segment.text = row.text;
     if (row.timingAdjustments) segment.timingAdjustments = row.timingAdjustments;

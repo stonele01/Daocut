@@ -13,7 +13,7 @@ const overlap = (a, b) => a.startMs < b.endMs && a.endMs > b.startMs;
 const writes = new Map();
 const optional = async path => { try { return await readFile(path, 'utf8'); } catch (error) { if (error.code === 'ENOENT') return null; throw error; } };
 
-async function load(loc) {
+async function load(loc, reportInterrupted = false) {
   const manifestText = await optional(`${loc.path}.segments.json`);
   if (manifestText === null) return null;
   let manifest, cache;
@@ -21,7 +21,18 @@ async function load(loc) {
   catch { throw new HttpError(409, '分段记录无法读取，原始结果未覆盖'); }
   if (!same(cache, loc) || cache.durationMs !== loc.durationMs || manifest.sourceId !== loc.sourceId || manifest.durationMs !== loc.durationMs) throw new HttpError(409, '来源视频或分段记录已变化，请重新核对；没有发送请求');
   if (!Array.isArray(manifest.segments) || manifest.version !== 1) throw new HttpError(409, '分段记录无效，原始结果未覆盖');
-  if (!manifest.segments.every(segment => segment.status === 'complete')) return null;
+  if (!manifest.segments.every(segment => segment.status === 'complete')) {
+    if (reportInterrupted && cache.status === 'pending' && manifest.segments.every(s => ['idle', 'pending', 'complete'].includes(s.status))) {
+      const completed = manifest.segments.filter(s => s.status === 'complete').length;
+      const pending = manifest.segments.filter(s => s.status === 'pending').length;
+      const total = manifest.segments.length;
+      const interrupted = manifest.segments.find(s => s.status === 'pending');
+      const failure = interrupted?.attempts?.at(-1)?.failure;
+      const detail = (failure ? '第 ' + (manifest.segments.indexOf(interrupted) + 1) + ' 段：' + failure + '。请求编号：' + interrupted.requestId + '。' : '') + '已保存 ' + completed + '/' + total + ' 段。' + (pending ? pending + ' 段提交状态不确定，重试可能再次计费。' : '') + '点击“重试转写”可继续剩余 ' + (total - completed) + ' 段。';
+      throw Object.assign(new Error(detail), { code: 'ASR_SUBMISSION_UNCERTAIN', segmentSummary: detail });
+    }
+    return null;
+  }
   let inspection;
   try { inspection = inspectAudioSeams(manifest.segments, loc.durationMs); }
   catch { throw new HttpError(409, '分段时间或字幕记录无效，无法安全核对；没有重新发送请求'); }
@@ -82,8 +93,8 @@ export async function readReviewedTranscript(loc) {
   return materialize(loc, data, current);
 }
 
-export async function readCompletedSegmentTranscript(loc) {
-  const data = await load(loc);
+export async function readCompletedSegmentTranscript(loc, reportInterrupted = false) {
+  const data = await load(loc, reportInterrupted);
   if (!data || data.cache.status !== 'pending') return null;
   return materialize(loc, data, status(loc, data));
 }
