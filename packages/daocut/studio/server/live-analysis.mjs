@@ -231,7 +231,7 @@ export function createLiveAnalysis({ transcribe, modelClient, modelIdentity, rea
       if (transcript) {
         // The chat task only needs status; do not send the full source transcript to it.
         transcription.segments = scope ? [] : segmentsOf(transcript);
-        if (transcription.status === 'idle' || (!active && transcript.cached === true) || ((transcript.localReconciled || transcript.recoveredFromResponse) && state.transcription.status !== 'running')) {
+        if (transcription.status === 'idle' || (!active && transcript.cached === true && transcription.code !== 'ASR_BOUNDARY_REVIEW') || ((transcript.localReconciled || transcript.recoveredFromResponse) && state.transcription.status !== 'running')) {
           transcription.status = 'complete';
           delete transcription.code; delete transcription.error; delete transcription.localReviewRequired; delete transcription.retryBlocked;
         }
