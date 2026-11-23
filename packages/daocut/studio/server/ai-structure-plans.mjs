@@ -10,7 +10,7 @@ import { AI_STRUCTURE_ORDER_VERSION, inspectAiOrderInput, getAiOrderCoverage, va
 import { AI_STRUCTURE_VARIANTS_VERSION, inspectAiVariantsInput, getAiVariantsCoverage, planAiVariantBatches } from './ai-structure-variants.mjs';
 import { AI_STRUCTURE_CURATED_VERSION, inspectAiCuratedInput, getAiCuratedCoverage } from './ai-structure-curated.mjs';
 import { AI_STRUCTURE_REQUIRED_VERSION, inspectAiRequiredInput, getAiRequiredCoverage } from './ai-structure-required.mjs';
-import { AI_STRUCTURE_PRICED_VERSION, inspectAiPricedInput, getAiPricedCoverage, MAX_OPENING_VARIANTS } from './ai-structure-priced.mjs';
+import { FLEXIBLE_VERSION, flexibleInput, AI_STRUCTURE_PRICED_VERSION, inspectAiPricedInput, getAiPricedCoverage, MAX_OPENING_VARIANTS } from './ai-structure-priced.mjs';
 import { recoverDeepSeekTextResponse } from './text-structure.mjs';
 import { AI_STRUCTURE_VERSION, AI_STRUCTURE_VERSIONS, PREVIOUS_AI_STRUCTURE_VERSION, aiStructurePrompt, createAiStructureRequest, validateAiStructureResponse } from './ai-structure.mjs';
 
@@ -22,8 +22,17 @@ const errorIssue = message => ({ code: 'AI_STRUCTURE_FAILED', message });
 const failureMessage = error => error?.code === 'MODEL_HTTP' && Number.isInteger(error.httpStatus) && error.httpStatus >= 400 && error.httpStatus <= 599
   ? `${error.message} ${error.httpStatus}` : error.message;
 const OPENING_BATCH_SIZE = 8;
+function savedReply(round) {
+  try { return round.response ?? recoverDeepSeekTextResponse(round.receipt, round.request); }
+  catch (error) { if (error.code !== 'MODEL_INVALID_JSON') throw error; }
+}
+function canRecoverReply(round) {
+  try { return !!round?.request && savedReply(round) !== undefined; }
+  catch { return false; }
+}
 const OPENING_BATCH_ATTEMPTS = 2;
-const isCurated = m => [AI_STRUCTURE_CURATED_VERSION, AI_STRUCTURE_REQUIRED_VERSION, AI_STRUCTURE_PRICED_VERSION].includes(m.version);
+const isPriced = version => version === FLEXIBLE_VERSION || version === AI_STRUCTURE_PRICED_VERSION;
+const isCurated = m => [AI_STRUCTURE_CURATED_VERSION, AI_STRUCTURE_REQUIRED_VERSION, AI_STRUCTURE_PRICED_VERSION, FLEXIBLE_VERSION].includes(m.version);
 const isVariants = m => m.version === AI_STRUCTURE_VARIANTS_VERSION || isCurated(m);
 const isOrdered = m => m.version === AI_STRUCTURE_ORDER_VERSION || isVariants(m);
 
@@ -35,8 +44,9 @@ export function createAiStructurePlans({ readInput = createStructurePlanInputRea
   const identity = async m => typeof modelIdentity === 'function' ? modelIdentity(purposeFor(m)) : modelIdentity ?? await modelClient?.getCacheIdentity?.(purposeFor(m));
   const lockKey = (root, request) => JSON.stringify([root, request.sourceId, request.productId, request.intervalId]);
   async function versionedMaterial(root, input, version) {
+    if (version === FLEXIBLE_VERSION && input.engineInput) input = flexibleInput(input);
     const legacy = version === PREVIOUS_AI_STRUCTURE_VERSION;
-    const inspected = input.engineInput && (version === AI_STRUCTURE_PRICED_VERSION ? inspectAiPricedInput(input.engineInput)
+    const inspected = input.engineInput && (isPriced(version) ? inspectAiPricedInput(input.engineInput)
       : version === AI_STRUCTURE_REQUIRED_VERSION ? inspectAiRequiredInput(input.engineInput)
       : version === AI_STRUCTURE_CURATED_VERSION ? inspectAiCuratedInput(input.engineInput)
       : version === AI_STRUCTURE_VARIANTS_VERSION ? inspectAiVariantsInput(input.engineInput)
@@ -144,7 +154,7 @@ export function createAiStructurePlans({ readInput = createStructurePlanInputRea
   // unchanged, and no model request is made.
   function effectiveResult(m, round) {
     const original = round?.result;
-    if (m.version !== AI_STRUCTURE_PRICED_VERSION || round?.status !== 'complete' || !round.request || !round.response || !round.receipt || !original?.issues?.some(item => item.code === 'AI_ORDER_CONDITIONS')) return original;
+    if (!isPriced(m.version) || round?.status !== 'complete' || !round.request || !round.response || !round.receipt || !original?.issues?.some(item => item.code === 'AI_ORDER_CONDITIONS')) return original;
     try {
       const response = recoverDeepSeekTextResponse(round.receipt, round.request);
       if (response === undefined || sharedHash(response) !== sharedHash(round.response)) return original;
@@ -157,15 +167,15 @@ export function createAiStructurePlans({ readInput = createStructurePlanInputRea
   const plansFor = m => [...(isVariants(m) ? m.seed?.plans ?? [] : []), ...(m.saved?.rounds ?? []).flatMap(round => effectiveResult(m, round)?.plans ?? [])];
   const previousFor = m => [...(isVariants(m) ? m.seed?.sequences ?? [] : []), ...(m.saved?.rounds ?? []).flatMap(round => effectiveResult(m, round)?.sequences ?? [])];
   function variantCoverage(m, nextPass = false) {
-    const coverage = m.version === AI_STRUCTURE_PRICED_VERSION ? getAiPricedCoverage(m.input, previousFor(m))
+    const coverage = isPriced(m.version) ? getAiPricedCoverage(m.input, previousFor(m))
       : m.version === AI_STRUCTURE_REQUIRED_VERSION ? getAiRequiredCoverage(m.input, previousFor(m))
       : isCurated(m) ? getAiCuratedCoverage(m.input, previousFor(m)) : getAiVariantsCoverage(m.input, previousFor(m), { targetVariants: 1 });
     const processed = new Set(nextPass ? [] : m.saved?.pass?.processedOpeningIds ?? []);
-    const atLimit = new Set(m.version === AI_STRUCTURE_PRICED_VERSION ? coverage.perOpening.filter(item => item.distinctCount >= MAX_OPENING_VARIANTS).map(item => item.openingId) : []);
+    const atLimit = new Set(isPriced(m.version) ? coverage.perOpening.filter(item => item.distinctCount >= MAX_OPENING_VARIANTS).map(item => item.openingId) : []);
     const remainingIds = coverage.openingIds.filter(id => !processed.has(id) && !atLimit.has(id));
     // Completion measures which openings were requested, not a forced number of
     // new videos. An opening can legitimately have no further suitable variant.
-    return { ...coverage, targetVariants: m.version === AI_STRUCTURE_PRICED_VERSION ? MAX_OPENING_VARIANTS : null, covered: coverage.total - remainingIds.length, remainingIds,
+    return { ...coverage, targetVariants: isPriced(m.version) ? MAX_OPENING_VARIANTS : null, covered: coverage.total - remainingIds.length, remainingIds,
       remainingVariants: remainingIds.length, processedOpeningIds: coverage.openingIds.filter(id => processed.has(id)),
       perOpening: coverage.perOpening.map(item => ({ ...item, remaining: remainingIds.includes(item.openingId) ? 1 : 0 })) };
   }
@@ -181,7 +191,7 @@ export function createAiStructurePlans({ readInput = createStructurePlanInputRea
     m.saved.pass.processedOpeningIds = [...new Set([...m.saved.pass.processedOpeningIds, ...openingIds])];
   }
   function variantBudget(m, coverage, model) {
-    if (m.version === AI_STRUCTURE_PRICED_VERSION) {
+    if (isPriced(m.version)) {
       // Three routes plus a complete price audit increase output per opening.
       // Bound the first batch; all groups remain inside the approved call budget.
       const batches = [];
@@ -261,8 +271,8 @@ export function createAiStructurePlans({ readInput = createStructurePlanInputRea
       ...(coverage ? { coverage: displayCoverage, usablePlanIds: [...new Set([...(m.seed?.plans ?? []).map(plan => plan.id), ...rounds.filter(round => round.status === 'complete').flatMap(round => (effectiveResult(m, round)?.plans ?? []).map(plan => plan.id))])] } : {}),
       materialComplete: m.inspected?.materialComplete === true, context: { ...m.input.context, visibility: m.input.visibility },
       issues: [...m.issues, ...rounds.flatMap(r => effectiveResult(m, r)?.issues ?? []), ...(last?.error ? [errorIssue(last.error)] : []), ...(m.saved?.operationError ? [errorIssue(m.saved.operationError)] : [])],
-      canContinue: status === 'complete' && (m.version === AI_STRUCTURE_PRICED_VERSION ? coverage?.perOpening.some(item => item.distinctCount < MAX_OPENING_VARIANTS) : isVariants(m) ? (coverage?.total ?? 0) > 0 : coverage ? coverage.remainingIds.length > 0 : last?.result?.modelComplete === false),
-      recoverable: status === 'failed' && !!(last?.response || last?.receipt?.status === 'completed'),
+      canContinue: status === 'complete' && (isPriced(m.version) ? coverage?.perOpening.some(item => item.distinctCount < MAX_OPENING_VARIANTS) : isVariants(m) ? (coverage?.total ?? 0) > 0 : coverage ? coverage.remainingIds.length > 0 : last?.result?.modelComplete === false),
+      recoverable: status === 'failed' && canRecoverReply(last),
       retryable: status === 'failed' && !m.blocked && isVariants(m) && last?.status === 'failed' && !!last?.request,
       requestCount: rounds.filter(r => r.submitted).length, mediaReview: m.input.mediaReview, mediaReviewOrigin: m.input.mediaReviewOrigin,
       visualReview: m.input.visualReview, visualReviewOrigin: m.input.visualReviewOrigin, visualReviewStale: m.input.visualReviewStale, ...extra };
@@ -593,7 +603,7 @@ export function createAiStructurePlans({ readInput = createStructurePlanInputRea
     const options = { openingIds: body.openingIds, passNumber: last.passNumber, correction: last.correction === true, feedback: body.feedback ?? [], retry: true };
     let prepared = await nextRound(m, options);
     if (sharedHash(prepared.request) !== sharedHash(last.request)) throw new HttpError(409, '失败批次的输入已变化，未重新发送');
-    const existing = last.response ?? recoverDeepSeekTextResponse(last.receipt, last.request);
+    const existing = savedReply(last);
     let valid = false, retryFeedback;
     if (existing !== undefined) {
       try { validateRound(m, existing, last.request); valid = true; }

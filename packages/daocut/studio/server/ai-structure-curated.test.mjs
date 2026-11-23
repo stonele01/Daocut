@@ -23,7 +23,7 @@ function fixture(count = 50, selected = count) {
 }
 const sequence = (f, id) => [id, id === 'speech-0' ? 'speech-1' : 'speech-0', f.engineInput.candidates.at(-1).id];
 const response = plans => ({ schema: AI_STRUCTURE_VERSION, plans });
-const currentResponse = plans => ({ schema: 'ai-structure-plans-v8', prices: [0, 1, 2].map(n => ({ id: `speech-${n}`, kind: 'current', evidence: [n] })), plans });
+const currentResponse = plans => ({ schema: 'ai-structure-plans-v9', prices: [0, 1, 2].map(n => ({ id: `speech-${n}`, kind: 'current', evidence: [n] })), plans });
 const review = (f, n) => f.engineInput.candidates[n].details.composition;
 const AI_STRUCTURE_VERSION = 'ai-structure-plans-v7';
 const createAiStructureRequest = (input, options = {}) => requestForVersion(input, { version: AI_STRUCTURE_VERSION, ...options });
@@ -119,7 +119,7 @@ test('saved v5 seeds and results retain their IDs and bytes; explicit new v6 req
     const body = JSON.parse(args.input); calls.push(body); return currentResponse(body.openingIds.map(id => sequence(f, id)));
   } });
   const old = await service.status(root, f.scope); assert.deepEqual(old.plans.map(p => p.id), [seedPlan.id, result.plans[0].id]);
-  const request = { ...f.scope, rulesVersion: 'ai-structure-plans-v8' }, before = await service.status(root, request);
+  const request = { ...f.scope, rulesVersion: 'ai-structure-plans-v9' }, before = await service.status(root, request);
   await service.generate(root, { ...request, confirmed: true, confirmationId: before.confirmation.id }); await service.wait();
   assert.equal(calls.length, 5); assert.equal(calls[0].previous, undefined); assert.equal(await readFile(file, 'utf8'), bytes);
 });

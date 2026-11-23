@@ -83,6 +83,13 @@ export function combineDiscoveryWindows({ sourceId, runId, durationMs, cues, win
     const acknowledgement = /^(?:嗯+|啊+|哦+|呃+|对|对的|是|是的|好的|好|没错)[。！!，,？?\s]*$/u;
     return gap.some(cue => text(cue.text) && !acknowledgement.test(cue.text.trim())) && !gap.some(cue => switchProduct.test(cue.text));
   };
+  // An uncertain garment description can still span a colour demonstration at the exact cut.
+  const continuesColourDemo = (old, next) => old.scopeStatus === 'uncertain' && next.scopeStatus === 'confirmed'
+    && old.lastCue + 1 === next.firstCue
+    && cues[next.firstCue].startMs - cues[old.lastCue].endMs <= 2000
+    && cues.slice(Math.max(old.firstCue, old.lastCue - 2), old.lastCue + 1).some(cue => /(?:颜色|色号).*(?:看|展示)|(?:看|展示).*颜色/u.test(cue.text))
+    && /颜色|色号/u.test(cues[next.firstCue].text)
+    && !cues.slice(Math.max(old.firstCue, old.lastCue - 2), next.firstCue + 1).some(cue => switchProduct.test(cue.text));
   const evidenceFor = (indices, window) => {
     if (!Array.isArray(indices) || !indices.length || indices.some(n => !Number.isInteger(n) || n < window.firstCue || n > window.lastCue)) invalid('拆品证据不属于当前转写窗口');
     return [...new Set(indices)].map(n => ({ cue: n, text: cues[n].text, startMs: cues[n].startMs, endMs: cues[n].endMs }));
@@ -104,9 +111,12 @@ export function combineDiscoveryWindows({ sourceId, runId, durationMs, cues, win
       // Window boundaries are transport details, not evidence of a new sale.
       // A continuous confirmed lecture keeps its identity even if the model
       // changes a key/name/specification in the next batch. Keep observations.
-      const boundary = w > 0 && ranges.findLast(old => old.scopeStatus === 'confirmed' && old.windowIndices.at(-1) === w - 1
+      const boundary = w > 0 && ranges.findLast(old => old.windowIndices.at(-1) === w - 1
         && continuous(old.lastCue, windows[w - 1].coreLast + 1)
         && result.ranges.some(next => next.key === item.key && next.kind === 'lecture' && next.scopeStatus === 'confirmed'
+          && (old.scopeStatus === 'confirmed' || (previous?.id === old.productId && previous.key === item.key && norm(previous.name) === norm(item.name)
+            && text(item.variant) && norm(previous.variant) === norm(item.variant) && old.lastCue === windows[w - 1].coreLast
+            && next.firstCue === window.coreFirst && continuesColourDemo(old, next)))
           && next.firstCue <= window.coreFirst && next.lastCue >= window.coreFirst && continuous(old.lastCue, next.firstCue)
           && !cues.slice(Math.min(old.lastCue, next.firstCue), Math.max(old.lastCue, next.firstCue) + 1).some(cue => switchProduct.test(cue.text))
           && ![...unassigned, ...result.ranges.filter(other => other !== next)].some(other => other.kind !== 'lecture' && !chatTransition(other) && other.firstCue <= Math.max(old.lastCue, next.firstCue) && other.lastCue >= Math.min(old.lastCue, next.firstCue))
@@ -278,7 +288,7 @@ export function combineDiscoveryWindows({ sourceId, runId, durationMs, cues, win
     const prev = merged.findLast(old => {
       if (old.productId !== range.productId) return false;
       if (cues.slice(Math.min(old.lastCue, range.firstCue), Math.max(old.lastCue, range.firstCue) + 1).some(cue => switchProduct.test(cue.text))) return false;
-      const adjacent = old.windowIndices.at(-1) + 1 === range.windowIndices[0] && old.scopeStatus === 'confirmed' && range.scopeStatus === 'confirmed'
+      const adjacent = old.windowIndices.at(-1) + 1 === range.windowIndices[0] && (old.scopeStatus === 'confirmed' && range.scopeStatus === 'confirmed' || continuesColourDemo(old, range))
         && !switchProduct.test(`${cues[old.lastCue].text} ${cues[range.firstCue].text}`);
       const sameWindow = old.windowIndices.at(-1) === range.windowIndices[0]
         && old.scopeStatus !== 'uncertain' && range.scopeStatus !== 'uncertain'

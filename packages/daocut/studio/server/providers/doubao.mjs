@@ -59,20 +59,29 @@ export default {
     const bytes = Buffer.from(await ctx.read(src));
     if (!bytes.length || bytes.length >= 100_000_000) throw new Error('Doubao requires audio smaller than 100 MB. No audio was uploaded.');
     const requestId = typeof args.requestId === 'string' && /^[a-f0-9-]{36}$/i.test(args.requestId) ? args.requestId : randomUUID();
-    let response;
-    try {
-      response = await fetch(serviceUrl('DOUBAO', ENDPOINT), {
+    const send = () => fetch(serviceUrl('DOUBAO', ENDPOINT), {
         method: 'POST', redirect: 'error', signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(180_000)]),
         headers: { 'Content-Type': 'application/json', 'X-Api-Key': ctx.key, 'X-Api-Resource-Id': MODEL, 'X-Api-Request-Id': requestId, 'X-Api-Sequence': '-1' },
         body: JSON.stringify({ user: { uid: 'daocut-local' }, audio: { data: bytes.toString('base64') }, request: { model_name: 'bigmodel', enable_itn: true, enable_punc: true, enable_ddc: false, show_utterances: true } }),
       });
-    } catch { throw new Error(`Doubao was interrupted or timed out and may have charged. Check the console before retrying. Request id: ${requestId}. Not retried.`); }
+    let response;
+    for (let attempt = 0; ; attempt++) {
+      try { response = await send(); break; }
+      catch (cause) {
+        const failure = /** @type {{ cause?: { code?: string }, name?: string } | null} */ (cause);
+        const code = failure?.cause?.code ?? '';
+        const beforeConnection = ['EAI_AGAIN', 'ENOTFOUND', 'ECONNREFUSED', 'UND_ERR_CONNECT_TIMEOUT'].includes(code);
+        if (attempt === 0 && beforeConnection && !ctx.signal.aborted) continue;
+        const diagnostic = beforeConnection ? '连接服务失败（' + code + '）' : ctx.signal.aborted ? '客户端中止请求' : failure?.name === 'TimeoutError' ? '等待服务响应超时' : '网络请求中断' + (code === 'ECONNRESET' ? '（连接被重置）' : '');
+        throw Object.assign(new Error(`Doubao was interrupted or timed out and may have charged. Check the console before retrying. Request id: ${requestId}. Not retried.`), { diagnostic });
+      }
+    }
     const status = response.headers.get('X-Api-Status-Code');
     let body;
     if (response.ok || ctx.onResponse) {
       try { body = await response.json(); }
       catch {
-        if (response.ok) throw new Error(`Doubao response could not be read and may have charged. Check the console before retrying. Request id: ${requestId}. Not retried.`);
+        if (response.ok) throw Object.assign(new Error(`Doubao response could not be read and may have charged. Check the console before retrying. Request id: ${requestId}. Not retried.`), { diagnostic: "服务回包未能完整读取" });
         // A non-JSON HTTP error still preserves the existing safe HTTP/balance error below.
       }
     }
@@ -83,10 +92,11 @@ export default {
         body: archivedBody(body, [ctx.key, bytes.toString('base64')]) });
     }
     if (!response.ok) {
-      if (response.status === 402) throw noBalance(NAME);
-      throw new Error(`Doubao HTTP ${response.status}. Use a Volcengine Speech API key with flash recognition access (not an Ark chat key), and check the balance. Request id: ${requestId}. Not retried.`);
+      if (response.status === 402) throw Object.assign(noBalance(NAME), { diagnostic: '服务返回 HTTP 402（余额或计费问题）' });
+      throw Object.assign(new Error(`Doubao HTTP ${response.status}. Use a Volcengine Speech API key with flash recognition access (not an Ark chat key), and check the balance. Request id: ${requestId}. Not retried.`), { diagnostic: "服务返回 HTTP " + response.status });
     }
-    const result = doubaoResult(body, status);
+    let result;
+    try { result = doubaoResult(body, status); } catch (error) { throw Object.assign(/** @type {Error} */ (error), { diagnostic: status === "20000000" ? "服务回包缺少有效转写或时间戳" : "服务未返回成功状态" + (/^\d{8}$/.test(status ?? "") ? "（" + status + "）" : "") }); }
     return { files: [], index: [{ src, ...result, transcribed: true }],
       receipt: { provider: 'doubao', model: MODEL, src, text: result.text, words: result.words.length, requestId }, cost: billedBy(NAME) };
   },

@@ -9,7 +9,7 @@ import { startStudio } from './server.mjs';
 
 const artifactRoot = resolve(process.env.DAOCUT_TRANSCRIPTION_TEST_ROOT || resolve(import.meta.dirname, '../../../../.tmp/transcription-entry'));
 
-async function fixture(initial, run, { hasInterval = true, planError = false, multipleProducts = false, needsReview = false, analysisRunning = false } = {}) {
+async function fixture(initial, run, { hasInterval = true, emptyProducts = false, planError = false, sharedRetry = false, multipleProducts = false, needsReview = false, analysisRunning = false } = {}) {
   await mkdir(artifactRoot, { recursive: true });
   const scratch = await mkdtemp(join(artifactRoot, 'case-'));
   const names = ['DAOCUT_STUDIO_HOME', 'DAOCUT_LIBRARY', 'DAOCUT_TRASH_DIR', 'DAOCUT_NO_UPDATE_CHECK', 'TEMP', 'TMP'];
@@ -32,6 +32,7 @@ async function fixture(initial, run, { hasInterval = true, planError = false, mu
     await mkdir(join(project.path, 'assets'), { recursive: true });
     execFileSync('ffmpeg', ['-nostdin', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=blue:size=96x160:rate=10:duration=12', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-y', join(project.path, source.assetPath)], { windowsHide: true });
     const analysis = { version: 1, sources: [source], products: [{ id: 'p', name: '全新测试视频', sourceIds: ['s'] }], intervals: hasInterval ? [{ id: 'i', sourceId: 's', productId: 'p', startMs: 0, endMs: 12000 }] : [], candidates: [] };
+    if (emptyProducts) analysis.products = [];
     if (multipleProducts) {
       analysis.products.push({ id: 'p2', name: '第二个商品', sourceIds: ['s'] });
       analysis.intervals[0].endMs = 6000;
@@ -51,7 +52,7 @@ async function fixture(initial, run, { hasInterval = true, planError = false, mu
     await page.route('**/product-workflow/status**', route => route.fulfill({ json: { source, transcription: transcription(), discovery: { status: needsReview || discoveryReady ? 'complete' : 'idle' }, ready: hasInterval, discoveryReady, needsReview, busy: status === 'running' || analysisRunning } }));
     await page.route('**/product-workflow/plan**', route => {
       calls.plans.push(Object.fromEntries(new URL(route.request().url()).searchParams));
-      return route.fulfill(planError ? { status: 503, json: { error: '模拟服务暂时不可用' } } : { json: { id: 'mock-confirmation', prepare: calls.plans.at(-1).prepare === 'true', action: calls.plans.at(-1).action, sourceId: 's', source, enabled: true, cached: false, requestCount: 1, reusedRequests: 0, service: { name: '模拟服务', model: 'mock', endpoint: 'local://mock' }, cost: { uncertain: false, basis: '仅模拟' } } });
+      return route.fulfill(planError ? { status: 503, json: { error: '模拟服务暂时不可用' } } : { json: { id: 'mock-confirmation', ...(sharedRetry ? { retryRequired: true, retry: calls.plans.at(-1).retry === 'true', shared: { mode: 'retry-required' } } : {}), prepare: calls.plans.at(-1).prepare === 'true', action: calls.plans.at(-1).action, sourceId: 's', source, enabled: true, cached: false, requestCount: 1, reusedRequests: 0, service: { name: '模拟服务', model: 'mock', endpoint: 'local://mock' }, cost: { uncertain: false, basis: '仅模拟' } } });
     });
     await page.route('**/product-workflow/execute', route => { calls.executions.push(route.request().postDataJSON()); status = 'complete'; discoveryReady = calls.executions.at(-1).plan.action === 'discovery'; return route.fulfill({ json: { ok: true } }); });
     await page.route('**/product-discovery**', route => route.fulfill({ json: needsReview ? { status: 'complete', enabled: true, proposal: { runId: 'review', products: analysis.products, intervals: analysis.intervals, unassigned: [], issues: [] } } : { status: 'idle', enabled: true } }));
@@ -107,6 +108,14 @@ for (const hasInterval of [true, false]) test(`new source has a direct transcrip
     await page.getByRole('dialog').waitFor({ state: 'hidden' });
     assert.deepEqual(calls.executions.map(call => call.plan.action), ['transcription', 'analysis']);
     assert.ok(calls.plans.every(plan => plan.action !== 'discovery'));
+  } else {
+    await page.getByRole('button', { name: '分析整条视频', exact: true }).click();
+    const analyze = page.getByRole('dialog', { name: '确认分析', exact: true });
+    await analyze.getByRole('button', { name: '确认分析', exact: true }).click();
+    await analyze.waitFor({ state: 'hidden' });
+    assert.deepEqual(calls.executions.map(call => call.plan.action), ['transcription', 'analysis']);
+    assert.equal(calls.plans.at(-1).productId, 'p');
+    assert.ok(calls.plans.at(-1).intervalId);
   }
 }, { hasInterval }));
 
@@ -195,3 +204,32 @@ test('analysis running does not relabel completed product discovery as splitting
   assert.equal(await analyzing.isEnabled(), false);
   assert.equal(calls.executions.length, 0);
 }, { analysisRunning: true }));
+
+test('transcribed source with no product can open and confirm a full-video analysis', { timeout: 60000 }, () => fixture('complete', async ({ page, calls }) => {
+  await page.getByRole('button', { name: '分析整条视频', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: '确认分析', exact: true });
+  await dialog.getByRole('button', { name: '取消', exact: true }).click();
+  await dialog.waitFor({ state: 'hidden' });
+  assert.equal(calls.executions.length, 0);
+  await page.getByRole('button', { name: /^分析 00:00/ }).click();
+  await dialog.getByRole('button', { name: '确认分析', exact: true }).click();
+  await dialog.waitFor({ state: 'hidden' });
+  assert.deepEqual(calls.executions.map(call => call.plan.action), ['analysis']);
+}, { hasInterval: false, emptyProducts: true }));
+
+test('idle local transcript can explicitly retry a failed shared transcription', () => fixture('idle', async ({ page, calls }) => {
+  await page.getByRole('button', { name: '转写 assets/synthetic.mp4', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: '确认转写', exact: true });
+  const review = dialog.getByRole('checkbox');
+  await review.waitFor();
+  const confirm = dialog.getByRole('button', { name: '确认转写', exact: true });
+  assert.equal(await confirm.isDisabled(), true);
+  assert.deepEqual(calls.plans.map(plan => plan.retry), ['false', 'true']);
+  assert.equal(calls.executions.length, 0);
+  await review.check();
+  await confirm.click();
+  await dialog.waitFor({ state: 'hidden' });
+  assert.equal(calls.executions.length, 1);
+  assert.equal(calls.executions[0].plan.retry, true);
+  assert.equal(calls.executions[0].retryAcknowledged, true);
+}, { sharedRetry: true }));

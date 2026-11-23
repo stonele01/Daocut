@@ -257,7 +257,12 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
     const prepare = request.prepare === true || request.prepare === 'true';
     if (prepare && action === 'analysis') throw new HttpError(400, '转写拆品不包含商品话术分析');
     const nextStage = prepare && action === 'transcription' ? { service: cleanService(publicServices.text), contractIdentity: hash(await discovery.sharedContract()) } : undefined;
-    const sourceInput = await fingerprint(root, source);
+    let sourceInput;
+    try { sourceInput = await fingerprint(root, source); }
+    catch (error) {
+      if (action !== 'transcription') throw error;
+      throw new HttpError(409, '无法读取原视频。请检查工程中的原片能否播放、共享盘是否已连接，然后刷新。');
+    }
     let cached = false, totalRequests = 0, reusedRequests = 0, transcriptSegments = 0, retryRequired = false, inputIdentity, generation, scope, audioSegments, windows, visual, error, localReviewRequired = false;
     if (action === 'transcription') {
       const live = await liveAnalysis.view(root, sourceId);
@@ -267,7 +272,7 @@ export function createProductWorkflow({ liveAnalysis, discovery, sharedAnalysis,
       localReviewRequired = live.transcription.code === 'ASR_BOUNDARY_REVIEW';
       const binding = !cached && await bindingFor(root, source);
       if (binding) error = '检测到待关联的同源字幕，请先核对来源后复用；未发送音频';
-      if (localReviewRequired) error = live.transcription.error;
+      if (localReviewRequired || live.transcription.code === 'ASR_READ_BLOCKED') error = live.transcription.error;
       audioSegments = planAudioSegments(source.durationMs, audioPolicy);
       totalRequests = audioSegments.length;
       reusedRequests = cached ? totalRequests : 0;

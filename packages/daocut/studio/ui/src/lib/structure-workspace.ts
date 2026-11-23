@@ -35,7 +35,7 @@ export function needsStructureGeneration(state: StructurePlansState | null): boo
 export function isSavedStructurePlanUsable(state: StructurePlansState | null, planId: string): boolean {
   if (!state?.plans.some(plan => plan.id === planId)) return false;
   if (state.status === 'complete') return true;
-  return ['ai-structure-plans-v4', 'ai-structure-plans-v5', 'ai-structure-plans-v6', 'ai-structure-plans-v7', 'ai-structure-plans-v8'].includes(state.version ?? '')
+  return ['ai-structure-plans-v4', 'ai-structure-plans-v5', 'ai-structure-plans-v6', 'ai-structure-plans-v7', 'ai-structure-plans-v8', 'ai-structure-plans-v9'].includes(state.version ?? '')
     && ['running', 'busy', 'failed', 'publish-pending'].includes(state.status)
     && !!state.usablePlanIds?.includes(planId);
 }

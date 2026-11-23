@@ -31,7 +31,7 @@ test('audio segment cache resumes only explicit failed request and preserves com
     return row(id, id === 'audio-2' ? 1600 : 200);
   };
   await assert.rejects(transcribeProductSource(root, source, { ...options, runProvider }), /may have begun/);
-  await assert.rejects(readProductTranscript(root, source), /may have been submitted/);
+  await assert.rejects(readProductTranscript(root, source), { code: 'ASR_SUBMISSION_UNCERTAIN', message: /已保存 1\/2 段.*1 段提交状态不确定.*剩余 1 段/ });
   await assert.rejects(transcribeProductSource(root, source, { ...options, runProvider }), /may have been submitted/);
   assert.deepEqual(calls, ['audio-1', 'audio-2']);
   fail = false;
@@ -93,7 +93,7 @@ test('short source changed while the provider was running is never accepted as a
     await writeFile(join(root, source.assetPath), 'source changed while submitted');
     return row('stale');
   } }), /Source changed/);
-  await assert.rejects(readProductTranscript(root, source), /may have been submitted/);
+  await assert.rejects(readProductTranscript(root, source), { code: 'ASR_SUBMISSION_UNCERTAIN' });
 });
 
 test('concurrent segmented requests deduplicate while invalid local times never become complete', async t => {
@@ -105,7 +105,7 @@ test('concurrent segmented requests deduplicate while invalid local times never 
   assert.equal((await readdir(join(root, 'assets'))).length, 1);
   await writeFile(join(root, source.assetPath), 'changed');
   await assert.rejects(transcribeProductSource(root, source, { ...options, runProvider: async () => ({ index: [{ ...row('bad').index[0], cues: [{ text: 'bad', startMs: 200, endMs: 9999 }] }] }) }), /sentence-level/);
-  await assert.rejects(readProductTranscript(root, source), /may have been submitted/);
+  await assert.rejects(readProductTranscript(root, source), { code: 'ASR_SUBMISSION_UNCERTAIN' });
 });
 
 test('VTT binding rejects wrong duration, invalid times and changed transcript instead of silent reuse', async t => {
@@ -132,5 +132,21 @@ test('word timestamps outside a short video cannot be accepted despite valid sen
     const result = row('bad word'); result.index[0].words[0].end = 100;
     return result;
   } }), /invalid timestamps/);
-  await assert.rejects(readProductTranscript(root, source), /may have been submitted/);
+  await assert.rejects(readProductTranscript(root, source), { code: 'ASR_SUBMISSION_UNCERTAIN' });
+});
+
+test('segment success on disk resumes next segment without a second upload', async t => {
+  const { root, source } = await fixture(t);
+  const uploads = [];
+  const runProvider = async (_verb, args, ctx) => {
+    const id = (await ctx.read()).toString();
+    uploads.push(id);
+    if (id === 'audio-2') return row(id, 1600);
+    await ctx.onResponse({ provider: 'doubao', model: 'volc.bigasr.auc_turbo', requestId: args.requestId, httpStatus: 200, serviceStatus: '20000000',
+      body: { result: { text: id, utterances: [{ text: id, start_time: 200, end_time: 800, words: [{ text: id, start_time: 200, end_time: 800 }] }] } } });
+    throw Error('interrupted after saving valid response');
+  };
+  const result = await transcribeProductSource(root, source, { ...options, runProvider });
+  assert.equal(result.cues.length, 2);
+  assert.deepEqual(uploads, ['audio-1', 'audio-2']);
 });

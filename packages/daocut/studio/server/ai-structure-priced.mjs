@@ -6,6 +6,11 @@ import { AI_STRUCTURE_VARIANTS_VERSION, validateAiStructureVariants, getAiVarian
 
 export const AI_STRUCTURE_PRICED_VERSION = 'ai-structure-plans-v8';
 export const AI_STRUCTURE_PRICED_PROMPT = (await readFile(new URL('./prompts/03-compose-structure-v8.txt', import.meta.url), 'utf8')).replace(/\r\n/g, '\n').trim();
+export const FLEXIBLE_VERSION = 'ai-structure-plans-v9';
+export const FLEXIBLE_PROMPT = (await readFile(new URL('./prompts/03-compose-structure-v9.txt', import.meta.url), 'utf8')).replace(/\r\n/g, '\n').trim();
+export function flexibleInput(input) {
+  return { ...input, engineInput: { ...input.engineInput, flexibleClosing: true } };
+}
 export const MAX_OPENING_VARIANTS = 3;
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const invalid = message => { throw Object.assign(Error(message), { code: 'AI_STRUCTURE_INVALID_RESPONSE' }); };
@@ -14,26 +19,42 @@ const isCurrent = item => item?.review?.price?.kind === 'current' && item.review
 
 export function inspectAiPricedInput(engineInput) {
   const base = inspectAiRequiredInput(engineInput);
-  return { ...base, version: AI_STRUCTURE_PRICED_VERSION,
-    inputHash: hash([AI_STRUCTURE_PRICED_VERSION, base.inputHash, engineInput.cues, engineInput.cueIndices]) };
+  const version = engineInput.flexibleClosing ? FLEXIBLE_VERSION : AI_STRUCTURE_PRICED_VERSION;
+  return { ...base, version,
+    inputHash: hash([version, base.inputHash, engineInput.cues, engineInput.cueIndices]) };
 }
 
 export function createAiPricedRequest(input, options = {}) {
   const body = JSON.parse(createAiRequiredRequest(input, options).input);
   const candidates = new Map(input.engineInput.candidates.map(item => [item.id, item]));
   body.rules = { ...body.rules, maxVariantsPerOpening: MAX_OPENING_VARIANTS, priceContextRequired: true };
-  body.units = body.units.map(unit => ({ ...unit, cueRange: candidates.get(unit.id).cueRange }));
+  if (input.engineInput.flexibleClosing) Object.assign(body.rules, { requiredRoles: ['intro', 'core'], currentPriceRequired: false, purchaseLast: body.units.some(unit => unit.roles.includes('purchase')), closingPriority: [['purchase'], ['offer', 'currentPrice'], ['core']] });
+  body.units = body.units.map(unit => {
+    const candidate = candidates.get(unit.id);
+    const auditTaggedPrice = input.engineInput.flexibleClosing && candidate.tags?.includes('价格机制') && !unit.roles.includes('price');
+    return { ...unit, ...(auditTaggedPrice ? { roles: [...unit.roles, 'price'] } : {}), cueRange: candidate.cueRange };
+  });
   // Price changes and their conditions may be outside an isolated candidate.
   // Supply the whole selected lecture, with original cue IDs, before variable targets.
   const { units, rules, ...variable } = body;
   const transcript = input.engineInput.cues.map((cue, index) => [input.engineInput.cueIndices?.[index] ?? index, cue.text]);
-  const request = { system: AI_STRUCTURE_PRICED_PROMPT, input: JSON.stringify({ rules, units, transcript, ...variable }) };
+  if (input.engineInput.flexibleClosing) {
+    const indexByCue = new Map(transcript.map(([id], index) => [id, index]));
+    for (const unit of units) {
+      const [first, last] = unit.cueRange;
+      const start = indexByCue.get(first), end = indexByCue.get(last);
+      if (start === undefined || end === undefined || end - start !== last - first) continue;
+      const original = transcript.slice(start, end + 1).map(([, text]) => text).join('');
+      if (original === unit.text) delete unit.text;
+    }
+  }
+  const request = { system: input.engineInput.flexibleClosing ? FLEXIBLE_PROMPT : AI_STRUCTURE_PRICED_PROMPT, input: JSON.stringify({ rules, units, transcript, ...variable }) };
   if (Buffer.byteLength(request.system + request.input, 'utf8') > 128000) throw Object.assign(Error('完整话术及报价上下文超过本轮输入预算，未截断素材或发送请求'), { code: 'AI_STRUCTURE_INPUT_TOO_LARGE' });
   return request;
 }
 
 function checkedPrices(input, prices, inspected) {
-  const priceItems = inspected.reviewItems.filter(item => !item.issues.length && item.review.roles.includes('price'));
+  const priceItems = inspected.reviewItems.filter(item => !item.issues.length && (item.review.roles.includes('price') || (input.engineInput.flexibleClosing && item.tags?.includes('价格机制'))));
   const byId = new Map(priceItems.map(item => [item.candidateId, item]));
   const indices = input.engineInput.cueIndices ?? input.engineInput.cues.map((_, index) => index);
   const decisions = new Map(), unconfirmed = new Set(), issues = [];
@@ -44,7 +65,8 @@ function checkedPrices(input, prices, inspected) {
       || !['current', 'reference', 'future', 'superseded', 'uncertain'].includes(decision.kind)
       || !Array.isArray(decision.evidence) || !decision.evidence.length
       || decision.evidence.some(index => !Number.isSafeInteger(index) || !indices.includes(index))) invalid('报价核对必须逐项引用本次讲解的真实话术和字幕编号，不得遗漏或重复');
-    if (decision.kind === 'current' && !isCurrent(byId.get(decision.id))) unconfirmed.add(decision.id);
+    if (decision.kind === 'current' && !isCurrent(byId.get(decision.id))
+      && !(input.engineInput.flexibleClosing && !byId.get(decision.id).review.price?.kind)) unconfirmed.add(decision.id);
     const range = input.engineInput.candidates.find(item => item.id === decision.id).cueRange;
     if (!decision.evidence.some(cue => cue >= range[0] && cue <= range[1])) invalid('报价核对必须包含该话术自身的原字幕依据');
     if (decision.kind === 'superseded') {
@@ -85,7 +107,7 @@ function checkedContent(input, sequences, inspected, options = {}) {
   const reviews = new Map(inspected.reviewItems.map(item => [item.candidateId, item]));
   const plans = [], accepted = [], issues = [...checked.issues];
   checked.sequences.forEach((sequence, index) => {
-    if (!sequence.some(id => reviews.get(id)?.review.roles.includes('intro')) || !sequence.some(id => isCurrent(reviews.get(id)))) {
+    if (!sequence.some(id => reviews.get(id)?.review.roles.includes('intro')) || (!input.engineInput.flexibleClosing && !sequence.some(id => isCurrent(reviews.get(id))))) {
       issues.push({ code: 'AI_REQUIRED_CONTENT', openingId: sequence[0], message: '方案缺少产品介绍或实际成交报价；福利、参考价不能替代报价。' }); return;
     }
     plans.push(checked.plans[index]); accepted.push(sequence);
@@ -94,26 +116,36 @@ function checkedContent(input, sequences, inspected, options = {}) {
 }
 
 export function validateAiPricedResponse(input, value, options = {}) {
-  if (!record(value) || value.schema !== AI_STRUCTURE_PRICED_VERSION || !Array.isArray(value.plans)
+  if (!record(value) || value.schema !== (input.engineInput.flexibleClosing ? FLEXIBLE_VERSION : AI_STRUCTURE_PRICED_VERSION) || !Array.isArray(value.plans)
     || Object.keys(value).some(key => !['schema', 'prices', 'plans'].includes(key))) invalid('新版拼结构只返回schema、prices报价核对和plans编号数组');
   const inspected = inspectAiPricedInput(input.engineInput);
   const priceCheck = checkedPrices(input, value.prices, inspected), prices = priceCheck.decisions;
   const checked = checkedContent(input, value.plans, inspected, options);
   const history = getAiVariantsCoverage(input, options.previous ?? [], { openingIds: options.openingIds ?? inspected.openingIds, targetVariants: MAX_OPENING_VARIANTS });
   const plans = [], sequences = [], issues = [...priceCheck.issues, ...checked.issues], counts = new Map(history.perOpening.map(item => [item.openingId, item.distinctCount]));
+  const flexible = input.engineInput.flexibleClosing;
+  const hasCurrent = [...prices.values()].some(price => price.kind === 'current');
+  const eligible = inspected.reviewItems.filter(item => !item.issues.length);
+  const hasPurchase = eligible.some(item => item.review.roles.includes('purchase'));
+  const offerIds = new Set(eligible.filter(item => item.review.roles.includes('offer') && (!prices.has(item.candidateId) || prices.get(item.candidateId).kind === 'current')).map(item => item.candidateId));
   for (const [index, sequence] of checked.sequences.entries()) {
     const reject = (code, message) => issues.push({ code, openingId: sequence[0], message });
     const selected = sequence.filter(id => prices.has(id));
-    if (!selected.some(id => prices.get(id).kind === 'current')) { reject('AI_PRICE_NOT_CURRENT', '方案没有经整段上下文核对的当前成交报价，已改价、参考价及拟改价不能代替。'); continue; }
+    if ((!flexible || hasCurrent || selected.length) && !selected.some(id => prices.get(id).kind === 'current')) { reject('AI_PRICE_NOT_CURRENT', '方案没有经整段上下文核对的当前成交报价，已改价、参考价及拟改价不能代替。'); continue; }
     if (selected.some(id => ['future', 'uncertain'].includes(prices.get(id).kind))) { reject('AI_PRICE_UNRESOLVED', '方案包含尚未确定或尚未生效的报价。'); continue; }
     if (selected.some(id => prices.get(id).kind === 'superseded' && !prices.get(id).replacedBy.some(next => sequence.indexOf(next) > sequence.indexOf(id)))) {
       reject('AI_PRICE_SUPERSEDED', '选用了降价前的报价，却没有在后面完整交代同条件的最终成交价。'); continue;
     }
+    if (flexible && !hasPurchase) {
+      const last = sequence.at(-1), roles = checked.reviews.get(last).review.roles;
+      const validEnd = offerIds.size || hasCurrent ? offerIds.has(last) || prices.get(last)?.kind === 'current' : roles.includes('core');
+      if (!validEnd) { reject('AI_CLOSING_FALLBACK', '缺少催单时请用已确认福利或成交报价收尾，两者均无时用完整卖点收尾。'); continue; }
+    }
     const count = counts.get(sequence[0]) ?? 0;
     if (count >= MAX_OPENING_VARIANTS) { reject('AI_OPENING_VARIANT_LIMIT', '同一个开头累计最多保留3条有实质区别的方案。'); continue; }
     counts.set(sequence[0], count + 1);
-    plans.push({ ...checked.plans[index], id: `ai-${hash([AI_STRUCTURE_PRICED_VERSION, checked.plans[index].id, selected.map(id => prices.get(id))])}`,
-      version: AI_STRUCTURE_PRICED_VERSION, inputHash: inspected.inputHash, priceReview: selected.map(id => prices.get(id)) });
+    plans.push({ ...checked.plans[index], id: `ai-${hash([inspected.version, checked.plans[index].id, selected.map(id => prices.get(id))])}`,
+      version: inspected.version, inputHash: inspected.inputHash, priceReview: selected.map(id => prices.get(id)) });
     sequences.push(sequence);
   }
   if (priceCheck.issues.length && !plans.length) invalid('参考价或拟改价被当成现价，且本批没有可独立保留的有效方案；原回复保留，不自动重发');

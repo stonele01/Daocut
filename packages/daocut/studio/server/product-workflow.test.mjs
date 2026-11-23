@@ -323,3 +323,27 @@ test('a failed explicit retry confirmation cannot be replayed after restart in a
   f.workflow = f.make(); await assert.rejects(execute(f, structure, { retryAcknowledged: true }), { status: 409 }); assert.equal(f.counts().text, 5);
 });
 
+
+test('a missing source stops both the transcription plan and a previously confirmed plan', async t => {
+  const f = await fixture(t);
+  const before = await plan(f, 'transcription');
+  await rm(join(f.root, f.source.assetPath));
+  await assert.rejects(plan(f, 'transcription'), /无法读取原视频/);
+  await assert.rejects(execute(f, before), /无法读取原视频/);
+  assert.equal(f.counts().asr, 0);
+});
+
+test('an unreadable saved transcript blocks upload until its file is readable again', async t => {
+  const f = await fixture(t, { diskTranscript: true });
+  const dir = join(f.root, '.film/product-transcripts');
+  await mkdir(dir, { recursive: true });
+  const { createHash } = await import('node:crypto');
+  const file = join(dir, createHash('sha256').update(f.source.id).digest('hex') + '.json');
+  await writeFile(file, '{broken');
+  const blocked = await plan(f, 'transcription', { retry: true });
+  assert.equal(blocked.enabled, false);
+  assert.match(blocked.error, /转写记录/);
+  await assert.rejects(execute(f, blocked, { retryAcknowledged: true }));
+  assert.equal(await readFile(file, 'utf8'), '{broken');
+  assert.equal(f.counts().asr, 0);
+});

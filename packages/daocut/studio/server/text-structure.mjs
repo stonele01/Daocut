@@ -35,13 +35,19 @@ const responseDigest = value => createHash('sha256').update(value).digest('hex')
 const responseInputDigest = ({ system, input }) => responseDigest(JSON.stringify([system, input]));
 const RESPONSE_RECEIPT_VERSION = 'deepseek-text-receipt-v1';
 
+function parseModelJson(text) {
+  const fenced = /^\s*```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n```\s*$/i.exec(text);
+  try { return JSON.parse(fenced ? fenced[1] : text); }
+  catch { throw failure('MODEL_INVALID_JSON', '模型输出 JSON 无效'); }
+}
+
 /** Only a completed, intact reply for these inputs can be recovered offline.
  * The one audited wording cleanup may also recover its unchanged older rules. */
 export function recoverDeepSeekTextResponse(receipt, request) {
   if (receipt?.responseVersion !== RESPONSE_RECEIPT_VERSION || receipt.provider !== 'deepseek' || receipt.status !== 'completed' || receipt.httpStatus !== 200) return undefined;
   const acceptedInputs = [responseInputDigest(request), responseInputDigest({ ...request, system: textStructureCachePrompt(request.system) })];
   if (typeof receipt.rawText !== 'string' || receipt.rawTextSha256 !== responseDigest(receipt.rawText) || !acceptedInputs.includes(receipt.inputSha256)) throw failure('MODEL_INPUT_CHANGED', '保存的文字返回与本次输入不匹配，未重新发送');
-  try { return JSON.parse(receipt.rawText); } catch { throw failure('MODEL_INVALID_JSON', '模型输出 JSON 无效'); }
+  return parseModelJson(receipt.rawText);
 }
 
 export function textResponseIncompleteMessage(receipt) {
@@ -137,7 +143,7 @@ export function createDeepSeekTextClient({ getConfig, getPublicConfig, fetch: fe
           status: ['completed', 'incomplete', 'failed', 'in_progress'].includes(body.status) ? body.status : 'incomplete', usage, incompleteReason, ...policy,
           responseVersion: RESPONSE_RECEIPT_VERSION, inputSha256: responseInputDigest({ system, input }), rawText: text, rawTextSha256: responseDigest(text) });
         if (body.status !== 'completed') throw failure('MODEL_INCOMPLETE', '模型响应未完成或达到输出上限');
-        try { return JSON.parse(text); } catch { throw failure('MODEL_INVALID_JSON', '模型输出 JSON 无效'); }
+        return parseModelJson(text);
       })();
       return await Promise.race([transport, timeout]);
     } finally { clearTimeout(timer); }

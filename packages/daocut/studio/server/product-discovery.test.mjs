@@ -313,3 +313,16 @@ test('UTF-8 budget uses cue boundaries with context and covers every core cue on
   assert.ok(windows.every(w => Buffer.byteLength(JSON.stringify(w.cues), 'utf8') <= 800));
   assert.ok(windows.slice(1).some(w => w.firstCue < w.coreFirst));
 });
+
+test('a continuous colour demonstration survives an uncertain specification at the window edge', () => {
+  for (const switched of [false, true]) {
+    const input = cues.map((cue, i) => ({ ...cue, text: ['长袖自带文胸', '颜色看一遍', '行', switched ? '换下一款，看颜色' : '卖得最好的颜色就是这个', '第二个颜色黑', '十九块九'][i] }));
+    const results = [0, 3].map(first => ({
+      products: [product('p3', '保暖背心', first, { variant: '长袖，自带文胸', identityUncertain: true })],
+      ranges: [{ ...lecture('p3', first, first + 2), scopeStatus: first ? 'confirmed' : 'uncertain' }], issues: []
+    }));
+    const out = combineDiscoveryWindows({ sourceId: 's', runId: 'r', durationMs: 6000, cues: input, windows: [window(0, 2), window(3, 5)], results });
+    assert.equal(out.intervals.length, switched ? 2 : 1);
+    assert.equal(out.intervals[0].scopeStatus, 'uncertain');
+  }
+});

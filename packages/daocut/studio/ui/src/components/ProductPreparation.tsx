@@ -9,10 +9,10 @@ import { ProductSharedVersions } from './ProductSharedVersions';
 const button = 'rounded border border-[var(--border)] px-2 py-1 text-[11px] transition duration-150 hover:bg-[var(--bg-hover)] active:scale-95 disabled:opacity-40';
 
 /** Transcription stops after saving text; product discovery is a separate explicit action. */
-export function ProductPreparation({ projectId, source, onReady, refreshKey = 0, reviewRequest = 0, onLocate, primaryAction = true }: {
+export function ProductPreparation({ wholeVideoAction, projectId, source, onReady, refreshKey = 0, reviewRequest = 0, onLocate, primaryAction = true }: {
   projectId: string; source: ProductAnalysis['sources'][number]; onReady: () => Promise<void>; refreshKey?: number | string; reviewRequest?: number;
   onLocate: (sourceId: string, ms: number, candidateId?: string, play?: boolean) => void;
-  primaryAction?: boolean;
+  primaryAction?: boolean; wholeVideoAction?: (sourceId: string) => React.ReactNode;
 }) {
   const [state, setState] = React.useState<ProductWorkflowStatus | null>(null);
   const [error, setError] = React.useState('');
@@ -63,6 +63,7 @@ export function ProductPreparation({ projectId, source, onReady, refreshKey = 0,
     finally { setPublishing(false); }
   };
   const hasTranscript = state?.transcription.status === 'complete';
+  const readBlocked = state?.transcription.code === 'ASR_READ_BLOCKED';
   const boundaryReview = state?.transcription.boundaryReview || state?.transcription.code === 'ASR_BOUNDARY_REVIEW';
   return <section aria-label="素材准备" className="mt-2 space-y-2">
     {!state && !error && <p>正在读取素材状态…</p>}
@@ -80,12 +81,14 @@ export function ProductPreparation({ projectId, source, onReady, refreshKey = 0,
         </>}
       </details>}
       {published && <p role="status">{published}</p>}
-      {!reviewBlocked && <p role="status">{state.discoveryReady && hasTranscript ? '商品段已准备好' : state.needsReview ? '拆品结果已生成，请在下面核对并应用' : state.transcription.status === 'running' ? '正在转写' : state.discovery.status === 'running' ? '正在拆商品' : boundaryReview ? '转写分段已保存，边界待核对' : hasTranscript ? '转写已就绪' : '尚需转写'}</p>}
+      {!reviewBlocked && <p role="status">{state.discoveryReady && hasTranscript ? '商品段已准备好' : state.needsReview ? '拆品结果已生成，请在下面核对并应用' : state.transcription.status === 'running' ? '正在转写' : state.discovery.status === 'running' ? '正在拆商品' : boundaryReview ? '转写分段已保存，边界待核对' : hasTranscript ? '转写已就绪' : readBlocked ? '等待读取原片或字幕' : state.transcription.retryBlocked ? '待核查上次转写' : '尚需转写'}</p>}
       {state.transcription.status === 'running' && state.transcription.progress && <p role="status">{state.transcription.progress.phase === 'extracting' ? '正在准备音频' : '正在识别音频'} · 第 {state.transcription.progress.currentSegment}/{state.transcription.progress.totalSegments} 段 · 已完成 {state.transcription.progress.completedSegments} 段</p>}
-      {primaryAction && !state.discoveryReady && !state.needsReview && !busy && !boundaryReview && !publishPending && !reviewBlocked && <p className="text-[var(--text-muted)]">{hasTranscript ? '转写已完成，可分析已选范围；需要按商品分段时再拆品。' : '先将整条视频转成文字，完成后再选择分析或拆品。'}</p>}
+      {primaryAction && !state.discoveryReady && !state.needsReview && !busy && !readBlocked && !boundaryReview && !publishPending && !reviewBlocked && <p className="text-[var(--text-muted)]">{hasTranscript ? '转写已完成，可分析已选范围；需要按商品分段时再拆品。' : '先将整条视频转成文字，完成后再选择分析或拆品。'}</p>}
       {(state.transcription.error || state.discovery.error) && <p className="text-[var(--warn)]">{state.transcription.error || state.discovery.error}</p>}
       {boundaryReview && <p>已完成分段保留，请在下面核对字幕接缝，无需再次上传音频。</p>}
-      {state.binding ? <details open className="space-y-1"><summary>核对已有字幕来源</summary><p className="break-all">{state.binding.assetPath}</p><p>原片时长 {sourceTime(state.binding.durationMs)} · {state.binding.cueCount} 条字幕</p><p>字幕覆盖：{state.binding.coverage.map(([a, b]) => `${sourceTime(a)}–${sourceTime(b)}`).join('、')}</p><button type="button" className={button} disabled={binding} onClick={() => { setBinding(true); void api.bindProductTranscript(projectId, source.id, state.binding!.kind, state.binding!.identity).then(() => setTick(n => n + 1), reason => setError(String(reason.message ?? reason))).finally(() => setBinding(false)); }}>确认这些字幕属于此原片</button></details> : primaryAction && (!state.discoveryReady || !hasTranscript) && !state.needsReview && !busy && !boundaryReview && !publishPending && !recovery && !reviewBlocked && <button type="button" className={button} disabled={!!confirm} onClick={() => setConfirm({ sourceId: source.id, action: hasTranscript ? 'discovery' : 'transcription', ...(hasTranscript ? { prepare: true } : {}), retry: state.shared?.mode === 'retry-required' || (hasTranscript ? state.discovery.status === 'failed' : state.transcription.status === 'failed') })}>{hasTranscript ? '继续拆品' : state.transcription.status === 'failed' ? '重试转写' : '转写'}</button>}
+      {readBlocked && !busy && <button type="button" className={button} onClick={() => setTick(n => n + 1)}>重新检查原片和字幕</button>}
+      {primaryAction && hasTranscript && !busy && !state.needsReview && wholeVideoAction?.(source.id)}
+      {state.binding ? <details open className="space-y-1"><summary>核对已有字幕来源</summary><p className="break-all">{state.binding.assetPath}</p><p>原片时长 {sourceTime(state.binding.durationMs)} · {state.binding.cueCount} 条字幕</p><p>字幕覆盖：{state.binding.coverage.map(([a, b]) => `${sourceTime(a)}–${sourceTime(b)}`).join('、')}</p><button type="button" className={button} disabled={binding} onClick={() => { setBinding(true); void api.bindProductTranscript(projectId, source.id, state.binding!.kind, state.binding!.identity).then(() => setTick(n => n + 1), reason => setError(String(reason.message ?? reason))).finally(() => setBinding(false)); }}>确认这些字幕属于此原片</button></details> : primaryAction && (!readBlocked || state.shared?.mode === 'reuse') && (!state.discoveryReady || !hasTranscript) && !state.needsReview && !busy && !boundaryReview && !publishPending && !recovery && !reviewBlocked && <button type="button" className={button} disabled={!!confirm} onClick={() => setConfirm({ sourceId: source.id, action: hasTranscript ? 'discovery' : 'transcription', ...(hasTranscript ? { prepare: true } : {}), retry: state.shared?.mode === 'retry-required' || (hasTranscript ? state.discovery.status === 'failed' : state.transcription.status === 'failed') })}>{hasTranscript ? '继续拆品' : state.transcription.status === 'failed' ? '重试转写' : '转写'}</button>}
     </>}
     <ExistingAnalysisSharing key={`existing:${projectId}:${source.id}`} projectId={projectId} sourceId={source.id} sourcePath={source.assetPath} durationMs={source.durationMs} refreshKey={`${refreshKey}:${tick}`} onLocate={onLocate} onChanged={async () => { setTick(n => n + 1); await onReadyRef.current(); }} />
     <TranscriptSeamReview key={`${projectId}:${source.id}`} projectId={projectId} sourceId={source.id} refreshKey={`${refreshKey}:${tick}:${state?.transcription.status ?? ''}`} openRequest={reviewRequest} onLocate={onLocate} onSaved={async () => { setTick(n => n + 1); await onReadyRef.current(); }} />

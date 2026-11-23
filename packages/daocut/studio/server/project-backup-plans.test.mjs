@@ -17,7 +17,7 @@ import { readProjectFilm, editProjectFilm } from './film.mjs';
 import { sourceSubtitles, writeSourceSubtitles } from './subtitle-edits.mjs';
 import { readSubtitleStyle, writeSubtitleStyle } from './captions.mjs';
 
-test('backup restores both AI rule versions, legacy plans and edited drafts without regenerating after two relocations', async t => {
+test('backup restores current and historical AI rule versions, legacy plans and edited drafts without regenerating after two relocations', async t => {
   const base = resolve('.tmp/backup-plans-tests'); await mkdir(base, { recursive: true });
   const dir = await mkdtemp(join(base, 'case-')), root = join(dir, 'original');
   if (!process.env.DAOCUT_BACKUP_ACCEPTANCE) t.after(() => rm(dir, { recursive: true, force: true }));
@@ -44,7 +44,7 @@ test('backup restores both AI rule versions, legacy plans and edited drafts with
   const client = async ({ input }) => {
     calls++;
     const body = JSON.parse(input);
-    if (body.units) return { schema: 'ai-structure-plans-v8', plans: [body.units.map(u => u.id)], prices: [{ id: body.units[0].id, kind: 'current', evidence: [0] }] };
+    if (body.units) return { schema: 'ai-structure-plans-v9', plans: [body.units.map(u => u.id)], prices: [{ id: body.units[0].id, kind: 'current', evidence: [0] }] };
     return { schema: 'complete-speech-v1', candidates: rows.map(([, tags], n) => ({ firstCue: n, lastCue: n, tags,
       subject: { kind: 'self', evidence: [n] }, ...(n === 0 ? { price: { kind: 'current', evidence: [0] }, opening: { group: '饭盒介绍', followup: '说明保温卖点' } } : {}) })), issues: [] };
   };
@@ -61,10 +61,15 @@ test('backup restores both AI rule versions, legacy plans and edited drafts with
   await mkdir(join(root, '.film/ai-structure-plans'));
   await writeFile(join(root, '.film/ai-structure-plans', `${key}.json`), JSON.stringify({ version, key, sourceId: 's', rounds: [{ status: 'complete', request: oldRequest, response, result }] }));
   const plans = createAiStructurePlans({ readInput, modelIdentity, modelClient: client });
-  const versions = ['ai-structure-plans-v7', 'ai-structure-plans-v8'], saved = [];
+  const versions = ['ai-structure-plans-v7', 'ai-structure-plans-v8', 'ai-structure-plans-v9'], saved = [];
   for (const rulesVersion of versions) {
     const req = { ...scope, rulesVersion }, ready = await plans.status(root, req);
-    if (rulesVersion !== version) { await plans.generate(root, { ...req, confirmed: true, confirmationId: ready.confirmation?.id }); await plans.wait(); }
+    if (rulesVersion === 'ai-structure-plans-v8') {
+      const request = createAiStructureRequest(material, { version: rulesVersion });
+      const response = { schema: rulesVersion, plans: [material.engineInput.candidates.map(u => u.id)], prices: [{ id: material.engineInput.candidates[0].id, kind: 'current', evidence: [0] }] };
+      const result = validateAiStructureResponse(material, response, { expectedVersion: rulesVersion });
+      await writeFile(join(root, '.film/ai-structure-plans', ready.taskKey + '.json'), JSON.stringify({ version: rulesVersion, key: ready.taskKey, sourceId: 's', rounds: [{ status: 'complete', request, response, result }] }));
+    } else if (rulesVersion !== version) { await plans.generate(root, { ...req, confirmed: true, confirmationId: ready.confirmation?.id }); await plans.wait(); }
     const state = await plans.status(root, req); assert.equal(state.plans.length, 1, JSON.stringify(state)); saved.push(state);
   }
   const legacy = createStructurePlans({ readInput });

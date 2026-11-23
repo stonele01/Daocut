@@ -37,7 +37,7 @@ export function ProductWorkflowConfirmation({ projectId, request, onDone, onClos
     const readPlan = async () => {
       try {
         let value = await api.productWorkflowPlan(projectId, request);
-        if (active && request.action === 'discovery' && value.shared?.mode === 'retry-required' && !value.retry && !value.rerun) {
+        if (active && value.retryRequired && !value.error && value.shared?.mode !== 'busy' && value.shared?.mode !== 'local-review' && !value.retry && !value.rerun) {
           value = await api.productWorkflowPlan(projectId, { ...request, retry: true });
         }
         if (!active) return;
